@@ -1,0 +1,40 @@
+# Third-party reference sources — see reference/README.md (GPL, never shipped)
+/reference/*
+!/reference/README.md
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Node / frontend
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+.eslintcache
+
+# Rust / Tauri
+target/
+**/*.rs.bk
+src-tauri/target/
+src-tauri/gen/
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+
+# Logs & env
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.env
+.env.*
+!.env.example
+
+# Claude Design working files
+claude-design-relay/.thumbnail
