@@ -27,7 +27,11 @@ pub mod local;
 pub mod mock;
 pub mod model;
 pub mod protocol;
+pub mod secrets;
+pub mod session;
 pub mod settings;
+pub mod sftp;
+pub mod trust;
 pub mod wire;
 
 pub use coordinator::{Coordinator, EngineEnvelope, EngineSnapshot, Subscription};
@@ -37,4 +41,6 @@ pub use hub::EngineHub;
 pub use interact::{Interact, Prompt, PromptBroker, PromptReply};
 pub use model::{ServerConfig, SessionId};
 pub use protocol::{Protocol, TransferLane, TransferReq};
+pub use session::{SessionHandle, TransferOrder};
+pub use trust::{TrustDecision, TrustStore};
 pub use wire::{Bytes, Order, Seq};

@@ -297,7 +297,7 @@ impl Protocol for MockBackend {
         &mut self,
         cfg: &ServerConfig,
         secrets: &dyn SecretSource,
-        interact: &dyn Interact,
+        interact: std::sync::Arc<dyn Interact>,
     ) -> Result<ServerInfo> {
         self.latency().await;
 

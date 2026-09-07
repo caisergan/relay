@@ -101,11 +101,15 @@ pub struct BackendCapabilities {
 
 #[async_trait]
 pub trait Protocol: Send {
+    /// `interact` is an `Arc` and `secrets` a borrow, deliberately. Secrets are read
+    /// within this call; the prompt handle is not. SFTP's host-key check happens inside
+    /// russh's handshake handler, which russh moves into its own task, so the backend
+    /// needs shared ownership of the thing that can ask a question.
     async fn connect(
         &mut self,
         cfg: &ServerConfig,
         secrets: &dyn SecretSource,
-        interact: &dyn Interact,
+        interact: Arc<dyn Interact>,
     ) -> Result<ServerInfo>;
 
     fn capabilities(&self) -> BackendCapabilities;

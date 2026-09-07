@@ -115,7 +115,7 @@ impl DemoEngine {
 
             let connected = {
                 let mut backend = backend.lock().await;
-                backend.connect(&cfg, &NoSecrets, prompts.as_ref()).await
+                backend.connect(&cfg, &NoSecrets, prompts.clone()).await
             };
 
             match connected {

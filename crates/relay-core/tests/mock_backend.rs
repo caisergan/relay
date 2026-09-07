@@ -3,6 +3,7 @@
 //! not block browsing, and cancellation that leaves nothing behind.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use relay_core::error::EngineError;
@@ -58,7 +59,7 @@ fn req(job: Uuid, remote: &str, local: PathBuf, cancel: CancellationToken) -> Tr
 async fn connected(fs: MockFs, opts: MockOptions) -> MockBackend {
     let mut backend = MockBackend::with_options(fs, Uuid::new_v4(), opts);
     backend
-        .connect(&server(), &NoSecrets, &AlwaysAccept)
+        .connect(&server(), &NoSecrets, Arc::new(AlwaysAccept))
         .await
         .expect("mock connect");
     backend
@@ -317,7 +318,7 @@ async fn declining_the_host_key_fails_the_connect_with_trust_rejected() {
     };
     let mut backend = MockBackend::with_options(MockFs::seeded(), Uuid::new_v4(), opts);
     let err = backend
-        .connect(&server(), &NoSecrets, &AlwaysDeny)
+        .connect(&server(), &NoSecrets, Arc::new(AlwaysDeny))
         .await
         .unwrap_err();
 

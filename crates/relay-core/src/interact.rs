@@ -135,6 +135,16 @@ pub enum ResolveError {
 #[async_trait]
 pub trait Interact: Send + Sync {
     async fn ask(&self, session: SessionId, prompt: Prompt) -> PromptReply;
+
+    /// Ask using an id the caller already knows.
+    ///
+    /// A transfer publishes `JobState::AwaitingPrompt { prompt }` *before* it has an
+    /// answer, so the drawer can say what a stalled job is waiting for. That needs the
+    /// id up front, which [`Interact::ask`] cannot give. Implementations that do not
+    /// track ids may ignore it; the broker does not.
+    async fn ask_with_id(&self, _id: PromptId, session: SessionId, prompt: Prompt) -> PromptReply {
+        self.ask(session, prompt).await
+    }
 }
 
 struct Pending {
@@ -220,17 +230,15 @@ impl PromptBroker {
     }
 }
 
-#[async_trait]
-impl Interact for PromptBroker {
-    async fn ask(&self, session: SessionId, prompt: Prompt) -> PromptReply {
+impl PromptBroker {
+    async fn open(&self, id: PromptId, session: SessionId, prompt: Prompt) -> PromptReply {
         let (tx, rx) = oneshot::channel();
         let request = PromptRequest {
-            id: Uuid::new_v4(),
+            id,
             session,
             prompt,
             opened_at: Utc::now(),
         };
-        let id = request.id;
         {
             let mut guard = self.pending.lock().expect("prompt broker poisoned");
             guard.insert(
@@ -267,5 +275,16 @@ impl Interact for PromptBroker {
                 PromptReply::Deny
             }
         }
+    }
+}
+
+#[async_trait]
+impl Interact for PromptBroker {
+    async fn ask(&self, session: SessionId, prompt: Prompt) -> PromptReply {
+        self.open(Uuid::new_v4(), session, prompt).await
+    }
+
+    async fn ask_with_id(&self, id: PromptId, session: SessionId, prompt: Prompt) -> PromptReply {
+        self.open(id, session, prompt).await
     }
 }
