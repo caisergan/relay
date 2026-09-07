@@ -36,11 +36,11 @@ use crate::model::{
     SessionState,
 };
 use crate::protocol::{
-    CheckpointSink, ProgressSink, Protocol, SecretSource, TransferLane, TransferReq,
+    CheckpointSink, ProgressSink, Protocol, SecretSource, TransferLane, TransferReq, Transferred,
 };
 use crate::queue::ResumeRecord;
 use crate::resume;
-use crate::scheduler::{Report, RunRequest, Scheduler};
+use crate::scheduler::{Report, Reporter, RunRequest, Scheduler};
 use crate::wire::{Bytes, Seq};
 
 /// Keepalive interval. Doubles as the latency probe behind the session header's dot.
@@ -1165,18 +1165,111 @@ async fn run_transfer(task: TransferTask) {
         keep_partial,
     };
 
-    let outcome = match run.direction {
-        Direction::Down => lane.download(req).await,
-        Direction::Up => lane.upload(req).await,
+    let moved = match run.direction {
+        Direction::Down => lane.download(&req).await,
+        Direction::Up => lane.upload(&req).await,
     };
-    // Unconditionally: after a cancellation the lane's protocol state is uncertain, so
-    // it is discarded rather than handed back to anything.
-    lane.close().await;
+    let moved = match moved {
+        Ok(moved) => moved,
+        Err(err) => {
+            // After a cancellation the lane's protocol state is uncertain, so it is
+            // discarded rather than reused.
+            lane.close().await;
+            report.send(finished(job, Err(err))).await;
+            let _ = done.send(Internal::LaneFinished(job)).await;
+            return;
+        }
+    };
 
-    report
-        .send(finished(job, outcome.map(|out| Bytes(out.final_size))))
-        .await;
+    // The bytes are in this job's temporary file and the destination is still
+    // untouched. Everything below happens in that gap, which is the only place where
+    // finding a problem still costs nothing.
+    let outcome = publish(Publishing {
+        job,
+        run: &run,
+        req: &req,
+        moved,
+        resumed: offset.get() > 0,
+        lane: lane.as_mut(),
+        report: &report,
+    })
+    .await;
+
+    lane.close().await;
+    report.send(finished(job, outcome)).await;
     let _ = done.send(Internal::LaneFinished(job)).await;
+}
+
+struct Publishing<'a> {
+    job: JobId,
+    run: &'a RunRequest,
+    req: &'a TransferReq,
+    moved: Transferred,
+    /// Only a resumed transfer is a splice of two attempts, and only a splice needs
+    /// the source it was spliced from to have held still.
+    resumed: bool,
+    lane: &'a mut dyn TransferLane,
+    report: &'a Reporter,
+}
+
+/// Check what arrived, then publish it.
+///
+/// The order is the whole point. A resumed transfer took its first bytes from one
+/// reading of the source and its last from another, and if the source moved in between
+/// the result is a file that never existed — the right length, the right name, and
+/// wrong. Noticing that after the rename is noticing it too late: the destination the
+/// user had is already gone.
+async fn publish(ctx: Publishing<'_>) -> Result<Bytes> {
+    let Publishing {
+        job,
+        run,
+        req,
+        moved,
+        resumed,
+        lane,
+        report,
+    } = ctx;
+
+    if resumed {
+        report.send(Report::Verifying { job }).await;
+        if let Some(record) = &run.resume
+            && let Err(reason) = resume::source_unchanged(
+                &record.source,
+                moved.source_now.as_ref(),
+                Bytes(moved.final_size),
+            )
+        {
+            lane.discard(&moved.temporary_path).await;
+            return Err(EngineError::SourceChanged {
+                path: format!("{}: {reason}", record.source.path),
+            });
+        }
+    }
+
+    // A destination that is not the length the source says it is has nothing to do
+    // with resuming — a truncated write or a short read produces it too — so this is
+    // checked for every transfer, not only for spliced ones.
+    if moved.final_size != moved.bytes + req.offset {
+        lane.discard(&moved.temporary_path).await;
+        return Err(EngineError::IntegrityMismatch {
+            expected: format!("{} bytes", moved.final_size),
+            actual: format!("{} bytes", moved.bytes + req.offset),
+        });
+    }
+
+    // The intent, recorded before the rename it describes. A crash in the window
+    // between them leaves a destination that may already be correct, and a record that
+    // says so is the difference between reconciling it and transferring it again.
+    report
+        .finalising(Report::Finalising {
+            job,
+            digest: moved.digest.clone(),
+        })
+        .await;
+
+    lane.finalise(req, &moved)
+        .await
+        .map(|outcome| Bytes(outcome.final_size))
 }
 
 fn finished(job: JobId, result: Result<Bytes>) -> Report {

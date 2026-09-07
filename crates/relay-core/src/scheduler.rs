@@ -41,7 +41,8 @@ use crate::interact::{ConflictAction, PromptBroker, PromptReply};
 use crate::job::{JobKind, JobSnapshot, JobState, PauseReason, QueueOp, QueueStats};
 use crate::model::{Direction, JobId, PromptId, ServerId, SessionId};
 use crate::queue::{
-    BatchId, Job, JobEvent, JobSpec, ORDER_STRIDE, ResumeRecord, advance, between, position,
+    BatchId, Finalization, Job, JobEvent, JobSpec, ORDER_STRIDE, ResumeRecord, advance, between,
+    position,
 };
 use crate::store::QueueStore;
 use crate::wire::{Bytes, Order};
@@ -151,6 +152,19 @@ pub enum Report {
         offset: Bytes,
         digest: String,
     },
+    /// The bytes are all there and are being checked before the destination is
+    /// replaced. Only a resumed transfer reaches this: it is a splice of two attempts,
+    /// and the source has to have held still between them.
+    Verifying {
+        job: JobId,
+    },
+    /// About to publish, with the digest of the whole content. Recorded *before* the
+    /// rename, so a crash in the window between them leaves something that says what
+    /// was being attempted rather than nothing at all.
+    Finalising {
+        job: JobId,
+        digest: String,
+    },
     /// A folder job finished walking, and this many children were queued under it.
     /// Zero means an empty folder, which is finished rather than waiting.
     Scanned {
@@ -223,6 +237,23 @@ impl Reporter {
                 digest,
             },
         });
+    }
+
+    /// Report the intent to finalise, and wait for it to be on disk.
+    ///
+    /// Like [`Self::started`], this one blocks its transfer, and for the same kind of
+    /// reason: the value of recording an intent is entirely in it being recorded
+    /// before the thing it describes happens.
+    pub async fn finalising(&self, report: Report) {
+        let (ack, wait) = oneshot::channel();
+        let msg = Msg::Started {
+            from: self.run,
+            report,
+            ack,
+        };
+        if self.tx.send(msg).await.is_ok() {
+            let _ = wait.await;
+        }
     }
 
     /// Report a start and wait for the ownership record to be on disk.
@@ -858,6 +889,29 @@ impl Inner {
                 // completion is decided here as well as on every child's finish.
                 self.refresh_folder(job).await;
             }
+            Report::Verifying { job } => {
+                self.apply(job, JobEvent::Verify).await;
+            }
+            Report::Finalising { job, digest } => {
+                let Some(record) = self.jobs.get(&job).and_then(|job| job.resume.clone()) else {
+                    return;
+                };
+                let intent = ResumeRecord {
+                    final_sha256: Some(digest),
+                    finalization: Finalization::Intended,
+                    ..record
+                };
+                match self.store.checkpoint(job, intent.clone()).await {
+                    Ok(()) => {
+                        if let Some(job) = self.jobs.get_mut(&job) {
+                            job.resume = Some(intent);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(%job, %err, "the finalisation intent was not recorded");
+                    }
+                }
+            }
             Report::Progress { job, transferred } => {
                 let speed = self
                     .rates
@@ -892,6 +946,15 @@ impl Inner {
                             },
                         )
                         .await;
+                        // The rename happened. Recovery reads this to tell a job that
+                        // crashed *before* publishing from one that crashed after: the
+                        // first has to transfer again, the second has a correct
+                        // destination already and must not be overwritten.
+                        if let Some(record) =
+                            self.jobs.get_mut(&job).and_then(|j| j.resume.as_mut())
+                        {
+                            record.finalization = Finalization::Renamed;
+                        }
                         Some(JobEvent::Complete)
                     }
                     // A cancelled transfer is usually the *acknowledgement* of a stop

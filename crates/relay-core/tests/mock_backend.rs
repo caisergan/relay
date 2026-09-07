@@ -9,7 +9,7 @@ use std::time::Duration;
 use relay_core::error::EngineError;
 use relay_core::interact::{Interact, Prompt, PromptReply};
 use relay_core::mock::{MockBackend, MockFs, MockOptions, NoSecrets};
-use relay_core::model::{AuthMethod, Proto, ServerConfig, SessionId};
+use relay_core::model::{AuthMethod, Direction, Proto, ServerConfig, SessionId};
 use relay_core::protocol::{CheckpointSink, ProgressSink, Protocol, TransferReq};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -43,6 +43,22 @@ impl Interact for AlwaysAccept {
             _ => PromptReply::Accept { remember: true },
         }
     }
+}
+
+/// Transfer and publish in one go.
+///
+/// The lane splits the two so the engine can verify in between; a test that is not
+/// about that step still wants the file where it belongs at the end.
+async fn transfer(
+    lane: &mut Box<dyn relay_core::protocol::TransferLane>,
+    req: &TransferReq,
+    direction: Direction,
+) -> Result<relay_core::protocol::TransferOutcome, EngineError> {
+    let moved = match direction {
+        Direction::Down => lane.download(req).await?,
+        Direction::Up => lane.upload(req).await?,
+    };
+    lane.finalise(req, &moved).await
 }
 
 fn req(job: Uuid, remote: &str, local: PathBuf, cancel: CancellationToken) -> TransferReq {
@@ -105,15 +121,18 @@ async fn downloads_and_uploads_round_trip_byte_for_byte() {
 
     let local = dir.path().join("app.js");
     let mut lane = backend.open_lane().await.expect("lane");
-    let outcome = lane
-        .download(req(
+    let outcome = transfer(
+        &mut lane,
+        &req(
             Uuid::new_v4(),
             "/var/www/assets/app.js",
             local.clone(),
             CancellationToken::new(),
-        ))
-        .await
-        .expect("download");
+        ),
+        Direction::Down,
+    )
+    .await
+    .expect("download");
 
     assert_eq!(outcome.bytes, 256 * 1024);
     assert_eq!(
@@ -125,12 +144,16 @@ async fn downloads_and_uploads_round_trip_byte_for_byte() {
         "the temporary partial must be gone after finalisation"
     );
 
-    lane.upload(req(
-        Uuid::new_v4(),
-        "/var/www/assets/copy.js",
-        local.clone(),
-        CancellationToken::new(),
-    ))
+    transfer(
+        &mut lane,
+        &req(
+            Uuid::new_v4(),
+            "/var/www/assets/copy.js",
+            local.clone(),
+            CancellationToken::new(),
+        ),
+        Direction::Up,
+    )
     .await
     .expect("upload");
     assert_eq!(
@@ -159,7 +182,7 @@ async fn progress_is_monotonic_and_ends_at_the_full_size() {
     };
 
     let mut lane = backend.open_lane().await.expect("lane");
-    lane.download(TransferReq {
+    lane.download(&TransferReq {
         job: Uuid::new_v4(),
         remote_path: "/var/log/nginx/access.log".into(),
         local_path: dir.path().join("access.log"),
@@ -199,24 +222,22 @@ async fn browsing_continues_while_two_lanes_transfer() {
     let a = dir.path().join("a.log");
     let b = dir.path().join("b.js");
     let t1 = tokio::spawn(async move {
-        first
-            .download(req(
-                Uuid::new_v4(),
-                "/var/log/nginx/access.log",
-                a,
-                CancellationToken::new(),
-            ))
-            .await
+        let request = req(
+            Uuid::new_v4(),
+            "/var/log/nginx/access.log",
+            a,
+            CancellationToken::new(),
+        );
+        transfer(&mut first, &request, Direction::Down).await
     });
     let t2 = tokio::spawn(async move {
-        second
-            .download(req(
-                Uuid::new_v4(),
-                "/var/www/assets/app.js",
-                b,
-                CancellationToken::new(),
-            ))
-            .await
+        let request = req(
+            Uuid::new_v4(),
+            "/var/www/assets/app.js",
+            b,
+            CancellationToken::new(),
+        );
+        transfer(&mut second, &request, Direction::Down).await
     });
 
     // The backend is still ours to browse with while both transfers run.
@@ -250,13 +271,8 @@ async fn cancellation_removes_the_partial_and_never_creates_the_destination() {
         let cancel = cancel.clone();
         let local = local.clone();
         tokio::spawn(async move {
-            lane.download(req(
-                Uuid::new_v4(),
-                "/var/log/nginx/access.log",
-                local,
-                cancel,
-            ))
-            .await
+            let request = req(Uuid::new_v4(), "/var/log/nginx/access.log", local, cancel);
+            transfer(&mut lane, &request, Direction::Down).await
         })
     };
 
@@ -287,7 +303,7 @@ async fn a_resume_offset_is_refused_when_the_partial_does_not_back_it_up() {
     let local = dir.path().join("app.js");
     // No partial file exists at all, yet the record claims 100 KiB were transferred.
     let err = lane
-        .download(TransferReq {
+        .download(&TransferReq {
             job,
             remote_path: "/var/www/assets/app.js".into(),
             local_path: local.clone(),

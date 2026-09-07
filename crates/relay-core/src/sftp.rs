@@ -38,9 +38,12 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::error::{EngineError, Result};
 use crate::interact::{Interact, Prompt, PromptReply};
-use crate::model::{AuthMethod, FileKind, JobId, RemoteEntry, ServerConfig, ServerInfo, SessionId};
+use crate::model::{
+    AuthMethod, FileFacts, FileKind, JobId, RemoteEntry, ServerConfig, ServerInfo, SessionId,
+};
 use crate::protocol::{
     BackendCapabilities, Protocol, SecretSource, TransferLane, TransferOutcome, TransferReq,
+    Transferred,
 };
 use crate::trust::{TrustDecision, TrustStore};
 use crate::wire::Bytes;
@@ -419,6 +422,7 @@ impl Protocol for SftpBackend {
             raw,
             write_chunk: self.write_chunk,
             posix_rename: self.posix_rename,
+            destination_existed: false,
         }))
     }
 
@@ -705,6 +709,10 @@ struct SftpLane {
     raw: RawSftpSession,
     write_chunk: usize,
     posix_rename: bool,
+    /// Whether an upload's destination was already there, settled before the first
+    /// byte moved. `finalise` reads it rather than stat'ing again, because a second
+    /// look could give a different answer than the one the transfer was planned on.
+    destination_existed: bool,
 }
 
 impl SftpLane {
@@ -721,8 +729,8 @@ impl SftpLane {
         )
     }
 
-    /// Replace `to` with `from`, or say why it cannot be done.
-    async fn finalise(&self, from: &str, to: &str, exists: bool) -> Result<()> {
+    /// Replace the remote `to` with the remote `from`, or say why it cannot be done.
+    async fn replace(&self, from: &str, to: &str, exists: bool) -> Result<()> {
         if !exists {
             // Nothing to replace: a plain rename is already atomic here.
             return self
@@ -752,7 +760,7 @@ impl SftpLane {
 
 #[async_trait]
 impl TransferLane for SftpLane {
-    async fn download(&mut self, req: TransferReq) -> Result<TransferOutcome> {
+    async fn download(&mut self, req: &TransferReq) -> Result<Transferred> {
         let opened = self
             .raw
             .open(&req.remote_path, OpenFlags::READ, FileAttributes::default())
@@ -828,7 +836,16 @@ impl TransferLane for SftpLane {
             }
         }
 
+        // The source as it is now, read from the handle the transfer used rather than
+        // by path: a rename underneath us would otherwise be invisible.
+        let source_now = self
+            .raw
+            .fstat(handle.clone())
+            .await
+            .ok()
+            .map(|a| facts_from(&req.remote_path, &a.attrs));
         let _ = self.raw.close(handle).await;
+
         // Durability before visibility: the rename must not publish a name whose
         // contents are still only in the page cache.
         file.flush()
@@ -839,17 +856,16 @@ impl TransferLane for SftpLane {
             .map_err(|e| EngineError::from_io(&partial, &e))?;
         drop(file);
 
-        tokio::fs::rename(&partial, &req.local_path)
-            .await
-            .map_err(|e| EngineError::from_io(&req.local_path, &e))?;
-
-        Ok(TransferOutcome {
+        Ok(Transferred {
+            temporary_path: partial.display().to_string(),
             bytes: written,
             final_size: total.unwrap_or(at),
+            digest: rolling.snapshot(),
+            source_now,
         })
     }
 
-    async fn upload(&mut self, req: TransferReq) -> Result<TransferOutcome> {
+    async fn upload(&mut self, req: &TransferReq) -> Result<Transferred> {
         // Whether the destination exists decides whether finalising is even possible,
         // so it is settled before a single byte moves.
         let exists = match self.raw.stat(&req.remote_path).await {
@@ -943,16 +959,63 @@ impl TransferLane for SftpLane {
         let _ = self.raw.fsync(handle.clone()).await;
         self.raw.close(handle).await.map_err(sftp_error)?;
 
-        if let Err(err) = self.finalise(&temp, &req.remote_path, exists).await {
-            // Leave nothing behind that a person would have to find and delete.
-            let _ = self.raw.remove(&temp).await;
-            return Err(err);
-        }
+        let source_now = local_facts_of(&req.local_path).await;
+        // Whether the destination existed was settled before a byte moved, and the
+        // finalisation needs it. Recorded here so `finalise` does not have to stat
+        // again and get a different answer.
+        self.destination_existed = exists;
 
-        Ok(TransferOutcome {
+        Ok(Transferred {
+            temporary_path: temp,
             bytes: written,
             final_size: total,
+            digest: rolling.snapshot(),
+            source_now,
         })
+    }
+
+    async fn finalise(&mut self, req: &TransferReq, done: &Transferred) -> Result<TransferOutcome> {
+        let outcome = TransferOutcome {
+            bytes: done.bytes,
+            final_size: done.final_size,
+        };
+        if done.temporary_path == req.local_path.display().to_string() {
+            // Nothing to do; the bytes are already where they belong.
+            return Ok(outcome);
+        }
+
+        // Which side the temporary file is on decides how it is published, and that is
+        // decided by which side the destination is on.
+        let local = std::path::Path::new(&done.temporary_path);
+        if local.is_absolute() && tokio::fs::try_exists(local).await.unwrap_or(false) {
+            tokio::fs::rename(local, &req.local_path)
+                .await
+                .map_err(|e| EngineError::from_io(&req.local_path, &e))?;
+            return Ok(outcome);
+        }
+
+        if let Err(err) = self
+            .replace(
+                &done.temporary_path,
+                &req.remote_path,
+                self.destination_existed,
+            )
+            .await
+        {
+            // Leave nothing behind that a person would have to find and delete.
+            let _ = self.raw.remove(&done.temporary_path).await;
+            return Err(err);
+        }
+        Ok(outcome)
+    }
+
+    async fn discard(&mut self, temporary_path: &str) {
+        let local = std::path::Path::new(temporary_path);
+        if local.is_absolute() && tokio::fs::try_exists(local).await.unwrap_or(false) {
+            let _ = tokio::fs::remove_file(local).await;
+            return;
+        }
+        let _ = self.raw.remove(temporary_path).await;
     }
 
     async fn prefix_digest(&mut self, path: &str, len: u64) -> Result<String> {
@@ -1062,7 +1125,7 @@ async fn stop_download(
     mut file: tokio::fs::File,
     partial: &Path,
     keep: bool,
-) -> Result<TransferOutcome> {
+) -> Result<Transferred> {
     let _ = raw.close(handle).await;
     if keep {
         // Durability before anything else looks at it: a checkpoint is only worth
@@ -1082,7 +1145,7 @@ async fn stop_upload(
     handle: String,
     temp: &str,
     keep: bool,
-) -> Result<TransferOutcome> {
+) -> Result<Transferred> {
     if keep {
         let _ = raw.fsync(handle.clone()).await;
     }
@@ -1127,6 +1190,29 @@ fn map_entry(name: String, attrs: &FileAttributes) -> RemoteEntry {
         owner: attrs.user.clone(),
         group: attrs.group.clone(),
     }
+}
+
+/// What a resume compares the source against: the path, its size and its time.
+fn facts_from(path: &str, attrs: &FileAttributes) -> FileFacts {
+    FileFacts {
+        path: path.to_string(),
+        size: Bytes(attrs.size.unwrap_or(0)),
+        modified: attrs
+            .mtime
+            .and_then(|secs| Utc.timestamp_opt(i64::from(secs), 0).single()),
+        digest: None,
+    }
+}
+
+/// The same, for a local file.
+async fn local_facts_of(path: &std::path::Path) -> Option<FileFacts> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    Some(FileFacts {
+        path: path.display().to_string(),
+        size: Bytes(meta.len()),
+        modified: meta.modified().ok().map(DateTime::<Utc>::from),
+        digest: None,
+    })
 }
 
 /// `rwxr-xr-x`, from the low nine bits, with setuid/setgid/sticky folded in the way

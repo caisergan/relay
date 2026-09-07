@@ -19,9 +19,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::error::{EngineError, Result};
 use crate::interact::{Interact, Prompt, PromptReply};
-use crate::model::{FileKind, RemoteEntry, ServerConfig, ServerInfo, SessionId};
+use crate::model::{FileFacts, FileKind, RemoteEntry, ServerConfig, ServerInfo, SessionId};
 use crate::protocol::{
     BackendCapabilities, Protocol, SecretSource, TransferLane, TransferOutcome, TransferReq,
+    Transferred,
 };
 use crate::wire::Bytes;
 
@@ -106,6 +107,16 @@ impl MockFs {
                 Node::Dir(children) => cursor = children,
                 Node::File(_) => return,
             }
+        }
+    }
+
+    /// Delete a file if it is there. For the lane's own temporaries, where a missing
+    /// one means the work was already done.
+    pub fn remove_file(&self, path: &str) {
+        let (parent, name) = split_parent(path);
+        let mut root = self.lock();
+        if let Some(dir) = dir_mut(&mut root, &parent) {
+            dir.remove(&name);
         }
     }
 
@@ -522,12 +533,19 @@ impl MockLane {
     }
 }
 
+/// A local file's facts, for the resume check to compare against.
+async fn local_facts(path: &Path) -> Option<FileFacts> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    Some(FileFacts {
+        path: path.display().to_string(),
+        size: Bytes(meta.len()),
+        modified: meta.modified().ok().map(chrono::DateTime::<Utc>::from),
+        digest: None,
+    })
+}
+
 /// Stop a download: keep the partial for a pause, remove it for a cancel.
-async fn stop(
-    mut file: tokio::fs::File,
-    partial: &Path,
-    keep: bool,
-) -> Result<crate::protocol::TransferOutcome> {
+async fn stop(mut file: tokio::fs::File, partial: &Path, keep: bool) -> Result<Transferred> {
     if keep {
         let _ = file.flush().await;
         let _ = file.sync_all().await;
@@ -542,7 +560,7 @@ async fn stop(
 
 #[async_trait]
 impl TransferLane for MockLane {
-    async fn download(&mut self, req: TransferReq) -> Result<TransferOutcome> {
+    async fn download(&mut self, req: &TransferReq) -> Result<Transferred> {
         if let Some(err) = self.opts.fail_transfer.clone() {
             return Err(err);
         }
@@ -635,17 +653,22 @@ impl TransferLane for MockLane {
             .await
             .map_err(|e| EngineError::from_io(&partial, &e))?;
         drop(file);
-        tokio::fs::rename(&partial, &req.local_path)
-            .await
-            .map_err(|e| EngineError::from_io(&req.local_path, &e))?;
 
-        Ok(TransferOutcome {
+        Ok(Transferred {
+            temporary_path: partial.display().to_string(),
             bytes: written,
             final_size: data.len() as u64,
+            digest: rolling.snapshot(),
+            source_now: self.fs.stat(&req.remote_path).map(|entry| FileFacts {
+                path: req.remote_path.clone(),
+                size: entry.size,
+                modified: entry.modified,
+                digest: None,
+            }),
         })
     }
 
-    async fn upload(&mut self, req: TransferReq) -> Result<TransferOutcome> {
+    async fn upload(&mut self, req: &TransferReq) -> Result<Transferred> {
         if let Some(err) = self.opts.fail_transfer.clone() {
             return Err(err);
         }
@@ -697,11 +720,53 @@ impl TransferLane for MockLane {
         }
 
         let final_size = existing.len() as u64;
-        self.fs.write_file(&req.remote_path, existing);
-        Ok(TransferOutcome {
+        let digest = crate::digest::of(&existing);
+        // Into the job's own temporary path, not the destination: publishing is
+        // `finalise`'s job, and the gap between them is where verification happens.
+        let (parent, name) = split_parent(&req.remote_path);
+        let leaf = crate::protocol::partial_name(&name, req.job);
+        let temporary_path = if parent == "/" {
+            format!("/{leaf}")
+        } else {
+            format!("{parent}/{leaf}")
+        };
+        self.fs.write_file(&temporary_path, existing);
+
+        Ok(Transferred {
+            temporary_path,
             bytes: written,
             final_size,
+            digest,
+            source_now: local_facts(&req.local_path).await,
         })
+    }
+
+    async fn finalise(&mut self, req: &TransferReq, done: &Transferred) -> Result<TransferOutcome> {
+        let outcome = TransferOutcome {
+            bytes: done.bytes,
+            final_size: done.final_size,
+        };
+        let local = Path::new(&done.temporary_path);
+        if tokio::fs::try_exists(local).await.unwrap_or(false) {
+            tokio::fs::rename(local, &req.local_path)
+                .await
+                .map_err(|e| EngineError::from_io(&req.local_path, &e))?;
+            return Ok(outcome);
+        }
+        if let Some(data) = self.fs.read_file(&done.temporary_path) {
+            self.fs.write_file(&req.remote_path, data);
+            self.fs.remove_file(&done.temporary_path);
+        }
+        Ok(outcome)
+    }
+
+    async fn discard(&mut self, temporary_path: &str) {
+        let local = Path::new(temporary_path);
+        if tokio::fs::try_exists(local).await.unwrap_or(false) {
+            let _ = tokio::fs::remove_file(local).await;
+            return;
+        }
+        self.fs.remove_file(temporary_path);
     }
 
     async fn prefix_digest(&mut self, path: &str, len: u64) -> Result<String> {

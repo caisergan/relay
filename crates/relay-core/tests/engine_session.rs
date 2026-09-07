@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use relay_core::engine::{BackendFactory, Engine, TransferItem};
+use relay_core::error::EngineError;
 use relay_core::events::EngineEvent;
 use relay_core::hub::EngineHub;
 use relay_core::interact::{ConflictAction, PromptReply};
@@ -1082,5 +1083,72 @@ async fn a_declined_host_key_does_not_start_a_reconnect_countdown() {
     assert!(
         matches!(state, SessionState::Disconnected { .. }),
         "a decision is final until someone changes it: {state:?}"
+    );
+}
+
+/// The gap between transferring and publishing exists so this can be noticed. A
+/// resumed transfer takes its first bytes from one reading of the source and its last
+/// from another; if the source moved in between, the result is a file that never
+/// existed — and after the rename there is nothing left to protect.
+#[tokio::test]
+async fn a_source_that_changes_during_a_resume_is_caught_before_the_rename() {
+    let h = harness(MockOptions {
+        chunk: 64 * 1024,
+        chunk_delay: Duration::from_millis(20),
+        ..MockOptions::default()
+    })
+    .await;
+    let cfg = server();
+    let server_id = cfg.id;
+    let session = h.engine.open_session(cfg).expect("session opens");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let local = dir.path().join("access.log");
+    let job = enqueue_one(
+        &h.engine,
+        session,
+        server_id,
+        Direction::Down,
+        "/var/log/nginx/access.log",
+        local.clone(),
+    )
+    .await;
+
+    poll_job(&h, job, |state| matches!(state, JobState::Transferring)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    h.engine
+        .queue_control(QueueOp::Pause { job })
+        .await
+        .expect("pause");
+    poll_job(&h, job, |state| matches!(state, JobState::Paused { .. })).await;
+
+    // Resume, then replace the source underneath the running transfer with a file of
+    // a different length. The bytes already read are from the old one.
+    h.engine
+        .queue_control(QueueOp::Resume { job })
+        .await
+        .expect("resume");
+    poll_job(&h, job, |state| matches!(state, JobState::Transferring)).await;
+    h.fs.write_file("/var/log/nginx/access.log", vec![b'!'; 5 * 1024 * 1024]);
+
+    let state = poll_job(&h, job, |state| state.is_terminal()).await;
+    assert!(
+        matches!(
+            state,
+            JobState::Failed {
+                error: EngineError::SourceChanged { .. },
+                ..
+            }
+        ),
+        "the splice was refused: {state:?}"
+    );
+    assert!(
+        !local.exists(),
+        "and the destination was never replaced with it"
+    );
+    assert_eq!(
+        partial_in(dir.path()),
+        None,
+        "the rejected partial is not left behind"
     );
 }

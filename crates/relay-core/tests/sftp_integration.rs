@@ -138,6 +138,22 @@ async fn connect_with(auth: AuthMethod, trust: Arc<TrustStore>) -> Connected {
     Connected { backend, asked }
 }
 
+/// Transfer and publish in one go.
+///
+/// The lane splits the two so the engine can verify in between; a test that is not
+/// about that step still wants the file where it belongs at the end.
+async fn transfer(
+    lane: &mut Box<dyn relay_core::protocol::TransferLane>,
+    req: &TransferReq,
+    direction: Direction,
+) -> Result<relay_core::protocol::TransferOutcome, EngineError> {
+    let moved = match direction {
+        Direction::Down => lane.download(req).await?,
+        Direction::Up => lane.upload(req).await?,
+    };
+    lane.finalise(req, &moved).await
+}
+
 fn req(
     remote_path: &str,
     local: &std::path::Path,
@@ -396,7 +412,9 @@ async fn a_download_lands_byte_for_byte_with_monotonic_progress() {
         CancellationToken::new(),
     );
 
-    let outcome = lane.download(request).await.expect("download");
+    let outcome = transfer(&mut lane, &request, Direction::Down)
+        .await
+        .expect("download");
     lane.close().await;
 
     assert_eq!(outcome.final_size, 1024 * 1024);
@@ -438,7 +456,7 @@ async fn cancelling_a_download_is_bounded_and_removes_only_its_own_partial() {
     let (request, _) = req(&remote("assets/thirty-two-mib.bin"), &local, cancel.clone());
 
     let task = tokio::spawn(async move {
-        let outcome = lane.download(request).await;
+        let outcome = transfer(&mut lane, &request, Direction::Down).await;
         lane.close().await;
         outcome
     });
@@ -497,7 +515,9 @@ async fn an_upload_finalises_atomically_and_can_replace_an_existing_file() {
     // First upload: the destination does not exist.
     let mut lane = c.backend.open_lane().await.expect("lane");
     let (request, progress) = req(&target, &local, CancellationToken::new());
-    let outcome = lane.upload(request).await.expect("upload");
+    let outcome = transfer(&mut lane, &request, Direction::Up)
+        .await
+        .expect("upload");
     lane.close().await;
 
     assert_eq!(outcome.final_size, payload.len() as u64);
@@ -513,7 +533,9 @@ async fn an_upload_finalises_atomically_and_can_replace_an_existing_file() {
 
     let mut lane = c.backend.open_lane().await.expect("lane");
     let (request, _) = req(&target, &local, CancellationToken::new());
-    lane.upload(request).await.expect("replacing upload");
+    transfer(&mut lane, &request, Direction::Up)
+        .await
+        .expect("replacing upload");
     lane.close().await;
 
     assert_eq!(
@@ -549,7 +571,7 @@ async fn two_lanes_transfer_while_the_browse_channel_keeps_listing() {
             CancellationToken::new(),
         );
         lanes.push(tokio::spawn(async move {
-            let outcome = lane.download(request).await;
+            let outcome = transfer(&mut lane, &request, Direction::Down).await;
             lane.close().await;
             outcome
         }));
@@ -615,7 +637,7 @@ async fn a_paused_download_resumes_from_a_verified_checkpoint() {
     };
 
     let mut lane = c.backend.open_lane().await.expect("lane");
-    let outcome = tokio::time::timeout(Duration::from_secs(60), lane.download(request))
+    let outcome = tokio::time::timeout(Duration::from_secs(60), lane.download(&request))
         .await
         .expect("the pause is observed");
     lane.close().await;
@@ -681,7 +703,15 @@ async fn a_paused_download_resumes_from_a_verified_checkpoint() {
         cancel: CancellationToken::new(),
         keep_partial: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
-    let outcome = lane.download(request).await.expect("the resume completes");
+    // The resumed half, then the verification, then the rename — the same three steps
+    // the engine takes, in the same order.
+    let moved = lane.download(&request).await.expect("the resume completes");
+    assert_eq!(
+        moved.digest,
+        sha256(&std::fs::read(host_file("assets/thirty-two-mib.bin")).expect("source")),
+        "the digest accumulated while streaming describes the whole file"
+    );
+    let outcome = lane.finalise(&request, &moved).await.expect("finalise");
     lane.close().await;
 
     assert_eq!(outcome.final_size, 32 * 1024 * 1024);

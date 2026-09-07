@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
 use crate::interact::Interact;
-use crate::model::{JobId, RemoteEntry, ServerConfig, ServerInfo};
+use crate::model::{FileFacts, JobId, RemoteEntry, ServerConfig, ServerInfo};
 
 /// Where a backend gets credentials. Implemented over the OS keychain in phase 1;
 /// the trait keeps `relay-core` testable without touching a real keychain.
@@ -168,6 +168,30 @@ pub struct TransferOutcome {
     pub final_size: u64,
 }
 
+/// Bytes that have arrived but have not been published at the destination.
+///
+/// The gap between transferring and finalising exists so something can happen in it.
+/// A resumed transfer is a splice of two attempts, and the moment to notice that the
+/// source moved underneath the second one is *before* the destination is replaced —
+/// afterwards there is nothing left to protect. The caller checks, then calls
+/// [`TransferLane::finalise`] or [`TransferLane::discard`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transferred {
+    /// Where the bytes are: the job's own temporary file, on whichever side is the
+    /// destination.
+    pub temporary_path: String,
+    /// Bytes written by this attempt, excluding any resumed prefix.
+    pub bytes: u64,
+    /// What the destination will be once published.
+    pub final_size: u64,
+    /// SHA-256 of the whole content, accumulated as it streamed. Free, because the
+    /// bytes went past a hasher on their way to the disk.
+    pub digest: String,
+    /// The source as it was when the transfer finished, for comparing against the
+    /// facts the resume record holds. `None` when it could not be read.
+    pub source_now: Option<FileFacts>,
+}
+
 /// What a backend can promise. The queue reads these instead of assuming SFTP
 /// semantics apply to every protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,8 +245,21 @@ pub trait Protocol: Send {
 /// One in-flight transfer's connection resources, owned by the transfer task.
 #[async_trait]
 pub trait TransferLane: Send {
-    async fn download(&mut self, req: TransferReq) -> Result<TransferOutcome>;
-    async fn upload(&mut self, req: TransferReq) -> Result<TransferOutcome>;
+    /// Move the bytes into a temporary destination. Publishing them is a second step.
+    async fn download(&mut self, req: &TransferReq) -> Result<Transferred>;
+    async fn upload(&mut self, req: &TransferReq) -> Result<Transferred>;
+
+    /// Publish what was transferred at the destination, replacing what is there.
+    ///
+    /// Separate from the transfer so a caller can verify in between, and so the
+    /// intent can be recorded before the rename that a crash could land in the middle
+    /// of. Idempotent as far as the protocol allows: a temporary file that is already
+    /// gone means the rename happened.
+    async fn finalise(&mut self, req: &TransferReq, done: &Transferred) -> Result<TransferOutcome>;
+
+    /// Throw away a temporary destination this job owns, having decided not to publish
+    /// it. Never touches the destination itself.
+    async fn discard(&mut self, temporary_path: &str);
 
     /// SHA-256 of the first `len` bytes of a remote file, for verifying an upload's
     /// partial before continuing it.
