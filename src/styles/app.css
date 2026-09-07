@@ -204,6 +204,15 @@
   background: var(--line-2);
   color: var(--ink);
 }
+/* The rail has no room for an edge marker beside a 30px avatar, so the selection is a
+   ring around the whole target instead. */
+.rail__item--active {
+  background: var(--signal-soft);
+  box-shadow: inset 0 0 0 1.5px var(--signal);
+}
+.rail__item--active:hover {
+  background: var(--signal-soft-hi);
+}
 
 /* ---------------------------------------------------------------- sidebar */
 
@@ -362,6 +371,20 @@
 }
 .srv:hover {
   background: var(--line-2);
+}
+/* The card for the tab you are looking at, in the same language the file rows use for
+   selection: the soft signal wash and an inset marker down the leading edge. */
+.srv--active {
+  background: var(--signal-soft);
+  box-shadow: inset 2px 0 0 var(--signal);
+}
+/* Selected is a state, not a dead end — the card still answers the cursor, because
+   with several tabs onto one server clicking it again does something. */
+.srv--active:hover {
+  background: var(--signal-soft-hi);
+}
+.srv--active .srv__name {
+  color: var(--signal);
 }
 .srv__hit {
   flex: 1;

@@ -481,3 +481,102 @@ describe('the server avatar', () => {
     ANSWERS.servers_list = []
   })
 })
+
+describe('clicking a server card', () => {
+  beforeEach(() => {
+    invoked.mockClear()
+    ANSWERS.servers_list = [savedServer()]
+    useServersStore.setState({ servers: [], loading: false, loaded: false })
+    useSessionsStore.setState({
+      sessions: {},
+      order: [],
+      activeId: null,
+      listings: {},
+      panes: {},
+    })
+    useUiStore.setState({ sidebarCollapsed: false })
+  })
+
+  // The bug: every click called session_open, so one server collected four tabs, each
+  // its own connection.
+  it('goes to the open tab instead of dialling the server again', async () => {
+    const { host } = await mount()
+    invoked.mockClear()
+    act(() => {
+      useSessionsStore.getState().upsert(session)
+      useSessionsStore.getState().activate(null)
+    })
+
+    const card = host.querySelector<HTMLButtonElement>('.srv__hit')
+    act(() => card?.click())
+
+    expect(invoked.mock.calls.some(([command]) => command === 'session_open')).toBe(false)
+    expect(useSessionsStore.getState().activeId).toBe('session-1')
+  })
+
+  it('opens one when the server has no tab yet', async () => {
+    const { host } = await mount()
+    invoked.mockClear()
+
+    const card = host.querySelector<HTMLButtonElement>('.srv__hit')
+    act(() => card?.click())
+
+    expect(invoked.mock.calls.filter(([command]) => command === 'session_open')).toEqual([
+      ['session_open', { serverId: 'server-1' }],
+    ])
+  })
+
+  // The capability the fix would otherwise remove: two windows onto one server.
+  it('still opens a second session on a modifier click', async () => {
+    const { host } = await mount()
+    act(() => {
+      useSessionsStore.getState().upsert(session)
+    })
+    invoked.mockClear()
+
+    const card = host.querySelector<HTMLButtonElement>('.srv__hit')
+    // Braces on purpose: `dispatchEvent` returns a boolean, and returning it from the
+    // callback makes `act` hand back a thenable that nothing awaits.
+    act(() => {
+      card?.dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true }))
+    })
+
+    expect(invoked.mock.calls.filter(([command]) => command === 'session_open')).toEqual([
+      ['session_open', { serverId: 'server-1' }],
+    ])
+  })
+
+  // With more than one window onto a server the card would otherwise be dead on a
+  // repeat click; instead it walks them and wraps.
+  it('steps through several tabs onto the same server', async () => {
+    const { host } = await mount()
+    act(() => {
+      useSessionsStore.getState().upsert(session)
+      useSessionsStore.getState().upsert({ ...session, id: 'session-2' })
+      useSessionsStore.getState().activate('session-1')
+    })
+    invoked.mockClear()
+
+    const card = host.querySelector<HTMLButtonElement>('.srv__hit')
+    act(() => card?.click())
+    expect(useSessionsStore.getState().activeId).toBe('session-2')
+
+    act(() => card?.click())
+    expect(useSessionsStore.getState().activeId).toBe('session-1')
+
+    expect(invoked.mock.calls.some(([command]) => command === 'session_open')).toBe(false)
+  })
+
+  it('marks the card for the tab being shown', async () => {
+    const { host } = await mount()
+
+    expect(host.querySelector('.srv--active')).toBeNull()
+    act(() => {
+      useSessionsStore.getState().upsert(session)
+      useSessionsStore.getState().activate('session-1')
+    })
+
+    expect(host.querySelector('.srv--active')).not.toBeNull()
+    expect(host.querySelector('.srv--active [aria-current="true"]')).not.toBeNull()
+  })
+})

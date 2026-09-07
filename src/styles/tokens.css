@@ -27,6 +27,10 @@
   /* Signal: selection, focus, links, the active transfer direction. */
   --signal: #2456e6;
   --signal-soft: #eaf0fe;
+  /* Hovering something already selected. The design has no selected-server state, so
+     this is ours: a step deeper than `--signal-soft`, enough that a selected card still
+     answers the cursor without competing with the selection itself. */
+  --signal-soft-hi: #dbe6fd;
   /* Transit: in-flight transfers and unsaved state. */
   --transit: #e8a03c;
   --transit-soft: #fbf1de;
@@ -87,6 +91,7 @@
 
   --signal: #5b87f2;
   --signal-soft: #1d2a47;
+  --signal-soft-hi: #26365a;
   --transit: #eba94a;
   --transit-soft: #3a2e19;
   --transit-ink: #f0c583;

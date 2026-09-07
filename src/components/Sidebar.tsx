@@ -15,6 +15,9 @@ export function Sidebar() {
   const servers = useServersStore((s) => s.servers)
   const loading = useServersStore((s) => s.loading)
   const sessions = useSessionsStore((s) => s.sessions)
+  const order = useSessionsStore((s) => s.order)
+  const activeId = useSessionsStore((s) => s.activeId)
+  const activate = useSessionsStore((s) => s.activate)
   const toast = useUiStore((s) => s.toast)
   const collapsed = useUiStore((s) => s.sidebarCollapsed)
   const toggleSidebar = useUiStore((s) => s.toggleSidebar)
@@ -43,8 +46,44 @@ export function Sidebar() {
     )
   }, [servers, query])
 
-  const open = (id: string) => {
-    commands.sessionOpen(id).catch((error: unknown) => {
+  /// This server's tabs, in tab order. Sessions are keyed by their own id, so the
+  /// server they belong to is a property rather than the key.
+  const tabsByServer = useMemo(() => {
+    const map = new Map<string, string[]>()
+    for (const id of order) {
+      const serverId = sessions[id]?.serverId
+      if (serverId === undefined) continue
+      map.set(serverId, [...(map.get(serverId) ?? []), id])
+    }
+    return map
+  }, [order, sessions])
+
+  /// The server the visible tab belongs to, so its card can read as selected. Null
+  /// while the connect form is showing, which belongs to no server.
+  const activeServerId = activeId ? (sessions[activeId]?.serverId ?? null) : null
+
+  /** Clicking a server goes to it; it does not dial it again.
+   *
+   * Every click used to call `session_open`, so a server with a tab already open
+   * collected another one — four tabs onto the same host, each its own connection, each
+   * costing a handshake and a keychain lookup.
+   *
+   * With more than one tab onto a server, a repeat click steps to the next of them and
+   * wraps. That makes a second click "show me the other window onto this server"
+   * rather than nothing, and with the usual single tab it is a no-op. Opening a
+   * genuinely new session is still possible, deliberately, with the modifier that
+   * means "new" everywhere else. */
+  const open = (serverId: string, newSession = false) => {
+    const tabs = tabsByServer.get(serverId) ?? []
+    if (!newSession && tabs.length > 0) {
+      const at = activeId ? tabs.indexOf(activeId) : -1
+      const next = tabs[(at + 1) % tabs.length]
+      if (next !== undefined) {
+        activate(next)
+        return
+      }
+    }
+    commands.sessionOpen(serverId).catch((error: unknown) => {
       toast('error', `Could not open the session: ${faultText(error)}`)
     })
   }
@@ -80,8 +119,9 @@ export function Sidebar() {
             {servers.map((server) => (
               <button
                 key={server.id}
-                className="rail__item"
-                onClick={() => open(server.id)}
+                className={`rail__item${activeServerId === server.id ? ' rail__item--active' : ''}`}
+                onClick={(event) => open(server.id, event.metaKey || event.ctrlKey)}
+                aria-current={activeServerId === server.id ? 'true' : undefined}
                 title={`${server.name} — ${server.username}@${server.host}:${server.port}`}
                 aria-label={server.name}
               >
@@ -149,11 +189,15 @@ export function Sidebar() {
                   <span className="sidebar__rule" />
                 </div>
                 {entries.map((server) => (
-                  <div key={server.id} className="srv">
+                  <div
+                    key={server.id}
+                    className={`srv${activeServerId === server.id ? ' srv--active' : ''}`}
+                  >
                     <button
                       className="srv__hit"
-                      onClick={() => open(server.id)}
-                      title={`${server.username}@${server.host}:${server.port}`}
+                      onClick={(event) => open(server.id, event.metaKey || event.ctrlKey)}
+                      aria-current={activeServerId === server.id ? 'true' : undefined}
+                      title={`${server.username}@${server.host}:${server.port}\n⌘-click for a second session`}
                     >
                       <ServerAvatar
                         name={server.name}
