@@ -162,20 +162,17 @@
   border-right: 1px solid var(--line);
   overflow: hidden;
 }
+/* No tinted container: the blue rounded square is part of the artwork itself, so a
+   second one behind it would be a square inside a square. */
 .rail__mark {
-  width: 30px;
-  height: 30px;
   flex: none;
   border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--signal);
-  color: #fff;
-  box-shadow: 0 2px 6px rgb(36 86 230 / 35%);
 }
 .rail__mark:hover {
-  filter: brightness(1.08);
+  filter: brightness(1.12);
 }
 .rail__list {
   flex: 1;
@@ -233,16 +230,6 @@
   align-items: center;
   gap: 8px;
   flex: none;
-}
-.sidebar__mark {
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius);
-  background: var(--signal);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 2px 6px rgb(36 86 230 / 35%);
 }
 .sidebar__wordmark {
   font-family: var(--font-display);

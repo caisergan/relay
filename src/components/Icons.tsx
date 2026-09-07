@@ -335,21 +335,6 @@ export function IconGear(props: IconProps) {
   )
 }
 
-/** The Relay mark: bytes moving both ways.
- *
- * A single right-pointing arrow is the glyph every interface uses for "next", and it
- * described half of what this program does. The design's own mark carries a second,
- * left-pointing arrow at `opacity: 0` — the two-way reading was always the intent. Both
- * are drawn, offset into the pair that means transfer rather than advance. */
-export function IconRelay(props: IconProps) {
-  return (
-    <Svg strokeWidth={2.2} {...props}>
-      <path d="M4 9h12M12.5 5.5 16 9l-3.5 3.5" />
-      <path d="M20 15H8M11.5 11.5 8 15l3.5 3.5" />
-    </Svg>
-  )
-}
-
 /** File-type tint, from the design's `fileIcon` extension map.
  *
  * The design hard-codes hexes here; these are tokens instead, so the tints stay

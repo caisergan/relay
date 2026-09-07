@@ -7,7 +7,8 @@ import { groupServers, useServersStore } from '@/state/serversStore'
 import { useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
 
-import { IconPlus, IconRelay, IconSearch, IconSidebar } from './Icons'
+import { IconPlus, IconSearch, IconSidebar } from './Icons'
+import { RelayMark } from './RelayMark'
 import { ServerAvatar } from './ServerAvatar'
 import { ServerEditor, blankServer } from './ServerEditor'
 
@@ -113,7 +114,7 @@ export function Sidebar() {
             aria-expanded={false}
             onClick={() => toggleSidebar(false)}
           >
-            <IconRelay size={15} />
+            <RelayMark size={30} />
           </button>
           <div className="rail__list">
             {servers.map((server) => (
@@ -153,9 +154,7 @@ export function Sidebar() {
       {
         <nav className="sidebar" aria-label="Servers">
           <div className="sidebar__brand">
-            <span className="sidebar__mark">
-              <IconRelay size={14} />
-            </span>
+            <RelayMark size={22} />
             <span className="sidebar__wordmark">Relay</span>
             <div style={{ flex: 1 }} />
             <button
