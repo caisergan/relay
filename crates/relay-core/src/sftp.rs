@@ -1187,8 +1187,22 @@ fn map_entry(name: String, attrs: &FileAttributes) -> RemoteEntry {
         }),
         perms: attrs.permissions.map(render_permissions),
         mode: attrs.permissions,
-        owner: attrs.user.clone(),
-        group: attrs.group.clone(),
+        // The name if the server sent one, the number otherwise.
+        //
+        // It never sends one in practice: the `user` and `group` name strings arrived
+        // in SFTP v4, and v3 — which is what OpenSSH speaks — carries only numeric
+        // `uid`/`gid`. `russh-sftp` parses a v3 ATTRS block with `user: None` and
+        // `group: None` unconditionally, so reading those fields alone left both of
+        // these permanently empty and the inspector said "not known" for every file on
+        // every server. A bare uid is what `ls -ln` shows and is a real answer.
+        owner: attrs
+            .user
+            .clone()
+            .or_else(|| attrs.uid.map(|id| id.to_string())),
+        group: attrs
+            .group
+            .clone()
+            .or_else(|| attrs.gid.map(|id| id.to_string())),
     }
 }
 
