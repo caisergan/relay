@@ -661,3 +661,167 @@ async fn events_carry_the_session_through_its_whole_life() {
         "the close is announced: {kinds:?}"
     );
 }
+
+/// A recursive download: the folder is a parent, the files inside it are children, and
+/// the parent finishes only when they all do.
+#[tokio::test]
+async fn a_folder_download_queues_its_tree_and_finishes_with_it() {
+    let h = harness(MockOptions::default()).await;
+    let cfg = server();
+    let server_id = cfg.id;
+    let session = h.engine.open_session(cfg).expect("session opens");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let destination = dir.path().join("www");
+    let ids = h
+        .engine
+        .enqueue(
+            Uuid::new_v4(),
+            vec![TransferItem {
+                session,
+                server_id,
+                direction: Direction::Down,
+                remote_path: "/var/www".into(),
+                local_path: destination.clone(),
+                is_dir: true,
+            }],
+        )
+        .await
+        .expect("a folder is accepted");
+    let parent = ids[0];
+
+    let state = poll_job(&h, parent, |state| state.is_terminal()).await;
+    assert!(
+        matches!(state, JobState::Done { skipped: false, .. }),
+        "the folder finished: {state:?}"
+    );
+
+    // Everything under the root arrived, at the right depth.
+    assert_eq!(
+        std::fs::read(destination.join("index.html")).expect("index.html"),
+        h.fs.read_file("/var/www/index.html").expect("source"),
+    );
+    assert_eq!(
+        std::fs::read(destination.join("assets/logo.svg")).expect("logo.svg"),
+        h.fs.read_file("/var/www/assets/logo.svg").expect("source"),
+    );
+    assert!(destination.join("assets/app.js").exists());
+
+    // The parent's progress is the sum of its children's, not a number of its own.
+    let jobs = h.engine.queue().snapshot().await;
+    let children: Vec<_> = jobs.iter().filter(|j| j.parent == Some(parent)).collect();
+    assert_eq!(children.len(), 3, "three files under /var/www");
+    let folder = jobs.iter().find(|j| j.id == parent).expect("the folder");
+    assert_eq!(
+        folder.transferred.get(),
+        children.iter().map(|c| c.transferred.get()).sum::<u64>(),
+    );
+}
+
+/// An empty directory is still part of the folder: it has to exist at the destination,
+/// even though nothing is queued for it.
+#[tokio::test]
+async fn a_folder_download_creates_directories_that_hold_no_files() {
+    let h = harness(MockOptions::default()).await;
+    let cfg = server();
+    let server_id = cfg.id;
+    let session = h.engine.open_session(cfg).expect("session opens");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let destination = dir.path().join("deploy");
+    let parent = h
+        .engine
+        .enqueue(
+            Uuid::new_v4(),
+            vec![TransferItem {
+                session,
+                server_id,
+                direction: Direction::Down,
+                remote_path: "/home/deploy".into(),
+                local_path: destination.clone(),
+                is_dir: true,
+            }],
+        )
+        .await
+        .expect("accepted")[0];
+
+    poll_job(&h, parent, |state| state.is_terminal()).await;
+    assert!(
+        destination.join("releases").is_dir(),
+        "an empty remote directory is still transferred"
+    );
+}
+
+/// Poll one job until a condition holds. The queue's snapshot is asynchronous, so this
+/// cannot go through `until`.
+async fn poll_job(h: &Harness, job: Uuid, done: impl Fn(&JobState) -> bool) -> JobState {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let found = h
+            .engine
+            .queue()
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|j| j.id == job)
+            .map(|j| j.state);
+        match found {
+            Some(state) if done(&state) => return state,
+            _ if tokio::time::Instant::now() > deadline => {
+                panic!("the job never reached the state the test was waiting for")
+            }
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+}
+
+/// The upload direction is a different walk: the tree is read from the local disk and
+/// every directory has to be created on the server before its files arrive.
+#[tokio::test]
+async fn a_folder_upload_creates_the_remote_tree_before_filling_it() {
+    let h = harness(MockOptions::default()).await;
+    let cfg = server();
+    let server_id = cfg.id;
+    let session = h.engine.open_session(cfg).expect("session opens");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("site");
+    std::fs::create_dir_all(source.join("css")).expect("nested source");
+    std::fs::create_dir_all(source.join("empty")).expect("empty source");
+    std::fs::write(source.join("index.html"), b"<h1>hello</h1>").expect("seed");
+    std::fs::write(source.join("css/site.css"), b"body{}").expect("seed");
+
+    let parent = h
+        .engine
+        .enqueue(
+            Uuid::new_v4(),
+            vec![TransferItem {
+                session,
+                server_id,
+                direction: Direction::Up,
+                remote_path: "/var/www/site".into(),
+                local_path: source.clone(),
+                is_dir: true,
+            }],
+        )
+        .await
+        .expect("accepted")[0];
+
+    let state = poll_job(&h, parent, |state| state.is_terminal()).await;
+    assert!(
+        matches!(state, JobState::Done { skipped: false, .. }),
+        "the upload finished: {state:?}"
+    );
+    assert_eq!(
+        h.fs.read_file("/var/www/site/index.html").as_deref(),
+        Some(&b"<h1>hello</h1>"[..]),
+    );
+    assert_eq!(
+        h.fs.read_file("/var/www/site/css/site.css").as_deref(),
+        Some(&b"body{}"[..]),
+        "a nested file needs its directory made first"
+    );
+    assert!(
+        h.fs.exists("/var/www/site/empty"),
+        "an empty directory is created even though nothing is queued for it"
+    );
+}

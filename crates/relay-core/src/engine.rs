@@ -340,18 +340,9 @@ impl Engine {
         // that is waiting for nothing.
         for item in &items {
             self.session(item.session)?;
-            // Until §2.5's walker exists, a folder job would be created, enter
-            // `Scanning`, and stay there: nothing would ever report what is in it.
-            // Refusing is the honest answer, and it lives here rather than in the
-            // interface so no caller can route around it.
-            if item.is_dir {
-                return Err(EngineError::Unsupported {
-                    operation: "recursive folder transfers".into(),
-                });
-            }
         }
-        let specs = items
-            .into_iter()
+        let specs: Vec<JobSpec> = items
+            .iter()
             .map(|item| JobSpec {
                 session: item.session,
                 server_id: item.server_id,
@@ -364,13 +355,39 @@ impl Engine {
                 // Stable within the batch, and the natural name for the thing being
                 // moved: asking for the same file in the same gesture is one job.
                 item: format!("{:?}:{}", item.direction, item.remote_path),
-                remote_path: item.remote_path,
-                local_path: item.local_path,
+                remote_path: item.remote_path.clone(),
+                local_path: item.local_path.clone(),
                 size: None,
                 parent: None,
             })
             .collect();
-        self.queue.enqueue(batch, specs).await
+
+        let ids = self.queue.enqueue(batch, specs).await?;
+
+        // A folder is queued before it is walked, so the drawer shows a row
+        // immediately and the walk has a parent to hang its children on.
+        for (item, id) in items.iter().zip(&ids) {
+            if !item.is_dir {
+                continue;
+            }
+            let Ok(session) = self.session(item.session) else {
+                continue;
+            };
+            let cancel = session.child_token();
+            self.rt.spawn(crate::walk::run(crate::walk::Walk {
+                parent: *id,
+                batch,
+                session,
+                session_id: item.session,
+                server_id: item.server_id,
+                queue: self.queue.clone(),
+                direction: item.direction,
+                remote_root: item.remote_path.clone(),
+                local_root: item.local_path.clone(),
+                cancel,
+            }));
+        }
+        Ok(ids)
     }
 
     /// Pause, resume, retry, cancel, reorder, clear. Every one of them is the

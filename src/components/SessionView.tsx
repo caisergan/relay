@@ -201,20 +201,15 @@ export function SessionView({ sessionId }: Props) {
   /// that were dragged together and nothing else. Dropping ten files used to send ten
   /// separate requests, which left the queue with no way to tell them apart.
   const enqueue = (direction: 'up' | 'down', names: { name: string; isDir: boolean }[]) => {
-    const folders = names.filter((entry) => entry.isDir)
-    if (folders.length > 0) {
-      toast('info', 'Folder transfers arrive with the recursive walker.')
-    }
-    const items: TransferItem[] = names
-      .filter((entry) => !entry.isDir)
-      .map((entry) => ({
-        session: sessionId,
-        serverId: session.serverId,
-        direction,
-        remotePath: joinPath(remotePath, entry.name),
-        localPath: joinPath(pane.localPath, entry.name),
-        isDir: false,
-      }))
+    const items: TransferItem[] = names.map((entry) => ({
+      session: sessionId,
+      serverId: session.serverId,
+      direction,
+      remotePath: joinPath(remotePath, entry.name),
+      localPath: joinPath(pane.localPath, entry.name),
+      // A folder becomes a parent job the engine walks; its files arrive as children.
+      isDir: entry.isDir,
+    }))
     if (items.length === 0) return
     void commands
       .queueEnqueue(crypto.randomUUID(), items)

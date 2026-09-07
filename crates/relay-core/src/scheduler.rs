@@ -285,6 +285,16 @@ impl Scheduler {
             .unwrap_or_default()
     }
 
+    /// One job's state, for a walk checking whether the folder it is enumerating has
+    /// been cancelled out from under it.
+    pub async fn state(&self, job: JobId) -> Option<JobState> {
+        self.snapshot()
+            .await
+            .into_iter()
+            .find(|snapshot| snapshot.id == job)
+            .map(|snapshot| snapshot.state)
+    }
+
     pub fn reporter(&self) -> Reporter {
         Reporter {
             tx: self.tx.clone(),
