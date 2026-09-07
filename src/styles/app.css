@@ -646,3 +646,42 @@
   border-color: var(--danger);
   color: var(--danger);
 }
+
+/* ---------------------------------------------------------------- crash */
+/* The last thing standing between a frontend error and a window with nothing in it. */
+.crash {
+  height: 100vh;
+  width: 100vw;
+  display: grid;
+  place-items: center;
+  background: var(--app-bg);
+  color: var(--ink);
+  padding: 24px;
+}
+.crash__card {
+  max-width: 520px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+}
+.crash__title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  margin: 0 0 8px;
+}
+.crash__body {
+  color: var(--ink-soft);
+  margin: 0 0 16px;
+}
+.crash__detail {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 0 0 16px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}

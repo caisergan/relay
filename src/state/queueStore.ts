@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 
 import type { JobSnapshot, QueueStats } from '@/ipc/gen'
 
@@ -21,9 +22,19 @@ export const useQueueStore = create<QueueState>((set) => ({
   upsert: (job) => set((s) => ({ jobs: { ...s.jobs, [job.id]: job } })),
 }))
 
-/** Jobs in queue order, which is what both the drawer and the gutter render. */
-export function selectOrderedJobs(state: QueueState): JobSnapshot[] {
+/** Jobs in queue order, which is what both the drawer and the gutter render.
+ *
+ * Not exported as a bare selector on purpose. It builds a new array on every call, and
+ * zustand v5 compares snapshots with `Object.is` — v4's implicit shallow comparison is
+ * gone. Passed directly to `useQueueStore` this re-renders forever and React tears the
+ * tree down; `useShallow` compares the elements instead, which is stable because Rust
+ * owns the job objects and only replaces the ones that changed. */
+function selectOrderedJobs(state: QueueState): JobSnapshot[] {
   return Object.values(state.jobs).sort((a, b) => a.order - b.order)
+}
+
+export function useOrderedJobs(): JobSnapshot[] {
+  return useQueueStore(useShallow(selectOrderedJobs))
 }
 
 export { emptyStats }

@@ -1,7 +1,7 @@
 import { commands } from '@/ipc/commands'
 import type { JobSnapshot } from '@/ipc/gen'
 import { formatBytes, formatSpeed } from '@/lib/format'
-import { selectOrderedJobs, useQueueStore } from '@/state/queueStore'
+import { useOrderedJobs } from '@/state/queueStore'
 import { useUiStore, type DrawerTab } from '@/state/uiStore'
 
 const TABS: { id: DrawerTab; label: string }[] = [
@@ -23,7 +23,7 @@ function bucket(job: JobSnapshot): DrawerTab {
 }
 
 export function QueueDrawer() {
-  const jobs = useQueueStore(selectOrderedJobs)
+  const jobs = useOrderedJobs()
   const open = useUiStore((s) => s.drawerOpen)
   const tab = useUiStore((s) => s.drawerTab)
   const setTab = useUiStore((s) => s.setDrawerTab)

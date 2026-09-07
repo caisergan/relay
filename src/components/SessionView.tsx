@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo } from 'react'
 import { commands } from '@/ipc/commands'
 import type { LocalEntry, RemoteEntry } from '@/ipc/gen'
 import { crumbs, joinPath, parentPath } from '@/lib/format'
-import { selectOrderedJobs, useQueueStore } from '@/state/queueStore'
+import { useOrderedJobs } from '@/state/queueStore'
 import { emptyPane, useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
 
@@ -19,7 +19,7 @@ export function SessionView({ sessionId }: Props) {
   const listing = useSessionsStore((s) => s.listings[sessionId])
   const pane = useSessionsStore((s) => s.panes[sessionId] ?? emptyPane)
   const patchPane = useSessionsStore((s) => s.patchPane)
-  const jobs = useQueueStore(selectOrderedJobs)
+  const jobs = useOrderedJobs()
   const toast = useUiStore((s) => s.toast)
 
   const sessionJobs = useMemo(
