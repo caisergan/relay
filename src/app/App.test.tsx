@@ -650,3 +650,64 @@ describe('the pane filter', () => {
     expect(useSessionsStore.getState().panes['session-1']?.remoteFilter).toBe('conf')
   })
 })
+
+describe('the column headers', () => {
+  beforeEach(() => {
+    ANSWERS.servers_list = []
+    useSessionsStore.setState({
+      sessions: {},
+      order: [],
+      activeId: null,
+      listings: {},
+      panes: {},
+    })
+  })
+
+  // Guards the wiring only. The bug this follows was pure CSS — the active class was
+  // always applied, and a rule further down the file overrode its colour — and jsdom
+  // applies no stylesheet, so nothing here could have caught it. Worth saying rather
+  // than leaving the impression the regression is covered.
+  it('moves the sorted marker to whichever column was clicked', async () => {
+    useSessionsStore.getState().upsert(session)
+    // A listing with a row in it: the column header is only drawn when there is
+    // something to sort, so an empty pane has none at all.
+    useSessionsStore.getState().setListing({
+      session: 'session-1',
+      path: '/home/deploy',
+      request: 1,
+      at: '2026-09-07T12:00:00Z',
+      entries: [
+        {
+          name: 'README.md',
+          kind: 'file',
+          targetKind: null,
+          size: 6144,
+          modified: '2026-07-10T14:22:00Z',
+          perms: 'rw-r--r--',
+          mode: null,
+          owner: null,
+          group: null,
+        },
+      ],
+    })
+    const { host } = await mount()
+
+    const headers = () => [...host.querySelectorAll<HTMLElement>('.pane--remote .cols__label')]
+    const [name, size, modified] = headers()
+    expect(name?.className).toContain('cols__label--on')
+
+    act(() => size?.click())
+    const [name2, size2] = headers()
+    expect(size2?.className).toContain('cols__label--on')
+    expect(name2?.className).not.toContain('cols__label--on')
+    expect(size2?.getAttribute('aria-sort')).toBe('ascending')
+
+    // Clicking the same column again reverses rather than deselecting it.
+    act(() => headers()[1]?.click())
+    expect(headers()[1]?.getAttribute('aria-sort')).toBe('descending')
+
+    act(() => modified?.click())
+    expect(headers()[2]?.className).toContain('cols__label--on')
+    expect(headers()[1]?.className).not.toContain('cols__label--on')
+  })
+})

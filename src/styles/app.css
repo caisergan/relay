@@ -598,10 +598,17 @@
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--ink-faint);
-  margin-top: 1px;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
+  /* Room for the connection dot's pulse, which is a `box-shadow` ring spreading 6px
+     beyond an 8px dot. `overflow: hidden` — needed so a long `user@host` truncates —
+     clips at the padding box, and the dot is the first thing in the row, so the left
+     half of every pulse was being cut off square. That flat edge, a few pixels from
+     the avatar, is what read as the dot collapsing into it. The padding gives the ring
+     somewhere to go; the negative margins put the row back where it was. */
+  padding: 6px 0 6px 6px;
+  margin: -5px 0 -6px -6px;
 }
 
 .dot {
@@ -942,12 +949,15 @@
 .cols .cols__label--on {
   color: var(--ink);
 }
+/* Width and alignment only. This rule used to also set `color: inherit`, which ties
+   with `.cols .cols__label--on` on specificity and wins on order — so Name lit up when
+   sorted and Size and Modified never did. The colour these columns need overriding
+   from is `.row__size`'s, and `.cols .cols__label` already outranks that. */
 .cols .cols__label.row__size,
 .cols .cols__label.row__when,
 .cols .cols__label.row__perms {
   flex: none;
   justify-content: flex-end;
-  color: inherit;
 }
 /* The header keeps the column's width but not its row-level type. */
 .cols .cols__label.row__perms {
@@ -1023,6 +1033,12 @@
 .row__name--dir {
   font-weight: 500;
 }
+/* A visible row states its facts at full strength. The design steps size, permissions
+   and date back from the name, but every row it draws is visible, so what reads there
+   as hierarchy reads in a real listing as half the columns being greyed out for no
+   reason the user can see. The contrast that carries meaning is hidden against not
+   hidden, and that is where it is spent now: a dotfile recedes whole — name and
+   metadata together — and everything else is ink. */
 .row__size {
   width: 56px;
   flex: none;
@@ -1030,7 +1046,7 @@
   white-space: nowrap;
   font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--ink-soft);
+  color: var(--ink);
 }
 .row__when {
   width: 84px;
@@ -1040,7 +1056,7 @@
   white-space: nowrap;
   font-family: var(--font-mono);
   font-size: 10.5px;
-  color: var(--ink-faint);
+  color: var(--ink);
 }
 .row__perms {
   width: 72px;
@@ -1049,12 +1065,22 @@
   white-space: nowrap;
   font-family: var(--font-mono);
   font-size: 10px;
+  color: var(--ink);
+}
+/* Hidden rows keep the stepped-back treatment, so the two kinds of row stay apart. */
+.row--hidden .row__size {
+  color: var(--ink-soft);
+}
+.row--hidden .row__when,
+.row--hidden .row__perms {
   color: var(--ink-faint);
 }
 /* The design singles out exactly one mode: a file only its owner can even read. It is
    the one permission string worth noticing in a listing, so it gets the amber the rest
    of the interface uses for "look at this" rather than for "this is broken". */
-.row__perms--private {
+/* Two classes, and last: it has to outrank `.row--hidden .row__perms`, since the file
+   this marks — readable only by its owner — is very often a dotfile. */
+.row__perms.row__perms--private {
   color: var(--transit);
 }
 
