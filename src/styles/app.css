@@ -1678,6 +1678,22 @@
   margin: 0 0 6px;
 }
 
+/* The one thing a toast lets you do about what it just said. Bordered rather than
+   filled: it is an offer, not the point of the message. */
+.toast__action {
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font-size: 11.5px;
+  opacity: 0.85;
+}
+.toast__action:hover {
+  opacity: 1;
+}
+
 /* ---------------------------------------------------------------- settings */
 
 .settings {

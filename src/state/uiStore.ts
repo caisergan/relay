@@ -8,6 +8,10 @@ export interface Toast {
   id: string
   kind: 'info' | 'ok' | 'error'
   text: string
+  /** One thing the toast lets you do about what it just said. A transfer that failed
+   * is worth retrying from where you are told about it, rather than by opening the
+   * drawer and finding the row again. */
+  action?: { label: string; run: () => void }
 }
 
 interface UiState {
@@ -43,7 +47,7 @@ interface UiState {
   setPrompts: (prompts: PromptRequest[]) => void
   openPrompt: (prompt: PromptRequest) => void
   closePrompt: (id: string) => void
-  toast: (kind: Toast['kind'], text: string) => void
+  toast: (kind: Toast['kind'], text: string, action?: Toast['action']) => void
   dismissToast: (id: string) => void
   setConnected: (connected: boolean) => void
   toggleSidebar: (collapsed?: boolean) => void
@@ -88,8 +92,16 @@ export const useUiStore = create<UiState>((set) => ({
       return { prompts: rest }
     }),
 
-  toast: (kind, text) =>
-    set((s) => ({ toasts: [...s.toasts, { id: crypto.randomUUID(), kind, text }] })),
+  // The key is omitted rather than set to `undefined`: `exactOptionalPropertyTypes`
+  // draws a distinction between "absent" and "present and undefined", and this is the
+  // former.
+  toast: (kind, text, action) =>
+    set((s) => ({
+      toasts: [
+        ...s.toasts,
+        { id: crypto.randomUUID(), kind, text, ...(action ? { action } : {}) },
+      ],
+    })),
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   setConnected: (connected) => set({ connected }),
   toggleSidebar: (collapsed) =>

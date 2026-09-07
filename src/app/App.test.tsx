@@ -8,6 +8,8 @@ import { useServersStore } from '@/state/serversStore'
 import { useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
 
+import { Toasts } from '@/components/Toasts'
+
 import { App } from './App'
 
 /** The engine is not running in a unit test, so the commands answer from a table.
@@ -753,5 +755,47 @@ describe('the saved settings', () => {
     useSessionsStore.getState().setShowHiddenDefault(false)
 
     expect(useSessionsStore.getState().panes['session-1']?.localShowHidden).toBe(true)
+  })
+})
+
+/// A toast that says a transfer failed is where someone is looking when they learn it
+/// failed. Making them open the drawer and find the row to press the same button is a
+/// step with no purpose.
+describe('toast actions', () => {
+  beforeEach(() => {
+    useUiStore.setState({ toasts: [] })
+  })
+
+  it('offers a retry on the toast that announces a failure', () => {
+    const run = vi.fn()
+    act(() => {
+      useUiStore.getState().toast('error', 'app.tar: auth', { label: 'Retry', run })
+    })
+
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    act(() => {
+      createRoot(host).render(<Toasts />)
+    })
+
+    const action = host.querySelector<HTMLButtonElement>('.toast__action')
+    expect(action?.textContent).toBe('Retry')
+    act(() => action?.click())
+    expect(run).toHaveBeenCalledOnce()
+    // Acting on a toast dismisses it: leaving it up invites a second press of a
+    // button that has already been pressed.
+    expect(useUiStore.getState().toasts).toHaveLength(0)
+  })
+
+  it('leaves an ordinary toast without one', () => {
+    act(() => {
+      useUiStore.getState().toast('info', 'nothing to do about this')
+    })
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    act(() => {
+      createRoot(host).render(<Toasts />)
+    })
+    expect(host.querySelector('.toast__action')).toBeNull()
   })
 })

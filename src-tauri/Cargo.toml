@@ -27,6 +27,10 @@ tauri = { version = "2.11.5", features = [] }
 # The native "Browse…" file picker in the server editor. A webview file input cannot
 # give us a real path, and the engine needs one to read the key.
 tauri-plugin-dialog = "2.7.3"
+# Revealing a finished transfer in Finder or Explorer. Called from a Rust command
+# rather than granted to the webview: opening a path is a filesystem action, and the
+# engine owns those.
+tauri-plugin-opener = "2.5.2"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 tracing.workspace = true

@@ -25,6 +25,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // The queue database is opened here, so a failure to open it stops the app
             // with a real error rather than starting an app whose queue silently does
@@ -60,6 +61,7 @@ pub fn run() {
             commands::local_roots,
             commands::queue_enqueue,
             commands::queue_control,
+            commands::reveal_in_folder,
             commands::resolve_prompt,
             commands::settings_get,
             commands::settings_set,

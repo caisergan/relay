@@ -2,6 +2,7 @@
  * turns into UI state. */
 
 import { EngineBridge } from '@/ipc/bridge'
+import { commands } from '@/ipc/commands'
 import type { EngineEvent, EngineSnapshot } from '@/ipc/gen'
 import { faultText } from '@/lib/errors'
 
@@ -60,12 +61,29 @@ function applyEvent(event: EngineEvent): void {
       const name = event.job.remotePath.split('/').pop() ?? event.job.remotePath
       if (now.kind !== before) {
         if (now.kind === 'failed') {
-          ui.toast('error', `${name}: ${faultText(now.error)}`)
+          // The retry is offered where the failure is announced. Finding the row in
+          // the drawer to press the same button is a step with no purpose.
+          ui.toast('error', `${name}: ${faultText(now.error)}`, {
+            label: 'Retry',
+            run: () => {
+              commands
+                .queueControl({ kind: 'retry', job: event.job.id })
+                .catch((error: unknown) => ui.toast('error', faultText(error)))
+            },
+          })
         }
         // Folders only, and only when they carried something. One toast for a
         // directory is useful; one per file in it is what a queue drawer is for.
         if (now.kind === 'done' && !now.skipped && event.job.kind === 'folder') {
-          ui.toast('ok', `${name} finished.`)
+          const at = event.job.localPath
+          ui.toast('ok', `${name} finished.`, {
+            label: 'Reveal',
+            run: () => {
+              commands
+                .revealInFolder(at)
+                .catch((error: unknown) => ui.toast('error', faultText(error)))
+            },
+          })
         }
       }
       break

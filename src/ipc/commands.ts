@@ -68,6 +68,10 @@ export const commands = {
     invoke<string[]>('queue_enqueue', { batch, items }),
   queueControl: (op: QueueOp) => invoke<Unit>('queue_control', { op }),
 
+  /** Show a file in Finder or Explorer. The engine opens it; the webview is not
+   *  given a general permission to open paths. */
+  revealInFolder: (path: string) => invoke<Unit>('reveal_in_folder', { path }),
+
   resolvePrompt: (promptId: string, reply: PromptReply) =>
     invoke<Unit>('resolve_prompt', { promptId, reply }),
 

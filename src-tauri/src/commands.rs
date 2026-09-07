@@ -215,6 +215,20 @@ pub async fn queue_control(state: State<'_, AppState>, op: QueueOp) -> Result<()
     state.engine.queue_control(op).await
 }
 
+/// Show a transferred file in the operating system's file manager.
+///
+/// A command rather than a webview permission. Opening a path is a filesystem action,
+/// and the capability file says the engine owns those — granting the webview a general
+/// "open this" permission to serve one button would give away more than the button
+/// needs.
+#[tauri::command]
+pub async fn reveal_in_folder(path: PathBuf) -> Result<()> {
+    tauri_plugin_opener::reveal_item_in_dir(&path).map_err(|err| EngineError::LocalIo {
+        path: path.display().to_string(),
+        message: err.to_string(),
+    })
+}
+
 // ---------------------------------------------------------------- prompts
 
 #[tauri::command]
