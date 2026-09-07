@@ -28,7 +28,7 @@ import {
 import { PaneFault, PaneMessage } from './PaneMessage'
 import { PaneSplitter } from './PaneSplitter'
 import { loadRoots, RootMenu, type Root } from './RootMenu'
-import { avatarFor, tintFor } from './TitleBar'
+import { ServerAvatar } from './ServerAvatar'
 
 interface Props {
   sessionId: string
@@ -448,12 +448,7 @@ function SessionHeader({
         </div>
       )}
       <div className="session__bar">
-        <span
-          className="session__avatar"
-          style={{ background: server?.color ?? tintFor(session.name) }}
-        >
-          {avatarFor(session.name)}
-        </span>
+        <ServerAvatar name={session.name} color={server?.color ?? null} size={30} />
         <div className="session__id">
           <div className="session__line">
             <span className="session__name">{session.name}</span>

@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react'
 
-import { IconMenu } from '@/components/Icons'
 import { commands } from '@/ipc/commands'
 import { faultText } from '@/lib/errors'
 import { PromptSheets } from '@/components/PromptSheets'
@@ -28,8 +27,6 @@ export function App() {
   const activeId = useSessionsStore((s) => s.activeId)
   const connected = useUiStore((s) => s.connected)
   const toggleDrawer = useUiStore((s) => s.toggleDrawer)
-  const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed)
-  const toggleSidebar = useUiStore((s) => s.toggleSidebar)
   const toast = useUiStore((s) => s.toast)
 
   useEffect(() => {
@@ -92,20 +89,6 @@ export function App() {
       )}
       <div className="body">
         <Sidebar />
-        {/* The design's rail: with the sidebar folded away there is otherwise nothing
-            left to click to bring it back. It floats over the pane header rather than
-            taking a column, because a permanent strip is the thing being collapsed. */}
-        {sidebarCollapsed && (
-          <button
-            className="railbtn"
-            title="Expand sidebar"
-            aria-label="Expand sidebar"
-            aria-expanded={false}
-            onClick={() => toggleSidebar(false)}
-          >
-            <IconMenu size={16} />
-          </button>
-        )}
         <div className="main">
           {activeId ? <SessionView sessionId={activeId} /> : <ConnectView />}
           <QueueDrawer />

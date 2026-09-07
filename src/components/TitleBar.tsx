@@ -5,23 +5,7 @@ import { useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
 
 import { IconClose, IconMoon, IconPlus, IconSearch, IconSun } from './Icons'
-
-function avatarFor(name: string): string {
-  return name.slice(0, 2).toUpperCase()
-}
-
-/** Deterministic tint for a server that has not been given one.
- *
- * The palette is the design's swatch row, so a generated tint and a chosen tint are
- * drawn from the same six colours — an auto-assigned server cannot end up a shade
- * that the editor would never offer. */
-const PALETTE = ['#2456E6', '#7C4DDB', '#E8A03C', '#2E9E5B', '#0FA3A3', '#D6453C']
-
-function tintFor(name: string): string {
-  let hash = 0
-  for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
-  return PALETTE[hash % PALETTE.length] ?? '#2456E6'
-}
+import { ServerAvatar } from './ServerAvatar'
 
 export function TitleBar() {
   const sessions = useSessionsStore((s) => s.sessions)
@@ -36,8 +20,9 @@ export function TitleBar() {
   // The tab avatar has to be the colour chosen in the editor, not a hash of the name:
   // picking a tint and then seeing a different one on the tab makes the setting look
   // broken.
-  const colourOf = (serverId: string, name: string) =>
-    servers.find((s) => s.id === serverId)?.color ?? tintFor(name)
+  /// `ServerAvatar` falls back to the deterministic tint on its own, so a server that
+  /// has not been given a colour reaches it as null rather than as a second hash here.
+  const colourOf = (serverId: string) => servers.find((s) => s.id === serverId)?.color ?? null
 
   const dark = resolved === 'dark'
 
@@ -63,12 +48,7 @@ export function TitleBar() {
               tabIndex={0}
               onKeyDown={(e) => e.key === 'Enter' && activate(id)}
             >
-              <span
-                className="tab__avatar"
-                style={{ background: colourOf(session.serverId, session.name) }}
-              >
-                {avatarFor(session.name)}
-              </span>
+              <ServerAvatar name={session.name} color={colourOf(session.serverId)} size={16} />
               <span className="tab__label">{session.name}</span>
               <span
                 className="tab__close"
@@ -115,5 +95,3 @@ export function TitleBar() {
     </div>
   )
 }
-
-export { tintFor, avatarFor }

@@ -74,19 +74,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.tab__avatar {
-  width: 16px;
-  height: 16px;
-  flex: none;
-  border-radius: var(--radius-sm);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 9px;
-  font-weight: 700;
-  font-family: var(--font-display);
-  color: #fff;
-}
 .tab__close {
   width: 16px;
   height: 16px;
@@ -160,25 +147,62 @@
   position: relative;
 }
 
-/* The design's floating expand button, shown only while the sidebar is collapsed. */
-.railbtn {
-  position: absolute;
-  left: 8px;
-  top: 10px;
-  z-index: 20;
+/* The collapsed sidebar. A column of its own rather than a button floating over the
+   panes: the floating one landed on top of the session header's avatar, and it made
+   the collapsed state read as an absence instead of as a smaller sidebar. */
+.rail {
+  width: 52px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0 10px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+}
+.rail__mark {
   width: 30px;
   height: 30px;
-  border-radius: 7px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  box-shadow: var(--elev);
+  flex: none;
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--ink-soft);
+  background: var(--signal);
+  color: #fff;
+  box-shadow: 0 2px 6px rgb(36 86 230 / 35%);
 }
-.railbtn:hover {
-  color: var(--signal);
+.rail__mark:hover {
+  filter: brightness(1.08);
+}
+.rail__list {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.rail__list::-webkit-scrollbar {
+  width: 0;
+}
+.rail__item {
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-faint);
+}
+.rail__item:hover {
+  background: var(--line-2);
+  color: var(--ink);
 }
 
 /* ---------------------------------------------------------------- sidebar */
@@ -349,21 +373,20 @@
   text-align: left;
   border-radius: 9px;
 }
-.srv__avatar {
-  width: 26px;
-  height: 26px;
+/* One rule for the square that stands for a server, wherever it is drawn. The sidebar,
+   the rail, the tab strip and the session header each had their own, and they had
+   drifted apart in radius, weight and how the colour was chosen. */
+.avatar {
   flex: none;
-  border-radius: 7px;
   display: flex;
   align-items: center;
   justify-content: center;
   font-family: var(--font-display);
   font-weight: 700;
-  font-size: 11px;
   color: #fff;
   position: relative;
 }
-.srv__live {
+.avatar__live {
   position: absolute;
   right: -2px;
   bottom: -2px;
@@ -495,19 +518,6 @@
   align-items: center;
   gap: 14px;
   padding: 0 16px;
-}
-.session__avatar {
-  width: 30px;
-  height: 30px;
-  flex: none;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 12px;
-  color: #fff;
 }
 .session__id {
   min-width: 0;

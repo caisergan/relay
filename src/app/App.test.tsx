@@ -238,20 +238,29 @@ describe('the sidebar and the pane splitter', () => {
     useUiStore.setState({ sidebarCollapsed: false, localPanePercent: 37 })
   })
 
-  it('collapses to a rail button and leaves no sidebar behind', async () => {
+  // A column of its own, not a button floating over the panes: the floating one
+  // landed on top of the session header's avatar.
+  it('collapses to a rail that still lists the servers', async () => {
+    ANSWERS.servers_list = [savedServer()]
     useUiStore.setState({ sidebarCollapsed: true })
 
     const { host } = await mount()
 
     expect(host.querySelector('.sidebar')).toBeNull()
-    expect(host.querySelector('.railbtn')).not.toBeNull()
+    const rail = host.querySelector('.rail')
+    expect(rail).not.toBeNull()
+    expect(rail?.querySelector('[aria-label="Expand sidebar"]')).not.toBeNull()
+    // The servers stay one click away rather than behind an expand step.
+    expect(rail?.querySelector('[aria-label="104.197.160.37"]')).not.toBeNull()
+    expect(rail?.querySelector('[aria-label="New server"]')).not.toBeNull()
+    ANSWERS.servers_list = []
   })
 
   it('shows the sidebar and no rail when expanded', async () => {
     const { host } = await mount()
 
     expect(host.querySelector('.sidebar')).not.toBeNull()
-    expect(host.querySelector('.railbtn')).toBeNull()
+    expect(host.querySelector('.rail')).toBeNull()
   })
 
   // The width is the store's, not the stylesheet's, or the splitter could not move it.
@@ -434,5 +443,41 @@ describe('what the app opens on launch', () => {
     await mount()
 
     expect(invoked.mock.calls.some(([command]) => command === 'session_open')).toBe(false)
+  })
+})
+
+describe('the server avatar', () => {
+  beforeEach(() => {
+    ANSWERS.servers_list = []
+    useServersStore.setState({ servers: [], loading: false, loaded: false })
+    useSessionsStore.setState({
+      sessions: {},
+      order: [],
+      activeId: null,
+      listings: {},
+      panes: {},
+    })
+  })
+
+  // `104.197.160.37` used to render as "10", which names nothing: every host on the
+  // subnet gives the same two characters.
+  it('draws a glyph rather than digits for an address', async () => {
+    ANSWERS.servers_list = [savedServer()]
+
+    const { host } = await mount()
+
+    const avatar = host.querySelector('.sidebar .avatar')
+    expect(avatar).not.toBeNull()
+    expect(avatar?.textContent).toBe('')
+    expect(avatar?.querySelector('svg')).not.toBeNull()
+  })
+
+  it('keeps initials for a name someone chose', async () => {
+    ANSWERS.servers_list = [{ ...savedServer(), name: 'Acme Corp' }]
+
+    const { host } = await mount()
+
+    expect(host.querySelector('.sidebar .avatar')?.textContent).toBe('AC')
+    ANSWERS.servers_list = []
   })
 })

@@ -7,9 +7,9 @@ import { groupServers, useServersStore } from '@/state/serversStore'
 import { useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
 
-import { IconPlus, IconSearch, IconSidebar } from './Icons'
+import { IconPlus, IconRelay, IconSearch, IconSidebar } from './Icons'
+import { ServerAvatar } from './ServerAvatar'
 import { ServerEditor, blankServer } from './ServerEditor'
-import { avatarFor, tintFor } from './TitleBar'
 
 export function Sidebar() {
   const servers = useServersStore((s) => s.servers)
@@ -49,27 +49,72 @@ export function Sidebar() {
     })
   }
 
+  const editor = editing && (
+    <ServerEditor
+      key={editing.id}
+      server={editing}
+      isNew={!servers.some((s) => s.id === editing.id)}
+      onClose={() => setEditing(null)}
+    />
+  )
+
+  /* Collapsed, the sidebar becomes a rail rather than disappearing behind a button
+     floating over the panes — that button landed on top of the session header's own
+     avatar. A rail keeps the servers reachable in one click, keeps its own column so
+     nothing overlaps, and makes the collapsed state a smaller sidebar instead of an
+     absence. */
+  if (collapsed) {
+    return (
+      <>
+        <nav className="rail" aria-label="Servers">
+          <button
+            className="rail__mark"
+            title="Expand sidebar"
+            aria-label="Expand sidebar"
+            aria-expanded={false}
+            onClick={() => toggleSidebar(false)}
+          >
+            <IconRelay size={15} />
+          </button>
+          <div className="rail__list">
+            {servers.map((server) => (
+              <button
+                key={server.id}
+                className="rail__item"
+                onClick={() => open(server.id)}
+                title={`${server.name} — ${server.username}@${server.host}:${server.port}`}
+                aria-label={server.name}
+              >
+                <ServerAvatar
+                  name={server.name}
+                  color={server.color}
+                  live={live.has(server.id)}
+                  size={30}
+                />
+              </button>
+            ))}
+          </div>
+          <button
+            className="rail__item"
+            title="New server"
+            aria-label="New server"
+            onClick={() => setEditing(blankServer())}
+          >
+            <IconPlus size={16} />
+          </button>
+        </nav>
+        {editor}
+      </>
+    )
+  }
+
   return (
     <>
-      {/* Collapsing unmounts the list, not the editor: a sheet opened from here is
-          modal over the whole window and must not vanish with its launcher. */}
-      {!collapsed && (
+      {
         <nav className="sidebar" aria-label="Servers">
           <div className="sidebar__brand">
             <span className="sidebar__mark">
-              <svg
-                width="13"
-                height="13"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="#fff"
-                strokeWidth="2.4"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden
-              >
-                <path d="M4 12h16M14 6l6 6-6 6" />
-              </svg>
+              <IconRelay size={14} />
             </span>
             <span className="sidebar__wordmark">Relay</span>
             <div style={{ flex: 1 }} />
@@ -110,13 +155,11 @@ export function Sidebar() {
                       onClick={() => open(server.id)}
                       title={`${server.username}@${server.host}:${server.port}`}
                     >
-                      <span
-                        className="srv__avatar"
-                        style={{ background: server.color ?? tintFor(server.name) }}
-                      >
-                        {avatarFor(server.name)}
-                        {live.has(server.id) && <span className="srv__live" />}
-                      </span>
+                      <ServerAvatar
+                        name={server.name}
+                        color={server.color}
+                        live={live.has(server.id)}
+                      />
                       <span className="srv__text">
                         <span className="srv__line">
                           <span className="srv__name">{server.name}</span>
@@ -161,15 +204,8 @@ export function Sidebar() {
             New server
           </button>
         </nav>
-      )}
-      {editing && (
-        <ServerEditor
-          key={editing.id}
-          server={editing}
-          isNew={!servers.some((s) => s.id === editing.id)}
-          onClose={() => setEditing(null)}
-        />
-      )}
+      }
+      {editor}
     </>
   )
 }
