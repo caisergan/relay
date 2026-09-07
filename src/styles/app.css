@@ -250,8 +250,22 @@
   border: 1px solid var(--line);
   flex: none;
 }
+/* One focus ring, not two. The global `:focus-visible` outline lands on the input
+   while this colours the container's border, so a focused filter drew a blue border
+   with a second blue ring inside it. The container is what reads as the control, so it
+   carries the state — a soft halo rather than a hard outline — and the input's own
+   outline is suppressed. Focus stays unmistakable, which is the point of the global
+   rule; it is only drawn once. */
 .searchbox:focus-within {
   border-color: var(--signal);
+  box-shadow: 0 0 0 3px var(--signal-soft);
+}
+.searchbox input:focus-visible {
+  outline: none;
+}
+/* A second, quieter cue: the magnifier picks up the same colour. */
+.searchbox:focus-within .searchbox__icon {
+  color: var(--signal);
 }
 .searchbox__icon {
   flex: none;

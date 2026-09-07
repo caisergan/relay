@@ -62,7 +62,16 @@ export function SessionView({ sessionId }: Props) {
     /// `record: false` is how back and forward replay a path without pushing it again,
     /// which would otherwise make the two buttons walk in circles.
     async (path: string, record = true) => {
-      patchPane(sessionId, { localLoading: true, localError: null })
+      // A filter belongs to the directory it was typed in. Carried into the next one
+      // it silently hides most of what is there, and the box that explains why is a
+      // row above the listing where nobody looks. A refresh keeps it: same directory,
+      // same question.
+      const before = useSessionsStore.getState().panes[sessionId] ?? emptyPane
+      patchPane(sessionId, {
+        localLoading: true,
+        localError: null,
+        ...(path === before.localPath ? {} : { localFilter: '', localSelected: null }),
+      })
       try {
         const entries = await commands.localListDir(path)
         // Read the history fresh rather than closing over it: this callback is memoised
@@ -145,7 +154,11 @@ export function SessionView({ sessionId }: Props) {
   const connected = session.state.kind === 'connected'
 
   const navigateRemote = (path: string, record = true) => {
-    patchPane(sessionId, { remoteLoading: true, remoteError: null })
+    patchPane(sessionId, {
+      remoteLoading: true,
+      remoteError: null,
+      ...(path === remotePath ? {} : { remoteFilter: '', remoteSelected: null }),
+    })
     setRemoteFailedPath(null)
     commands
       .sessionListDir(sessionId, path)
@@ -268,7 +281,7 @@ export function SessionView({ sessionId }: Props) {
             title="This Mac"
             path={pane.localPath || '/'}
             filter={pane.localFilter}
-            filterLabel="Filter"
+            filterLabel="Search"
             onFilter={(localFilter) => patchPane(sessionId, { localFilter })}
             onNavigate={(path) => void loadLocal(path)}
             roots={roots}
@@ -320,7 +333,7 @@ export function SessionView({ sessionId }: Props) {
             title={session.name}
             path={remotePath}
             filter={pane.remoteFilter}
-            filterLabel="Filter this folder"
+            filterLabel="Search"
             onFilter={(remoteFilter) => patchPane(sessionId, { remoteFilter })}
             onNavigate={navigateRemote}
             onRefresh={refreshRemote}

@@ -580,3 +580,73 @@ describe('clicking a server card', () => {
     expect(host.querySelector('.srv--active [aria-current="true"]')).not.toBeNull()
   })
 })
+
+describe('the pane filter', () => {
+  beforeEach(() => {
+    ANSWERS.servers_list = []
+    useSessionsStore.setState({
+      sessions: {},
+      order: [],
+      activeId: null,
+      listings: {},
+      panes: {},
+    })
+  })
+
+  it('says Search on both panes and still names which pane it filters', async () => {
+    useSessionsStore.getState().upsert(session)
+
+    const { host } = await mount()
+
+    const inputs = [...host.querySelectorAll<HTMLInputElement>('.searchbox--pane input')]
+    expect(inputs).toHaveLength(2)
+    expect(inputs.map((input) => input.placeholder)).toEqual(['Search', 'Search'])
+    // The visible word is the same; the accessible name still separates them.
+    expect(inputs[0]?.getAttribute('aria-label')).toContain('This Mac')
+    expect(inputs[1]?.getAttribute('aria-label')).toContain(session.name)
+  })
+
+  // Carried into the next directory a filter silently hides most of what is there,
+  // and the box explaining why is a row above the listing, where nobody looks.
+  it('clears when the pane is navigated somewhere else', async () => {
+    useSessionsStore.getState().upsert(session)
+    const { host } = await mount()
+
+    act(() => {
+      useSessionsStore.getState().patchPane('session-1', {
+        localPath: '/home/tester/projects',
+        localFilter: 'conf',
+        localSelected: 'config.json',
+      })
+    })
+    expect(useSessionsStore.getState().panes['session-1']?.localFilter).toBe('conf')
+
+    // A breadcrumb, because the rows themselves are virtualised and never render here.
+    const crumbs = host.querySelectorAll<HTMLButtonElement>('.pane--local .crumb')
+    const parent = crumbs[crumbs.length - 2]
+    expect(parent?.textContent).toBe('tester')
+    act(() => parent?.click())
+
+    const pane = useSessionsStore.getState().panes['session-1']
+    expect(pane?.localFilter).toBe('')
+    // The highlighted row belonged to the old listing too.
+    expect(pane?.localSelected).toBeNull()
+  })
+
+  // Refreshing asks the same question of the same directory.
+  it('survives a refresh of the directory it was typed in', async () => {
+    useSessionsStore.getState().upsert(session)
+    const { host } = await mount()
+
+    act(() => {
+      useSessionsStore.getState().patchPane('session-1', { remoteFilter: 'conf' })
+    })
+
+    const refresh = host.querySelector<HTMLButtonElement>(
+      '.pane--remote [aria-label="Refresh"]',
+    )
+    act(() => refresh?.click())
+
+    expect(useSessionsStore.getState().panes['session-1']?.remoteFilter).toBe('conf')
+  })
+})
