@@ -52,6 +52,18 @@ import {
   Text,
   Vue,
 } from '@react-symbols/icons/files'
+import {
+  FolderBuild,
+  FolderConfig,
+  FolderDatabase,
+  FolderDocuments,
+  FolderGray,
+  FolderImages,
+  FolderLayout,
+  FolderLock,
+  FolderMail,
+  FolderNodeModules,
+} from '@react-symbols/icons/folders'
 import type { ExtensionType } from '@react-symbols/icons/utils'
 
 type Icon = ExtensionType[string]
@@ -117,4 +129,31 @@ export const NAMES: ExtensionType = spread([
   [Gear, 'sshd_config ssh_config nginx.conf httpd.conf my.cnf php.ini .htaccess'],
   [Text, 'readme changelog todo install version authors contributors news'],
   [Lock, 'id_rsa id_ed25519 id_ecdsa id_dsa authorized_keys known_hosts .netrc .htpasswd'],
+])
+
+/** Folder names the library does not place.
+ *
+ * Its folder table is a developer's: it knows `src`, `dist`, `node_modules`, `hooks`
+ * and `.github`, and it answered 62 of 112 names worth testing. The half it misses is
+ * again the half that is a server rather than a checkout — `etc`, `logs`, `backups`,
+ * `secrets`, `migrations`, `www`. These are the ones with an honest picture already in
+ * the pack.
+ *
+ * `logs`, `tmp`, `cache` and `backups` deliberately share the grey folder. They are
+ * real directories, but they are not where anyone's work is, and saying so quietly is
+ * more useful than giving each of them a colour that competes with `src`.
+ *
+ * A folder the pack cannot place does not use its default. It keeps Relay's own blue
+ * mark instead — see `FileList.tsx`, which detects the fallback and substitutes. */
+export const FOLDERS: ExtensionType = spread([
+  [FolderLock, 'secrets secret keys certs cert ssl tls security credentials pki .ssh .gnupg'],
+  [FolderDatabase, 'migrations seeds sql dumps data'],
+  [FolderBuild, 'bin obj release debug __pycache__ .pytest_cache .mypy_cache .ruff_cache'],
+  [FolderNodeModules, 'vendor site-packages bower_components'],
+  [FolderImages, 'img media photos pictures screenshots'],
+  [FolderConfig, 'etc conf settings .config'],
+  [FolderLayout, 'views templates layouts'],
+  [FolderDocuments, 'documents'],
+  [FolderMail, 'email mails maildir'],
+  [FolderGray, 'logs log tmp temp cache .cache backup backups trash .trash'],
 ])

@@ -10,11 +10,16 @@
  * redraw, which is a change we do not care about, while saying nothing about the one
  * we do. */
 
-import { DefaultFileIcon, FileIcon } from '@react-symbols/icons/utils'
+import {
+  DefaultFileIcon,
+  DefaultFolderIcon,
+  FileIcon,
+  getIconForFolder,
+} from '@react-symbols/icons/utils'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { EXTENSIONS, NAMES } from './fileIcon'
+import { EXTENSIONS, FOLDERS, NAMES } from './fileIcon'
 
 const SIZE = 20
 
@@ -129,6 +134,88 @@ describe('the pane', () => {
   it('survives names that are barely names at all', () => {
     for (const odd of ['', '.', '..', 'file.', '.hidden']) {
       expect(() => draw(odd), `"${odd}" threw`).not.toThrow()
+    }
+  })
+})
+
+/** Did the pack place this folder, or hand back the default it uses for anything it
+ * does not recognise? Identity, not markup — this is exactly the check `FileList`
+ * makes to decide whether to substitute Relay's own blue mark. */
+const look = (folderName: string) =>
+  getIconForFolder({ folderName, editFolderNameData: FOLDERS, width: SIZE, height: SIZE })
+
+/** Mirrors `FolderRowIcon`: the given name, then its lowercase form. */
+const knows = (name: string) =>
+  look(name).type !== DefaultFolderIcon || look(name.toLowerCase()).type !== DefaultFolderIcon
+
+describe('folders', () => {
+  it('places the server directories the supplement adds', () => {
+    for (const name of [
+      'secrets',
+      'certs',
+      '.ssh',
+      'migrations',
+      'etc',
+      'logs',
+      'backups',
+      'vendor',
+      '__pycache__',
+      'templates',
+      'media',
+    ]) {
+      expect(knows(name), `"${name}" was not placed`).toBe(true)
+    }
+  })
+
+  it('does not disturb the folders the pack already knew', () => {
+    for (const name of [
+      'src',
+      'dist',
+      'node_modules',
+      'docs',
+      'services',
+      'shared',
+      'config',
+    ]) {
+      expect(knows(name), `"${name}" lost its icon`).toBe(true)
+    }
+  })
+
+  /** The fallback has to stay reachable. If everything matched, `FileList` would never
+   * draw Relay's blue mark and the substitution would be dead code. */
+  it('leaves an unrecognised name to the fallback', () => {
+    for (const name of ['ui-design', 'ml', 'wibble', '2026-07-17-standard']) {
+      expect(knows(name), `"${name}" should have fallen back`).toBe(false)
+    }
+  })
+
+  it('has no folder entry that draws the same thing as the fallback', () => {
+    const blank = renderToStaticMarkup(<DefaultFolderIcon width={SIZE} height={SIZE} />)
+    for (const [key, Icon] of Object.entries(FOLDERS)) {
+      const drawn = renderToStaticMarkup(<Icon width={SIZE} height={SIZE} />)
+      expect(drawn, `"${key}" maps to a component identical to the default`).not.toBe(blank)
+    }
+  })
+
+  it('points only at components the pack still exports', () => {
+    for (const [key, icon] of Object.entries(FOLDERS)) {
+      expect(typeof icon, `"${key}" maps to something that is not a component`).toBe('function')
+    }
+  })
+
+  /** The library matches folder names case-sensitively — unlike file names, which it
+   * lowercases — so `Documents` and `Logs` find nothing on their own. `Downloads` and
+   * `Documents` are ordinary in a Mac home folder, and `Logs` and `Backups` are
+   * ordinary on a server, so the call site asks a second time in lowercase. */
+  it('recognises a capitalised directory', () => {
+    for (const name of ['Docs', 'Src', 'Secrets', 'Logs', 'Documents', 'DIST']) {
+      expect(knows(name), `"${name}" was not placed`).toBe(true)
+    }
+  })
+
+  it('survives names that are barely names at all', () => {
+    for (const odd of ['', '.', '..', '.hidden']) {
+      expect(() => knows(odd), `"${odd}" threw`).not.toThrow()
     }
   })
 })
