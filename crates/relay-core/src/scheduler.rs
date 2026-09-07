@@ -39,7 +39,7 @@ use crate::error::{EngineError, Result};
 use crate::events::EngineEvent;
 use crate::interact::ConflictAction;
 use crate::job::{JobKind, JobSnapshot, JobState, PauseReason, QueueOp, QueueStats};
-use crate::model::{Direction, JobId, PromptId, SessionId};
+use crate::model::{Direction, JobId, PromptId, ServerId, SessionId};
 use crate::queue::{
     BatchId, Job, JobEvent, JobSpec, ORDER_STRIDE, ResumeRecord, advance, between, position,
 };
@@ -76,6 +76,7 @@ enum Msg {
     /// A session finished connecting and can take work.
     SessionUp {
         session: SessionId,
+        server_id: ServerId,
         max_lanes: u8,
     },
     /// The connection dropped. Its jobs pause; they are not failed, and they are not
@@ -342,8 +343,22 @@ impl Scheduler {
         self.call(|reply| Msg::Control { op, reply }).await?
     }
 
-    pub async fn session_up(&self, session: SessionId, max_lanes: u8) {
-        let _ = self.tx.send(Msg::SessionUp { session, max_lanes }).await;
+    /// Announce a connected session, and hand it the queue for its server.
+    ///
+    /// `server_id` is what makes a restored queue runnable. A session id belongs to
+    /// one process: jobs that come back from the database point at a session that no
+    /// longer exists, and without this they could never be dispatched again. The
+    /// server is the identity that survives a restart, so a session adopts the jobs
+    /// for its server that no live session is already serving.
+    pub async fn session_up(&self, session: SessionId, server_id: ServerId, max_lanes: u8) {
+        let _ = self
+            .tx
+            .send(Msg::SessionUp {
+                session,
+                server_id,
+                max_lanes,
+            })
+            .await;
     }
 
     pub async fn session_down(&self, session: SessionId) {
@@ -453,7 +468,11 @@ impl Inner {
                 let outcome = self.control(op).await;
                 let _ = reply.send(outcome);
             }
-            Msg::SessionUp { session, max_lanes } => {
+            Msg::SessionUp {
+                session,
+                server_id,
+                max_lanes,
+            } => {
                 self.sessions.insert(
                     session,
                     Slot {
@@ -461,8 +480,40 @@ impl Inner {
                         connected: true,
                     },
                 );
+
+                // Adopt this server's orphaned work: jobs restored from the database,
+                // or left behind by a tab that was closed. "Orphaned" means the
+                // session they name is gone entirely — a session that has merely
+                // dropped is still in this map, still counting down to its next
+                // attempt, and its queue is not up for grabs. Two tabs on one server
+                // are two connections, not one queue split between them.
+                let known: Vec<SessionId> = self
+                    .sessions
+                    .keys()
+                    .filter(|id| **id != session)
+                    .copied()
+                    .collect();
+                let orphans: Vec<JobId> = self
+                    .jobs
+                    .values()
+                    .filter(|job| {
+                        job.server_id == server_id
+                            && job.session != session
+                            && !known.contains(&job.session)
+                            && !job.state.is_terminal()
+                    })
+                    .map(|job| job.id)
+                    .collect();
+                for id in &orphans {
+                    if let Some(job) = self.jobs.get_mut(id) {
+                        job.session = session;
+                    }
+                }
+
                 // Whatever the drop paused comes back on its own. A job a *person*
-                // paused does not: that decision outlives the connection.
+                // paused does not: that decision outlives the connection. Nor does one
+                // paused by a restart — nobody knows yet whether its half-written
+                // bytes are still good, and the drawer offers "Resume all" for that.
                 let waiting: Vec<JobId> = self
                     .jobs
                     .values()
@@ -479,6 +530,12 @@ impl Inner {
                     .collect();
                 for id in waiting {
                     self.apply(id, JobEvent::Unpause).await;
+                }
+                for id in orphans {
+                    if let Some(job) = self.jobs.get(&id).cloned() {
+                        self.store.save_detached(job.clone());
+                        self.publish(&job).await;
+                    }
                 }
             }
             Msg::SessionDown { session } => {
@@ -1274,6 +1331,7 @@ mod tests {
         scheduler: Scheduler,
         bench: Arc<Bench>,
         session: SessionId,
+        server: ServerId,
         events: mpsc::Receiver<EngineEvent>,
     }
 
@@ -1291,11 +1349,13 @@ mod tests {
         .unwrap();
 
         let session = Uuid::new_v4();
-        scheduler.session_up(session, max_lanes).await;
+        let server = Uuid::new_v4();
+        scheduler.session_up(session, server, max_lanes).await;
         Harness {
             scheduler,
             bench,
             session,
+            server,
             events,
         }
     }
@@ -1313,10 +1373,10 @@ mod tests {
         )
     }
 
-    fn spec(session: SessionId, name: &str) -> JobSpec {
+    fn spec(session: SessionId, server_id: ServerId, name: &str) -> JobSpec {
         JobSpec {
             session,
-            server_id: Uuid::new_v4(),
+            server_id,
             kind: JobKind::File,
             direction: Direction::Down,
             remote_path: format!("/remote/{name}"),
@@ -1373,7 +1433,9 @@ mod tests {
     async fn the_concurrency_limit_is_a_limit() {
         let h = harness(2, 8).await;
         let batch = Uuid::new_v4();
-        let specs = (0..5).map(|i| spec(h.session, &format!("f{i}"))).collect();
+        let specs = (0..5)
+            .map(|i| spec(h.session, h.server, &format!("f{i}")))
+            .collect();
         h.scheduler.enqueue(batch, specs).await.unwrap();
         settle(&h).await;
 
@@ -1391,7 +1453,9 @@ mod tests {
     async fn a_backend_lane_limit_beats_a_higher_global_limit() {
         let h = harness(8, 2).await;
         let batch = Uuid::new_v4();
-        let specs = (0..6).map(|i| spec(h.session, &format!("f{i}"))).collect();
+        let specs = (0..6)
+            .map(|i| spec(h.session, h.server, &format!("f{i}")))
+            .collect();
         h.scheduler.enqueue(batch, specs).await.unwrap();
         settle(&h).await;
 
@@ -1406,9 +1470,9 @@ mod tests {
             .enqueue(
                 batch,
                 vec![
-                    spec(h.session, "first"),
-                    spec(h.session, "second"),
-                    spec(h.session, "third"),
+                    spec(h.session, h.server, "first"),
+                    spec(h.session, h.server, "second"),
+                    spec(h.session, h.server, "third"),
                 ],
             )
             .await
@@ -1431,9 +1495,9 @@ mod tests {
             .enqueue(
                 batch,
                 vec![
-                    spec(h.session, "a"),
-                    spec(h.session, "b"),
-                    spec(h.session, "c"),
+                    spec(h.session, h.server, "a"),
+                    spec(h.session, h.server, "b"),
+                    spec(h.session, h.server, "c"),
                 ],
             )
             .await
@@ -1465,7 +1529,7 @@ mod tests {
         let batch = Uuid::new_v4();
         let ids = h
             .scheduler
-            .enqueue(batch, vec![spec(h.session, "a")])
+            .enqueue(batch, vec![spec(h.session, h.server, "a")])
             .await
             .unwrap();
         settle(&h).await;
@@ -1496,6 +1560,54 @@ mod tests {
         assert_eq!(h.bench.running(), vec![ids[0]]);
     }
 
+    /// A queue restored from disk names a session from a process that no longer
+    /// exists. Without adoption it could never be dispatched again, which would make
+    /// persistence pointless: the rows would come back and then sit there for ever.
+    #[tokio::test]
+    async fn a_session_adopts_its_server_queue_from_a_session_that_is_gone() {
+        let h = harness(4, 8).await;
+        let ghost = Uuid::new_v4();
+        let ids = h
+            .scheduler
+            .enqueue(Uuid::new_v4(), vec![spec(ghost, h.server, "orphan")])
+            .await
+            .unwrap();
+        settle(&h).await;
+        assert!(
+            h.bench.running().is_empty(),
+            "nothing runs for a session that never existed"
+        );
+
+        // A session connects to the same server. The job is its queue now.
+        h.scheduler.session_up(h.session, h.server, 8).await;
+        settle(&h).await;
+        assert_eq!(h.bench.running(), vec![ids[0]]);
+    }
+
+    /// A session that has merely dropped is coming back. Its queue is not up for
+    /// grabs, or opening a second tab during an outage would take the first one's work.
+    #[tokio::test]
+    async fn a_second_tab_does_not_take_a_reconnecting_session_queue() {
+        let h = harness(4, 8).await;
+        h.scheduler
+            .enqueue(Uuid::new_v4(), vec![spec(h.session, h.server, "mine")])
+            .await
+            .unwrap();
+        settle(&h).await;
+        h.scheduler.session_down(h.session).await;
+        settle(&h).await;
+        let _ = h.bench.take();
+
+        let second = Uuid::new_v4();
+        h.scheduler.session_up(second, h.server, 8).await;
+        settle(&h).await;
+
+        assert!(
+            h.bench.running().is_empty(),
+            "the job waits for the session it belongs to"
+        );
+    }
+
     /// The bug this prevents: a dropped connection pauses a session's work, the
     /// connection comes back, and a job a *person* paused starts moving again.
     #[tokio::test]
@@ -1506,7 +1618,10 @@ mod tests {
             .scheduler
             .enqueue(
                 batch,
-                vec![spec(h.session, "auto"), spec(h.session, "byhand")],
+                vec![
+                    spec(h.session, h.server, "auto"),
+                    spec(h.session, h.server, "byhand"),
+                ],
             )
             .await
             .unwrap();
@@ -1520,7 +1635,7 @@ mod tests {
         settle(&h).await;
         let _ = h.bench.take();
 
-        h.scheduler.session_up(h.session, 8).await;
+        h.scheduler.session_up(h.session, h.server, 8).await;
         settle(&h).await;
 
         assert_eq!(
@@ -1535,7 +1650,13 @@ mod tests {
         let h = harness(4, 8).await;
         let batch = Uuid::new_v4();
         h.scheduler
-            .enqueue(batch, vec![spec(h.session, "a"), spec(h.session, "b")])
+            .enqueue(
+                batch,
+                vec![
+                    spec(h.session, h.server, "a"),
+                    spec(h.session, h.server, "b"),
+                ],
+            )
             .await
             .unwrap();
         settle(&h).await;
@@ -1560,7 +1681,9 @@ mod tests {
     async fn lowering_the_limit_stops_work_already_running() {
         let h = harness(4, 8).await;
         let batch = Uuid::new_v4();
-        let specs = (0..4).map(|i| spec(h.session, &format!("f{i}"))).collect();
+        let specs = (0..4)
+            .map(|i| spec(h.session, h.server, &format!("f{i}")))
+            .collect();
         h.scheduler.enqueue(batch, specs).await.unwrap();
         settle(&h).await;
         assert_eq!(h.bench.running().len(), 4);
@@ -1585,7 +1708,9 @@ mod tests {
     async fn raising_the_limit_starts_what_it_throttled() {
         let h = harness(4, 8).await;
         let batch = Uuid::new_v4();
-        let specs = (0..4).map(|i| spec(h.session, &format!("f{i}"))).collect();
+        let specs = (0..4)
+            .map(|i| spec(h.session, h.server, &format!("f{i}")))
+            .collect();
         h.scheduler.enqueue(batch, specs).await.unwrap();
         settle(&h).await;
 
@@ -1609,7 +1734,13 @@ mod tests {
         let batch = Uuid::new_v4();
         let ids = h
             .scheduler
-            .enqueue(batch, vec![spec(h.session, "a"), spec(h.session, "b")])
+            .enqueue(
+                batch,
+                vec![
+                    spec(h.session, h.server, "a"),
+                    spec(h.session, h.server, "b"),
+                ],
+            )
             .await
             .unwrap();
         settle(&h).await;
@@ -1633,7 +1764,13 @@ mod tests {
         let batch = Uuid::new_v4();
         let ids = h
             .scheduler
-            .enqueue(batch, vec![spec(h.session, "a"), spec(h.session, "b")])
+            .enqueue(
+                batch,
+                vec![
+                    spec(h.session, h.server, "a"),
+                    spec(h.session, h.server, "b"),
+                ],
+            )
             .await
             .unwrap();
         settle(&h).await;
@@ -1668,7 +1805,7 @@ mod tests {
         let batch = Uuid::new_v4();
         let ids = h
             .scheduler
-            .enqueue(batch, vec![spec(h.session, "a")])
+            .enqueue(batch, vec![spec(h.session, h.server, "a")])
             .await
             .unwrap();
         settle(&h).await;
@@ -1693,7 +1830,7 @@ mod tests {
         let batch = Uuid::new_v4();
         let ids = h
             .scheduler
-            .enqueue(batch, vec![spec(h.session, "a")])
+            .enqueue(batch, vec![spec(h.session, h.server, "a")])
             .await
             .unwrap();
         settle(&h).await;
@@ -1726,12 +1863,18 @@ mod tests {
         let theirs = Uuid::new_v4();
         let ids = h
             .scheduler
-            .enqueue(mine, vec![spec(h.session, "a"), spec(h.session, "b")])
+            .enqueue(
+                mine,
+                vec![
+                    spec(h.session, h.server, "a"),
+                    spec(h.session, h.server, "b"),
+                ],
+            )
             .await
             .unwrap();
         let others = h
             .scheduler
-            .enqueue(theirs, vec![spec(h.session, "c")])
+            .enqueue(theirs, vec![spec(h.session, h.server, "c")])
             .await
             .unwrap();
         settle(&h).await;
@@ -1766,7 +1909,7 @@ mod tests {
         *h.bench.refuse.lock().unwrap() = true;
         let batch = Uuid::new_v4();
         h.scheduler
-            .enqueue(batch, vec![spec(h.session, "a")])
+            .enqueue(batch, vec![spec(h.session, h.server, "a")])
             .await
             .unwrap();
         settle(&h).await;
@@ -1784,7 +1927,7 @@ mod tests {
         let h = harness(4, 8).await;
         let stranger = Uuid::new_v4();
         h.scheduler
-            .enqueue(Uuid::new_v4(), vec![spec(stranger, "a")])
+            .enqueue(Uuid::new_v4(), vec![spec(stranger, Uuid::new_v4(), "a")])
             .await
             .unwrap();
         settle(&h).await;
@@ -1799,7 +1942,13 @@ mod tests {
         let batch = Uuid::new_v4();
         let ids = h
             .scheduler
-            .enqueue(batch, vec![spec(h.session, "a"), spec(h.session, "b")])
+            .enqueue(
+                batch,
+                vec![
+                    spec(h.session, h.server, "a"),
+                    spec(h.session, h.server, "b"),
+                ],
+            )
             .await
             .unwrap();
         settle(&h).await;
@@ -1832,7 +1981,7 @@ mod tests {
         let batch = Uuid::new_v4();
         let ids = h
             .scheduler
-            .enqueue(batch, vec![spec(h.session, "a")])
+            .enqueue(batch, vec![spec(h.session, h.server, "a")])
             .await
             .unwrap();
         settle(&h).await;
@@ -1884,7 +2033,7 @@ mod tests {
         let batch = Uuid::new_v4();
         let ids = h
             .scheduler
-            .enqueue(batch, vec![spec(h.session, "a")])
+            .enqueue(batch, vec![spec(h.session, h.server, "a")])
             .await
             .unwrap();
         settle(&h).await;
@@ -1927,7 +2076,7 @@ mod tests {
         let batch = Uuid::new_v4();
         let parent_spec = JobSpec {
             kind: JobKind::Folder,
-            ..spec(h.session, "dir")
+            ..spec(h.session, h.server, "dir")
         };
         let parent = h.scheduler.enqueue(batch, vec![parent_spec]).await.unwrap()[0];
 
@@ -1938,11 +2087,11 @@ mod tests {
                 vec![
                     JobSpec {
                         parent: Some(parent),
-                        ..spec(h.session, "dir/one")
+                        ..spec(h.session, h.server, "dir/one")
                     },
                     JobSpec {
                         parent: Some(parent),
-                        ..spec(h.session, "dir/two")
+                        ..spec(h.session, h.server, "dir/two")
                     },
                 ],
             )
@@ -1997,7 +2146,7 @@ mod tests {
                 batch,
                 vec![JobSpec {
                     kind: JobKind::Folder,
-                    ..spec(h.session, "dir")
+                    ..spec(h.session, h.server, "dir")
                 }],
             )
             .await
@@ -2008,7 +2157,7 @@ mod tests {
                 batch,
                 vec![JobSpec {
                     parent: Some(parent),
-                    ..spec(h.session, "dir/one")
+                    ..spec(h.session, h.server, "dir/one")
                 }],
             )
             .await
@@ -2034,7 +2183,7 @@ mod tests {
                 batch,
                 vec![JobSpec {
                     parent: Some(parent),
-                    ..spec(h.session, "dir/two")
+                    ..spec(h.session, h.server, "dir/two")
                 }],
             )
             .await
@@ -2072,9 +2221,9 @@ mod tests {
                 vec![
                     JobSpec {
                         kind: JobKind::Folder,
-                        ..spec(h.session, "dir")
+                        ..spec(h.session, h.server, "dir")
                     },
-                    spec(h.session, "file"),
+                    spec(h.session, h.server, "file"),
                 ],
             )
             .await

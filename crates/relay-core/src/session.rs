@@ -613,7 +613,7 @@ impl SessionActor {
         // The queue may dispatch to this session from here on, and not before. It also
         // resumes whatever the last drop paused, which is what makes a reconnect
         // continue the queue instead of merely restoring a tab.
-        self.queue.session_up(self.id, max_lanes).await;
+        self.queue.session_up(self.id, cfg.id, max_lanes).await;
         Ok(max_lanes)
     }
 
