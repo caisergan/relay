@@ -140,8 +140,19 @@ jobs:
         if: runner.os == 'Windows'
         run: pnpm tauri build --debug --bundles nsis
 
-      # Zip the .app ourselves: upload-artifact would otherwise flatten the bundle
-      # and lose the executable bit, producing something macOS refuses to open.
+      # Apple Silicon requires every binary to carry a signature. Without even an
+      # ad-hoc one, Gatekeeper reports a downloaded app as "damaged" rather than
+      # "unsigned", which sends people to the Trash instead of to the right-click
+      # menu. Real signing and notarisation are phase 5; this is the minimum that
+      # makes a test build openable.
+      - name: Ad-hoc sign the bundle
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - target/debug/bundle/macos/Relay.app
+          codesign --verify --verbose target/debug/bundle/macos/Relay.app
+
+      # Zip with ditto: upload-artifact would otherwise flatten the bundle and drop
+      # the executable bit, producing something macOS also refuses to open.
       - name: Package the macOS bundle
         if: runner.os == 'macOS'
         run: |
