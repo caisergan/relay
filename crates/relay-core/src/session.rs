@@ -76,6 +76,11 @@ pub const MAX_RECONNECTS: u32 = 10;
 const BACKOFF_SECS: [u64; 5] = [1, 2, 5, 10, 30];
 /// Lane requests and completions buffered before a transfer task has to wait.
 const LANE_BUFFER: usize = 8;
+/// How long an unused lane is kept before it is closed.
+pub const LANE_IDLE: Duration = Duration::from_secs(60);
+/// How often idle lanes are looked at. Half the idle time, so a lane lives between
+/// sixty and ninety seconds past its last use — close enough, and one timer.
+const LANE_SWEEP: Duration = Duration::from_secs(30);
 
 /// What the actor is asked to do. Every variant that produces a value carries its own
 /// reply channel, so callers await exactly their own answer.
@@ -177,6 +182,7 @@ impl SessionHandle {
             rt: ctx.rt.clone(),
             queue: ctx.queue.clone(),
             lane_tx,
+            idle_lanes: Vec::new(),
             running: HashMap::new(),
         };
         let join = ctx.rt.spawn(actor.run(cfg, ctx.secrets, cmd_rx, lane_rx));
@@ -428,6 +434,10 @@ struct SessionActor {
     /// Where transfer tasks ask for a lane. They cannot open one themselves: the actor
     /// owns the backend, and this is the only way through it.
     lane_tx: mpsc::Sender<ActorRequest>,
+    /// Lanes that finished a transfer and are waiting for the next one, with when each
+    /// became idle. Bounded by the session's own cap, since a lane only ever comes back
+    /// from a transfer that had one.
+    idle_lanes: Vec<(Box<dyn TransferLane>, Instant)>,
     /// What the session is running, so a stop reaches the right transfer without a
     /// second map living somewhere else that could disagree.
     running: HashMap<JobId, Running>,
@@ -512,6 +522,10 @@ impl SessionActor {
             // partial onto the destination underneath the attempt that replaces it.
             // The bytes are kept — this is a pause, and the job is coming back to them.
             self.stop_all(true);
+            // Pooled lanes are channels on the connection that just went. Dropping
+            // them here means a reconnect opens fresh ones rather than handing a
+            // transfer a channel to a server that is no longer there.
+            self.idle_lanes.clear();
             // The queue pauses this session's work rather than failing it: the jobs
             // are fine, the connection is not.
             self.queue.session_down(self.id).await;
@@ -559,6 +573,9 @@ impl SessionActor {
         }
 
         self.out.log(LogKind::Status, "Disconnecting.").await;
+        for (lane, _) in std::mem::take(&mut self.idle_lanes) {
+            lane.close().await;
+        }
         self.backend.disconnect().await;
         self.out.disconnected("closed", false).await;
         self.queue.session_down(self.id).await;
@@ -630,10 +647,15 @@ impl SessionActor {
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         keepalive.tick().await; // The first tick is immediate, and we just connected.
 
+        let mut sweep = tokio::time::interval(LANE_SWEEP);
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        sweep.tick().await;
+
         loop {
             tokio::select! {
                 biased;
                 _ = self.cancel.cancelled() => return Outcome::Closed,
+                _ = sweep.tick() => self.close_idle_lanes().await,
                 Some(Internal::LaneFinished(job)) = internal_rx.recv() => {
                     self.running.remove(&job);
                 }
@@ -641,8 +663,16 @@ impl SessionActor {
                 // the actor is the only thing that may touch it.
                 Some(request) = lane_rx.recv() => match request {
                     ActorRequest::Lane { reply } => {
-                        let lane = self.backend.open_lane().await;
+                        // A channel that is already open beats opening another one: on
+                        // a queue of small files the handshake is most of the work.
+                        let lane = match self.idle_lanes.pop() {
+                            Some((lane, _)) => Ok(lane),
+                            None => self.backend.open_lane().await,
+                        };
                         let _ = reply.send(lane);
+                    }
+                    ActorRequest::ReturnLane { lane } => {
+                        self.idle_lanes.push((lane, Instant::now()));
                     }
                     ActorRequest::Exists { path, reply } => {
                         let taken = with_deadline(
@@ -814,6 +844,22 @@ impl SessionActor {
             }
             // The serving loop takes these before they reach here.
             SessionCmd::Disconnect | SessionCmd::Reconnect => ControlFlow::Continue(()),
+        }
+    }
+
+    /// Close pooled lanes that have gone unused.
+    ///
+    /// A channel costs the server a file handle and a little memory whether or not
+    /// anyone is transferring, so a session that moved a hundred files an hour ago
+    /// should not still be holding four open connections for it.
+    async fn close_idle_lanes(&mut self) {
+        let now = Instant::now();
+        let (keep, stale): (Vec<_>, Vec<_>) = std::mem::take(&mut self.idle_lanes)
+            .into_iter()
+            .partition(|(_, since)| now.duration_since(*since) < LANE_IDLE);
+        self.idle_lanes = keep;
+        for (lane, _) in stale {
+            lane.close().await;
         }
     }
 
@@ -994,6 +1040,12 @@ enum ActorRequest {
     Lane {
         reply: oneshot::Sender<Result<Box<dyn TransferLane>>>,
     },
+    /// A lane whose transfer finished cleanly, offered back for the next one.
+    ///
+    /// Only ever a lane that completed: after a cancellation or a protocol error its
+    /// state is uncertain, and reusing it would carry that uncertainty into a transfer
+    /// that has done nothing wrong.
+    ReturnLane { lane: Box<dyn TransferLane> },
     /// Whether a remote path is taken, for finding a free name for keep-both.
     Exists {
         path: String,
@@ -1088,10 +1140,10 @@ async fn run_transfer(task: TransferTask) {
         })
         .await;
     if action.action == ConflictAction::Skip {
-        // The scheduler finishes the job on the decision alone; there is nothing to
-        // transfer and no lane to give back.
+        // The scheduler finishes the job on the decision alone. A lane opened for the
+        // resume check has done nothing wrong, so it goes back to the pool.
         if let Some(lane) = lane {
-            lane.close().await;
+            release_lane(&actor, lane).await;
         }
         let _ = done.send(Internal::LaneFinished(job)).await;
         return;
@@ -1172,8 +1224,8 @@ async fn run_transfer(task: TransferTask) {
     let moved = match moved {
         Ok(moved) => moved,
         Err(err) => {
-            // After a cancellation the lane's protocol state is uncertain, so it is
-            // discarded rather than reused.
+            // After a cancellation or a protocol error the lane's state is uncertain,
+            // so it is closed rather than offered to the next transfer.
             lane.close().await;
             report.send(finished(job, Err(err))).await;
             let _ = done.send(Internal::LaneFinished(job)).await;
@@ -1195,9 +1247,21 @@ async fn run_transfer(task: TransferTask) {
     })
     .await;
 
-    lane.close().await;
+    match &outcome {
+        Ok(_) => release_lane(&actor, lane).await,
+        Err(_) => lane.close().await,
+    }
     report.send(finished(job, outcome)).await;
     let _ = done.send(Internal::LaneFinished(job)).await;
+}
+
+/// Offer a finished lane back to the actor, closing it if the actor has gone.
+async fn release_lane(actor: &mpsc::Sender<ActorRequest>, lane: Box<dyn TransferLane>) {
+    if let Err(rejected) = actor.send(ActorRequest::ReturnLane { lane }).await
+        && let ActorRequest::ReturnLane { lane } = rejected.0
+    {
+        lane.close().await;
+    }
 }
 
 struct Publishing<'a> {

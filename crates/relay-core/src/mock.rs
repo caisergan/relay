@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -251,6 +251,9 @@ pub struct MockOptions {
     pub prompt_host_key: bool,
     /// Fail the next transfer with this error.
     pub fail_transfer: Option<EngineError>,
+    /// Counts every lane the backend opens, so a test can tell a pool that is being
+    /// reused from one that is not.
+    pub lanes_opened: Arc<AtomicUsize>,
     /// A switch a test can throw to make the connection go away.
     ///
     /// Shared rather than a count, because "the network dropped" is something that
@@ -268,6 +271,7 @@ impl Default for MockOptions {
             max_lanes: 4,
             prompt_host_key: false,
             fail_transfer: None,
+            lanes_opened: Arc::new(AtomicUsize::new(0)),
             severed: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -501,6 +505,7 @@ impl Protocol for MockBackend {
     }
 
     async fn open_lane(&mut self) -> Result<Box<dyn TransferLane>> {
+        self.opts.lanes_opened.fetch_add(1, Ordering::SeqCst);
         // The lane borrows nothing from the backend: that is the whole point.
         Ok(Box::new(MockLane {
             fs: self.fs.clone(),

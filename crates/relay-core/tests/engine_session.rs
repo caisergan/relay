@@ -1152,3 +1152,45 @@ async fn a_source_that_changes_during_a_resume_is_caught_before_the_rename() {
         "the rejected partial is not left behind"
     );
 }
+
+/// §2.3's lane pool. On a queue of small files the channel handshake is most of the
+/// work, so a lane that finished cleanly is offered to the next transfer instead of
+/// being thrown away and reopened.
+#[tokio::test]
+async fn a_finished_lane_is_reused_by_the_next_transfer() {
+    let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let h = harness(MockOptions {
+        lanes_opened: std::sync::Arc::clone(&opened),
+        ..MockOptions::default()
+    })
+    .await;
+    let cfg = server();
+    let server_id = cfg.id;
+    let session = h.engine.open_session(cfg).expect("session opens");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut jobs = Vec::new();
+    for name in ["a", "b", "c", "d"] {
+        jobs.push(
+            enqueue_one(
+                &h.engine,
+                session,
+                server_id,
+                Direction::Down,
+                "/home/deploy/notes.md",
+                dir.path().join(name),
+            )
+            .await,
+        );
+    }
+    for job in jobs {
+        poll_job(&h, job, |state| state.is_terminal()).await;
+    }
+
+    let count = opened.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        count < 4,
+        "four transfers opened {count} lanes; the pool is not being reused"
+    );
+    assert!(count >= 1, "at least one lane had to be opened");
+}
