@@ -17,9 +17,12 @@ this document separately: the first is measured, the second is not.
 
 One crypto provider across `russh`, `rustls` and `suppaftp`, so one stack is tested
 rather than two linked into one binary. `ring` was preferred over `russh`'s default
-`aws-lc-rs` for lighter build-time requirements on Windows. That prediction is
-**currently unverified**: the Windows CI leg is switched off (see `.github/workflows/ci.yml`),
-so nothing is building this stack for Windows. `aws-lc-rs` remains the documented fallback.
+`aws-lc-rs` for lighter build-time requirements on Windows. That prediction **held once**:
+run [34123068160](https://github.com/caisergan/relay/actions/runs/34123068160) built and
+clippy-checked the whole workspace on `windows-latest`, `ring` included, with no extra
+build tooling. The Windows leg has since been switched off in `.github/workflows/ci.yml`,
+so nothing re-checks it; treat that result as a snapshot of one commit, not a standing
+guarantee. `aws-lc-rs` remains the documented fallback.
 
 ## The fixture
 
@@ -124,7 +127,7 @@ default or deciding whether request pipelining is needed.
 | Gate | Why it is not answered |
 |---|---|
 | Windows OpenSSH named-pipe agent | Needs Windows. The unix-socket path is proven; the named-pipe path is not the same code |
-| Anything else Windows | The Windows CI leg is currently disabled, so `src-tauri` is not even compiled for it |
+| Anything else Windows | The Windows CI leg is currently disabled. `src-tauri` compiled and passed clippy there once (run 34123068160); nothing re-checks it now |
 | OS secrets — Keychain and Credential Manager | `keyring` compiles and nothing more. Write/read/delete and denied-store behaviour on both platforms are untested |
 | Throughput under realistic latency | Loopback only |
 | Keyboard-interactive success path | Needs a server configured to require it |
