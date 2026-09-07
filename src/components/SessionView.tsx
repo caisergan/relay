@@ -454,17 +454,37 @@ function SessionHeader({
             }
           : { label: 'Disconnected', dot: 'dot--down', tone: 'var(--danger)' }
 
-  const lost = state.kind === 'reconnecting'
+  // A session that gave up is still a session: its queue is paused, not lost, and the
+  // same banner offers the same button. The only difference is that nothing is
+  // counting down any more.
+  const outage =
+    state.kind === 'reconnecting'
+      ? { attempt: state.attempt, retryInSecs: state.retryInSecs }
+      : state.kind === 'disconnected' && state.unexpected
+        ? { attempt: null, retryInSecs: null }
+        : null
 
   return (
     <div className="session">
-      {lost && (
+      {outage && (
         <div className="session__lost" role="status">
-          <span className="spinner spinner--transit" />
+          {outage.retryInSecs !== null && <span className="spinner spinner--transit" />}
           <span style={{ flex: 1 }}>
-            <b>Connection lost.</b> Retrying in {state.retryInSecs}s — the queue is safe and
-            resumes on its own.
+            <b>Connection lost.</b>{' '}
+            {outage.retryInSecs !== null
+              ? `Retrying in ${outage.retryInSecs}s (attempt ${outage.attempt}) — the queue is paused and resumes on its own.`
+              : 'The queue is paused and waiting; nothing has been lost.'}
           </span>
+          <button
+            className="btn btn--small"
+            onClick={() => {
+              commands
+                .sessionReconnect(sessionId)
+                .catch((error: unknown) => toast('error', faultText(error)))
+            }}
+          >
+            Reconnect now
+          </button>
         </div>
       )}
       <div className="session__bar">

@@ -25,7 +25,10 @@ export function FlowGutter({ jobs }: Props) {
         {moving.length}
       </div>
       <div className="gutter__pills" aria-hidden>
-        {moving.slice(0, 5).map((job) => {
+        {/* Five is the design's cap. A sixth pill in a 52px channel does not add a
+            readout, it removes one: at that density they overlap and none of them can
+            be read. The overflow becomes a count instead. */}
+        {moving.slice(0, MAX_PILLS).map((job) => {
           const percent = job.size && job.size > 0 ? (job.transferred / job.size) * 100 : 0
           // Downloads travel right-to-left in the design: remote is the right pane.
           const top = job.direction === 'down' ? 100 - percent : percent
@@ -39,7 +42,12 @@ export function FlowGutter({ jobs }: Props) {
             </div>
           )
         })}
+        {moving.length > MAX_PILLS && (
+          <div className="pill pill--more">+{moving.length - MAX_PILLS}</div>
+        )}
       </div>
     </div>
   )
 }
+
+const MAX_PILLS = 5

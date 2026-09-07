@@ -326,6 +326,33 @@ export function IconSidebar(props: IconProps) {
   )
 }
 
+/** The queue's own controls. Two bars, a triangle and a circling arrow: the shapes
+ * every transport control in software has used for forty years, so they need no
+ * label to be understood — though they carry one anyway. */
+export function IconPause(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M9 5v14M15 5v14" />
+    </Svg>
+  )
+}
+
+export function IconPlay(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M7 4.5v15l12-7.5-12-7.5Z" />
+    </Svg>
+  )
+}
+
+export function IconRetry(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3 12a9 9 0 1 0 2.6-6.3M3 4v5h5" />
+    </Svg>
+  )
+}
+
 export function IconGear(props: IconProps) {
   return (
     <Svg {...props}>

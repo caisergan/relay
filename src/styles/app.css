@@ -1295,6 +1295,15 @@
   color: var(--signal);
   border-color: var(--signal);
 }
+/* The overflow count, parked at the foot of the channel where it cannot collide with
+   a travelling pill. It is a total, not a position, so it does not move. */
+.pill--more {
+  top: auto;
+  bottom: 6px;
+  background: var(--panel-2);
+  color: var(--ink-faint);
+  border-color: var(--line);
+}
 
 /* ---------------------------------------------------------------- drawer */
 
@@ -1437,6 +1446,32 @@
   padding: 9px 14px;
   border-bottom: 1px solid var(--line-2);
 }
+.job[draggable='true'] {
+  cursor: grab;
+}
+/* A child of a folder job, indented under its parent with a rule down the side: it
+   belongs to the row above rather than standing beside it. */
+.job--child {
+  padding-left: 30px;
+  box-shadow: inset 14px 0 0 -13px var(--line);
+}
+.job--dragging {
+  opacity: 0.45;
+}
+/* The drop target, marked on its top edge because that is where the row would land. */
+.job--over {
+  box-shadow: inset 0 2px 0 0 var(--signal);
+}
+.job__acts {
+  display: flex;
+  gap: 2px;
+  flex: none;
+  /* Reserved rather than revealed on hover: these buttons appear and disappear as a
+     job changes state, and a row whose width moved every time would be worse than one
+     that keeps the space. */
+  min-width: 56px;
+  justify-content: flex-end;
+}
 .job__dir {
   width: 22px;
   flex: none;
@@ -1513,6 +1548,91 @@
   color: var(--ink-faint);
 }
 
+/* An action in the drawer's tab strip — pause all, clear completed. Quieter than a
+   `.btn`, because it sits in a row of tabs rather than at the end of a sheet. */
+.drawer__act {
+  height: 22px;
+  padding: 0 10px;
+  margin-right: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-dim);
+  font-size: 11.5px;
+}
+.drawer__act:hover {
+  color: var(--ink);
+  border-color: var(--ink-faint);
+}
+
+/* ---------------------------------------------------------------- conflict */
+
+/* Two cards side by side. The design's own layout, and the reason for it: which file
+   is newer is the question people are answering, and two dates in a paragraph make
+   them do the comparison themselves. */
+.conflict {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 12px 0 4px;
+}
+.conflict__side {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  min-width: 0;
+}
+.conflict__side--newer {
+  border-color: var(--signal);
+  background: var(--signal-soft);
+}
+.conflict__label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+}
+.conflict__path {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conflict__meta {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-dim);
+}
+.conflict__badge {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--signal);
+  color: #fff;
+  font-size: 9.5px;
+  letter-spacing: 0.03em;
+}
+
+/* "Do this for the other N files." */
+.sheet__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+
 /* ---------------------------------------------------------------- overlays */
 
 .scrim {
@@ -1579,6 +1699,12 @@
   background: var(--signal);
   border-color: var(--signal);
   color: #fff;
+}
+/* For a button inside a banner, where a 30px control would set the row's height. */
+.btn--small {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 11.5px;
 }
 .btn--danger {
   background: var(--danger);
