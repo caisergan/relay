@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings are failures: a lint we tolerate today is one nobody reads tomorrow.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The engine has no GUI dependency, so it is tested where CI is cheapest and
+  # fastest. `cargo tree` failing here would mean Tauri crept into the core.
+  engine:
+    name: Engine (relay-core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: The engine must not depend on Tauri
+        run: |
+          if cargo tree -p relay-core | grep -qi '^\s*[|`-]*\s*tauri'; then
+            echo "relay-core has picked up a Tauri dependency"
+            cargo tree -p relay-core | grep -i tauri
+            exit 1
+          fi
+
+      - name: Clippy
+        run: cargo clippy -p relay-core --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test -p relay-core
+
+  # Generated bindings are checked in so the frontend builds without a Rust
+  # toolchain; this job is what stops them drifting from the Rust types.
+  bindings:
+    name: Generated IPC types are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run -p relay-core --example gen-ipc
+      - name: Fail if `pnpm gen:ipc` was not run
+        run: git diff --exit-code -- src/ipc/gen.ts
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm format
+      - run: pnpm test
+      - run: pnpm build
+
+  # The shell only exists on the platforms Relay ships to. This is the job that
+  # actually compiles src-tauri, so a change there is not verified until it runs.
+  shell:
+    name: Shell (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Clippy (whole workspace)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Engine tests on the shipped platform
+        run: cargo test -p relay-core
+
+      - name: Debug bundle smoke build
+        run: pnpm tauri build --debug --no-bundle

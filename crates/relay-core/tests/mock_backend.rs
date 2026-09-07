@@ -9,7 +9,7 @@ use relay_core::error::EngineError;
 use relay_core::interact::{Interact, Prompt, PromptReply};
 use relay_core::mock::{MockBackend, MockFs, MockOptions, NoSecrets};
 use relay_core::model::{AuthMethod, Proto, ServerConfig, SessionId};
-use relay_core::protocol::{Protocol, ProgressSink, TransferReq};
+use relay_core::protocol::{ProgressSink, Protocol, TransferReq};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -36,7 +36,9 @@ struct AlwaysAccept;
 impl Interact for AlwaysAccept {
     async fn ask(&self, _session: SessionId, prompt: Prompt) -> PromptReply {
         match prompt {
-            Prompt::Password { .. } => PromptReply::Password { value: "hunter2".into() },
+            Prompt::Password { .. } => PromptReply::Password {
+                value: "hunter2".into(),
+            },
             _ => PromptReply::Accept { remember: true },
         }
     }
@@ -71,8 +73,14 @@ async fn lists_a_directory_with_dirs_and_files() {
     assert!(names.contains(&"notes.md"), "got {names:?}");
     assert!(names.contains(&"releases"));
 
-    let dotfile = entries.iter().find(|e| e.name == ".bashrc").expect("dotfile listed");
-    assert!(dotfile.is_hidden(), "the pane dims these rather than hiding them");
+    let dotfile = entries
+        .iter()
+        .find(|e| e.name == ".bashrc")
+        .expect("dotfile listed");
+    assert!(
+        dotfile.is_hidden(),
+        "the pane dims these rather than hiding them"
+    );
 
     let root = backend.list("/").await.expect("root listing");
     assert!(root.iter().any(|e| e.name == "home" && e.is_dir()));
@@ -94,20 +102,33 @@ async fn downloads_and_uploads_round_trip_byte_for_byte() {
     let local = dir.path().join("app.js");
     let mut lane = backend.open_lane().await.expect("lane");
     let outcome = lane
-        .download(req(Uuid::new_v4(), "/var/www/assets/app.js", local.clone(), CancellationToken::new()))
+        .download(req(
+            Uuid::new_v4(),
+            "/var/www/assets/app.js",
+            local.clone(),
+            CancellationToken::new(),
+        ))
         .await
         .expect("download");
 
     assert_eq!(outcome.bytes, 256 * 1024);
-    assert_eq!(std::fs::read(&local).unwrap(), fs.read_file("/var/www/assets/app.js").unwrap());
+    assert_eq!(
+        std::fs::read(&local).unwrap(),
+        fs.read_file("/var/www/assets/app.js").unwrap()
+    );
     assert!(
         std::fs::read_dir(dir.path()).unwrap().count() == 1,
         "the temporary partial must be gone after finalisation"
     );
 
-    lane.upload(req(Uuid::new_v4(), "/var/www/assets/copy.js", local.clone(), CancellationToken::new()))
-        .await
-        .expect("upload");
+    lane.upload(req(
+        Uuid::new_v4(),
+        "/var/www/assets/copy.js",
+        local.clone(),
+        CancellationToken::new(),
+    ))
+    .await
+    .expect("upload");
     assert_eq!(
         fs.read_file("/var/www/assets/copy.js").unwrap(),
         std::fs::read(&local).unwrap()
@@ -118,7 +139,14 @@ async fn downloads_and_uploads_round_trip_byte_for_byte() {
 async fn progress_is_monotonic_and_ends_at_the_full_size() {
     let fs = MockFs::seeded();
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut backend = connected(fs, MockOptions { chunk: 4096, ..MockOptions::default() }).await;
+    let mut backend = connected(
+        fs,
+        MockOptions {
+            chunk: 4096,
+            ..MockOptions::default()
+        },
+    )
+    .await;
 
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
     let sink = {
@@ -139,7 +167,10 @@ async fn progress_is_monotonic_and_ends_at_the_full_size() {
     .expect("download");
 
     let seen = seen.lock().unwrap().clone();
-    assert!(seen.windows(2).all(|w| w[1] > w[0]), "progress went backwards");
+    assert!(
+        seen.windows(2).all(|w| w[1] > w[0]),
+        "progress went backwards"
+    );
     assert_eq!(seen.last().copied(), Some(3 * 1024 * 1024));
 }
 
@@ -162,18 +193,31 @@ async fn browsing_continues_while_two_lanes_transfer() {
     let b = dir.path().join("b.js");
     let t1 = tokio::spawn(async move {
         first
-            .download(req(Uuid::new_v4(), "/var/log/nginx/access.log", a, CancellationToken::new()))
+            .download(req(
+                Uuid::new_v4(),
+                "/var/log/nginx/access.log",
+                a,
+                CancellationToken::new(),
+            ))
             .await
     });
     let t2 = tokio::spawn(async move {
         second
-            .download(req(Uuid::new_v4(), "/var/www/assets/app.js", b, CancellationToken::new()))
+            .download(req(
+                Uuid::new_v4(),
+                "/var/www/assets/app.js",
+                b,
+                CancellationToken::new(),
+            ))
             .await
     });
 
     // The backend is still ours to browse with while both transfers run.
     for _ in 0..5 {
-        backend.list("/home/deploy").await.expect("listing during transfers");
+        backend
+            .list("/home/deploy")
+            .await
+            .expect("listing during transfers");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
@@ -199,7 +243,13 @@ async fn cancellation_removes_the_partial_and_never_creates_the_destination() {
         let cancel = cancel.clone();
         let local = local.clone();
         tokio::spawn(async move {
-            lane.download(req(Uuid::new_v4(), "/var/log/nginx/access.log", local, cancel)).await
+            lane.download(req(
+                Uuid::new_v4(),
+                "/var/log/nginx/access.log",
+                local,
+                cancel,
+            ))
+            .await
         })
     };
 
@@ -208,7 +258,10 @@ async fn cancellation_removes_the_partial_and_never_creates_the_destination() {
 
     let err = handle.await.unwrap().unwrap_err();
     assert!(matches!(err, EngineError::Cancelled), "got {err:?}");
-    assert!(!local.exists(), "a cancelled download must not create the destination");
+    assert!(
+        !local.exists(),
+        "a cancelled download must not create the destination"
+    );
     assert_eq!(
         std::fs::read_dir(dir.path()).unwrap().count(),
         0,
@@ -239,7 +292,10 @@ async fn a_resume_offset_is_refused_when_the_partial_does_not_back_it_up() {
         .unwrap_err();
 
     assert!(
-        matches!(err, EngineError::NotFound { .. } | EngineError::ResumeUnverifiable { .. }),
+        matches!(
+            err,
+            EngineError::NotFound { .. } | EngineError::ResumeUnverifiable { .. }
+        ),
         "an unbacked offset must refuse to resume, got {err:?}"
     );
     assert!(!local.exists());
@@ -255,12 +311,18 @@ async fn declining_the_host_key_fails_the_connect_with_trust_rejected() {
         }
     }
 
-    let opts = MockOptions { prompt_host_key: true, ..MockOptions::default() };
+    let opts = MockOptions {
+        prompt_host_key: true,
+        ..MockOptions::default()
+    };
     let mut backend = MockBackend::with_options(MockFs::seeded(), Uuid::new_v4(), opts);
     let err = backend
         .connect(&server(), &NoSecrets, &AlwaysDeny)
         .await
         .unwrap_err();
 
-    assert!(matches!(err, EngineError::TrustRejected { .. }), "got {err:?}");
+    assert!(
+        matches!(err, EngineError::TrustRejected { .. }),
+        "got {err:?}"
+    );
 }

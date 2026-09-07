@@ -4,10 +4,13 @@ A lightweight, cross-platform file-transfer client for macOS and Windows, with a
 engine behind a custom-designed interface. The first release focuses on dependable
 SFTP; FTP/FTPS and richer editing tools follow after that release.
 
-> **Status: pre-implementation.** The architecture and implementation plans are written
-> down; no application code exists yet. Phase 0 is next, including compatibility
-> prototypes to validate the protocol libraries. Delivery follows acceptance gates,
-> with estimates revisited after those prototypes and the SFTP slice.
+> **Status: Phase 0 in progress.** The workspace, the engine contract, typed IPC with
+> snapshot recovery, and the design foundation are in and green. The compatibility
+> prototypes in [Phase 0 §0.6](docs/phases/phase-0-foundation.md) — real SFTP auth,
+> concurrency, interrupted transfers, FTPS, OS keychains — have **not been run yet**,
+> and no protocol library is validated until they are. See
+> [ADR 004](docs/adr/004-protocol-compatibility.md) for exactly what is proven and what
+> is not. Delivery follows acceptance gates; estimates come after the prototypes.
 
 ## Shape of the thing
 
@@ -32,6 +35,10 @@ See [`ROADMAP.md`](ROADMAP.md) §1 for the full analysis.
 relay/
 ├── ROADMAP.md                     # architecture decisions, scope, risks, release gates
 ├── docs/phases/                   # per-phase technical implementation plans
+├── docs/adr/                      # decisions, with the evidence behind them
+├── crates/relay-core/             # the engine: no GUI dependency, tests headlessly
+├── src-tauri/                     # the shell: a thin adapter over relay-core
+├── src/                           # React 19 frontend; src/ipc/gen.ts is generated
 ├── claude-design-relay/           # Relay.dc.html — the design source of truth
 └── reference/                     # untracked GPL reference sources (see its README)
 ```
@@ -50,6 +57,19 @@ checks are repeated for later releases. There is no fixed 14-week release commit
 | [5 — Ship](docs/phases/phase-5-ship.md) | SFTP 1.0 | Essential UX, reliability tests, beta, signed installers and updater |
 | [3 — FTP/FTPS](docs/phases/phase-3-ftp-ftps.md) | Post-1.0 | Second protocol family, LIST parsing, interoperability tests |
 | [4 — Relay experience](docs/phases/phase-4-relay-experience.md) | Post-1.0 | Command palette, editors, Quick Look, richer activity and import/export |
+
+## Working on it
+
+```sh
+pnpm install
+cargo test -p relay-core     # the engine, headless, no webview needed
+pnpm test                    # frontend unit tests
+pnpm gen:ipc                 # regenerate src/ipc/gen.ts from the Rust types
+pnpm tauri dev               # the app — needs a macOS or Windows machine
+```
+
+`relay-core` builds and tests anywhere Rust does. `src-tauri` needs a platform with a
+webview, so on Linux use the engine and frontend targets and let CI cover the shell.
 
 ## Contributing
 

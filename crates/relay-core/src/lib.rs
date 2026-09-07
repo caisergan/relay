@@ -17,14 +17,17 @@
 
 pub mod bindings;
 pub mod coordinator;
+pub mod demo;
 pub mod error;
 pub mod events;
 pub mod hub;
 pub mod interact;
 pub mod job;
+pub mod local;
 pub mod mock;
 pub mod model;
 pub mod protocol;
+pub mod settings;
 pub mod wire;
 
 pub use coordinator::{Coordinator, EngineEnvelope, EngineSnapshot, Subscription};
@@ -32,6 +35,6 @@ pub use error::{EngineError, Result};
 pub use events::EngineEvent;
 pub use hub::EngineHub;
 pub use interact::{Interact, Prompt, PromptBroker, PromptReply};
-pub use model::{SessionId, ServerConfig};
+pub use model::{ServerConfig, SessionId};
 pub use protocol::{Protocol, TransferLane, TransferReq};
 pub use wire::{Bytes, Order, Seq};

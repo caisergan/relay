@@ -1,0 +1,10 @@
+dist
+target
+pnpm-lock.yaml
+src/ipc/gen.ts
+reference
+claude-design-relay
+
+# Plan documents are hand-wrapped prose; reflowing their tables loses the alignment
+# that makes them readable in a terminal diff.
+*.md

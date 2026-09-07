@@ -19,10 +19,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use crate::error::{EngineError, Result};
 use crate::interact::{Interact, Prompt, PromptReply};
 use crate::model::{FileKind, RemoteEntry, ServerConfig, ServerInfo, SessionId};
-use crate::wire::Bytes;
 use crate::protocol::{
     BackendCapabilities, Protocol, SecretSource, TransferLane, TransferOutcome, TransferReq,
 };
+use crate::wire::Bytes;
 
 #[derive(Debug, Clone)]
 struct FileNode {

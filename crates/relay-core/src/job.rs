@@ -101,9 +101,7 @@ impl JobSnapshot {
     pub fn percent(&self) -> Option<f32> {
         match self.size {
             Some(Bytes::ZERO) => Some(100.0),
-            Some(size) => {
-                Some((self.transferred.get() as f64 / size.get() as f64 * 100.0) as f32)
-            }
+            Some(size) => Some((self.transferred.get() as f64 / size.get() as f64 * 100.0) as f32),
             None => None,
         }
     }
@@ -117,4 +115,37 @@ pub struct QueueStats {
     pub failed: u32,
     pub done: u32,
     pub speed_bps: Bytes,
+}
+
+/// Queue commands the interface can issue. Phase 2 implements the scheduler behind
+/// them; phase 0 answers the ones the demo engine can honestly perform and returns
+/// `Unsupported` for the rest rather than pretending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum QueueOp {
+    #[serde(rename_all = "camelCase")]
+    Cancel {
+        job: JobId,
+    },
+    #[serde(rename_all = "camelCase")]
+    Retry {
+        job: JobId,
+    },
+    #[serde(rename_all = "camelCase")]
+    Pause {
+        job: JobId,
+    },
+    #[serde(rename_all = "camelCase")]
+    Resume {
+        job: JobId,
+    },
+    PauseAll,
+    ResumeAll,
+    /// Move `job` immediately after `after`, or to the front when `after` is `None`.
+    #[serde(rename_all = "camelCase")]
+    Reorder {
+        job: JobId,
+        after: Option<JobId>,
+    },
+    ClearCompleted,
 }

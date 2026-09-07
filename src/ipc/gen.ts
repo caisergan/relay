@@ -23,6 +23,8 @@ export type ConflictAction = "overwrite" | "skip" | "keepBoth" |
 /**  Only reachable when the engine offered it: see `Prompt::Conflict::resume_allowed`. */
 "resume";
 
+export type Density = "comfortable" | "compact";
+
 export type Direction = "up" | "down";
 
 /**
@@ -224,6 +226,15 @@ export type PromptRequest = {
  */
 export type Proto = "sftp" | "ftps" | "ftp";
 
+/**
+ *  Queue commands the interface can issue. Phase 2 implements the scheduler behind
+ *  them; phase 0 answers the ones the demo engine can honestly perform and returns
+ *  `Unsupported` for the rest rather than pretending.
+ */
+export type QueueOp = { kind: "cancel"; job: string } | { kind: "retry"; job: string } | { kind: "pause"; job: string } | { kind: "resume"; job: string } | { kind: "pauseAll" } | { kind: "resumeAll" } | 
+/**  Move `job` immediately after `after`, or to the front when `after` is `None`. */
+{ kind: "reorder"; job: string; after: string | null } | { kind: "clearCompleted" };
+
 export type QueueStats = {
 	active: number,
 	queued: number,
@@ -305,9 +316,25 @@ retryInSecs: number } | { kind: "disconnected"; reason: string;
 /**  False after a deliberate close, which suppresses the connection-lost pane. */
 unexpected: boolean };
 
+export type Settings = {
+	theme: Theme,
+	density: Density,
+	/**  Simultaneous transfers, 1–8. */
+	concurrency: number,
+	/**  `None` opens the conflict sheet every time. */
+	defaultConflict: ConflictAction | null,
+	downloadDir: string | null,
+	/**  Show dotfiles and Windows-hidden files in both panes. */
+	showHidden: boolean,
+};
+
 export type SnapshotError = 
 /**
  *  The subscription was dropped (overflow, unsubscribe, or engine restart).
  *  Subscribe again and retry; do not reuse the old watermark.
  */
 { kind: "unknownSubscription" };
+
+export type Theme = "light" | "dark" | 
+/**  Follow the operating system. */
+"system";

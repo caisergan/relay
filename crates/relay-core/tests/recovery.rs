@@ -8,13 +8,13 @@
 use std::time::Duration;
 
 use chrono::Utc;
+use relay_core::EngineHub;
 use relay_core::coordinator::SnapshotError;
 use relay_core::events::{EngineEvent, ListingSnapshot, LogKind, LogLine};
 use relay_core::interact::{Interact, Prompt, PromptReply, ResolveError};
 use relay_core::job::{JobSnapshot, JobState};
 use relay_core::model::{Direction, FileKind, Proto, RemoteEntry, Session, SessionState};
 use relay_core::wire::{Bytes, Order, Seq};
-use relay_core::EngineHub;
 use uuid::Uuid;
 
 fn hub() -> std::sync::Arc<EngineHub> {
@@ -74,7 +74,10 @@ fn listing(session: Uuid, path: &str, request: u64) -> Box<ListingSnapshot> {
 }
 
 /// Wait for the coordinator to have sequenced at least `n` envelopes for us.
-async fn drain(rx: &mut tokio::sync::mpsc::Receiver<relay_core::EngineEnvelope>, n: usize) -> Vec<relay_core::EngineEnvelope> {
+async fn drain(
+    rx: &mut tokio::sync::mpsc::Receiver<relay_core::EngineEnvelope>,
+    n: usize,
+) -> Vec<relay_core::EngineEnvelope> {
     let mut out = Vec::new();
     for _ in 0..n {
         match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
@@ -92,9 +95,16 @@ async fn a_remount_recovers_state_without_replaying_updates_twice() {
     let sid = Uuid::new_v4();
     let jid = Uuid::new_v4();
 
-    events.send(EngineEvent::SessionOpened { session: Box::new(session(sid)) }).await.unwrap();
     events
-        .send(EngineEvent::JobUpdate { job: job(jid, sid, JobState::Done { at: Utc::now() }, 1000) })
+        .send(EngineEvent::SessionOpened {
+            session: Box::new(session(sid)),
+        })
+        .await
+        .unwrap();
+    events
+        .send(EngineEvent::JobUpdate {
+            job: job(jid, sid, JobState::Done { at: Utc::now() }, 1000),
+        })
         .await
         .unwrap();
 
@@ -110,16 +120,30 @@ async fn a_remount_recovers_state_without_replaying_updates_twice() {
     };
 
     assert_eq!(snapshot.sessions.len(), 1);
-    assert_eq!(snapshot.jobs.len(), 1, "a finished job must survive the remount");
+    assert_eq!(
+        snapshot.jobs.len(),
+        1,
+        "a finished job must survive the remount"
+    );
     assert!(matches!(snapshot.jobs[0].state, JobState::Done { .. }));
 
     // Updates published after the snapshot carry a strictly greater sequence number,
     // which is exactly the rule the bridge uses to avoid double-applying.
-    events.send(EngineEvent::Latency { id: sid, ms: 42 }).await.unwrap();
+    events
+        .send(EngineEvent::Latency { id: sid, ms: 42 })
+        .await
+        .unwrap();
     let later = drain(&mut sub.rx, 1).await;
-    let latency = later.iter().find(|e| matches!(e.update, EngineEvent::Latency { .. }));
+    let latency = later
+        .iter()
+        .find(|e| matches!(e.update, EngineEvent::Latency { .. }));
     if let Some(env) = latency {
-        assert!(env.seq > snapshot.seq, "seq {} must exceed watermark {}", env.seq, snapshot.seq);
+        assert!(
+            env.seq > snapshot.seq,
+            "seq {} must exceed watermark {}",
+            env.seq,
+            snapshot.seq
+        );
         assert_eq!(env.epoch, snapshot.epoch);
     }
 }
@@ -133,7 +157,10 @@ async fn an_unknown_subscription_is_told_to_resubscribe() {
     let sub = hub.subscribe();
     assert!(hub.snapshot(sub.id).is_ok());
     hub.coordinator().unsubscribe(sub.id);
-    assert_eq!(hub.snapshot(sub.id).unwrap_err(), SnapshotError::UnknownSubscription);
+    assert_eq!(
+        hub.snapshot(sub.id).unwrap_err(),
+        SnapshotError::UnknownSubscription
+    );
 }
 
 #[tokio::test]
@@ -141,7 +168,12 @@ async fn a_subscriber_that_stops_reading_is_dropped_rather_than_losing_updates()
     let hub = hub();
     let sub = hub.subscribe();
     let sid = Uuid::new_v4();
-    hub.events().send(EngineEvent::SessionOpened { session: Box::new(session(sid)) }).await.unwrap();
+    hub.events()
+        .send(EngineEvent::SessionOpened {
+            session: Box::new(session(sid)),
+        })
+        .await
+        .unwrap();
 
     // Never read from sub.rx. Once the buffer fills, the subscription is invalidated
     // so the bridge resnapshots instead of silently missing an update.
@@ -149,7 +181,11 @@ async fn a_subscriber_that_stops_reading_is_dropped_rather_than_losing_updates()
         hub.events()
             .send(EngineEvent::Log {
                 id: sid,
-                line: LogLine { at: Utc::now(), kind: LogKind::Status, line: format!("line {i}") },
+                line: LogLine {
+                    at: Utc::now(),
+                    kind: LogKind::Status,
+                    line: format!("line {i}"),
+                },
             })
             .await
             .unwrap();
@@ -166,7 +202,10 @@ async fn a_subscriber_that_stops_reading_is_dropped_rather_than_losing_updates()
     .await
     .unwrap_or(false);
 
-    assert!(dropped, "an overflowing subscriber must be invalidated, not quietly starved");
+    assert!(
+        dropped,
+        "an overflowing subscriber must be invalidated, not quietly starved"
+    );
     assert_eq!(hub.coordinator().subscriber_count(), 0);
 }
 
@@ -213,11 +252,15 @@ async fn an_open_prompt_is_still_in_the_snapshot_and_answers_exactly_once() {
 
     // A remount that replays its answer must be a no-op, not a second decision.
     assert_eq!(
-        hub.prompts().resolve(prompt_id, PromptReply::Accept { remember: true }),
+        hub.prompts()
+            .resolve(prompt_id, PromptReply::Accept { remember: true }),
         Err(ResolveError::Unknown)
     );
 
-    let reply = tokio::time::timeout(Duration::from_secs(2), asking).await.unwrap().unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(2), asking)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(matches!(reply, PromptReply::Accept { remember: true }));
     assert!(hub.prompts().pending().is_empty());
 }
@@ -228,7 +271,14 @@ async fn a_reply_that_answers_a_different_question_is_rejected() {
     let sid = Uuid::new_v4();
     let prompts = std::sync::Arc::clone(hub.prompts());
     let asking = tokio::spawn(async move {
-        prompts.ask(sid, Prompt::Password { hint: "deploy".into() }).await
+        prompts
+            .ask(
+                sid,
+                Prompt::Password {
+                    hint: "deploy".into(),
+                },
+            )
+            .await
     });
 
     let id = tokio::time::timeout(Duration::from_secs(2), async {
@@ -243,10 +293,13 @@ async fn a_reply_that_answers_a_different_question_is_rejected() {
     .unwrap();
 
     assert_eq!(
-        hub.prompts().resolve(id, PromptReply::Conflict {
-            action: relay_core::interact::ConflictAction::Overwrite,
-            apply_to_remaining: false,
-        }),
+        hub.prompts().resolve(
+            id,
+            PromptReply::Conflict {
+                action: relay_core::interact::ConflictAction::Overwrite,
+                apply_to_remaining: false,
+            }
+        ),
         Err(ResolveError::Mismatched),
         "a conflict answer must not resolve a password question"
     );
@@ -264,11 +317,19 @@ async fn closing_a_session_denies_its_open_prompts() {
 
     let asking = tokio::spawn({
         let prompts = std::sync::Arc::clone(&prompts);
-        async move { prompts.ask(sid, Prompt::Password { hint: "a".into() }).await }
+        async move {
+            prompts
+                .ask(sid, Prompt::Password { hint: "a".into() })
+                .await
+        }
     });
     let untouched = tokio::spawn({
         let prompts = std::sync::Arc::clone(&prompts);
-        async move { prompts.ask(other, Prompt::Password { hint: "b".into() }).await }
+        async move {
+            prompts
+                .ask(other, Prompt::Password { hint: "b".into() })
+                .await
+        }
     });
 
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -281,7 +342,11 @@ async fn closing_a_session_denies_its_open_prompts() {
 
     hub.prompts().deny_session(sid);
     assert!(matches!(asking.await.unwrap(), PromptReply::Deny));
-    assert_eq!(hub.prompts().pending().len(), 1, "other sessions keep their prompts");
+    assert_eq!(
+        hub.prompts().pending().len(),
+        1,
+        "other sessions keep their prompts"
+    );
 
     hub.prompts().deny_session(other);
     assert!(matches!(untouched.await.unwrap(), PromptReply::Deny));
@@ -292,12 +357,27 @@ async fn a_slow_listing_cannot_replace_a_newer_directory() {
     let hub = hub();
     let sub = hub.subscribe();
     let sid = Uuid::new_v4();
-    hub.events().send(EngineEvent::SessionOpened { session: Box::new(session(sid)) }).await.unwrap();
+    hub.events()
+        .send(EngineEvent::SessionOpened {
+            session: Box::new(session(sid)),
+        })
+        .await
+        .unwrap();
 
     // The user navigated to /var/www (request 2) while /home/deploy (request 1) was
     // still in flight; the late arrival must not win.
-    hub.events().send(EngineEvent::Listing { listing: listing(sid, "/var/www", 2) }).await.unwrap();
-    hub.events().send(EngineEvent::Listing { listing: listing(sid, "/home/deploy", 1) }).await.unwrap();
+    hub.events()
+        .send(EngineEvent::Listing {
+            listing: listing(sid, "/var/www", 2),
+        })
+        .await
+        .unwrap();
+    hub.events()
+        .send(EngineEvent::Listing {
+            listing: listing(sid, "/home/deploy", 1),
+        })
+        .await
+        .unwrap();
 
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -322,16 +402,25 @@ async fn progress_is_coalesced_but_the_terminal_state_always_arrives() {
     let mut sub = hub.subscribe();
     let sid = Uuid::new_v4();
     let jid = Uuid::new_v4();
-    hub.events().send(EngineEvent::SessionOpened { session: Box::new(session(sid)) }).await.unwrap();
+    hub.events()
+        .send(EngineEvent::SessionOpened {
+            session: Box::new(session(sid)),
+        })
+        .await
+        .unwrap();
 
     for transferred in 1..=200u64 {
         hub.events()
-            .send(EngineEvent::JobUpdate { job: job(jid, sid, JobState::Transferring, transferred * 5) })
+            .send(EngineEvent::JobUpdate {
+                job: job(jid, sid, JobState::Transferring, transferred * 5),
+            })
             .await
             .unwrap();
     }
     hub.events()
-        .send(EngineEvent::JobUpdate { job: job(jid, sid, JobState::Done { at: Utc::now() }, 1000) })
+        .send(EngineEvent::JobUpdate {
+            job: job(jid, sid, JobState::Done { at: Utc::now() }, 1000),
+        })
         .await
         .unwrap();
 
@@ -349,7 +438,10 @@ async fn progress_is_coalesced_but_the_terminal_state_always_arrives() {
     let last = job_updates.last().expect("at least one job update");
     match &last.update {
         EngineEvent::JobUpdate { job } => {
-            assert!(matches!(job.state, JobState::Done { .. }), "final state must not be dropped");
+            assert!(
+                matches!(job.state, JobState::Done { .. }),
+                "final state must not be dropped"
+            );
             assert_eq!(job.transferred, Bytes(1000));
         }
         other => panic!("unexpected {other:?}"),
@@ -357,5 +449,8 @@ async fn progress_is_coalesced_but_the_terminal_state_always_arrives() {
 
     // Sequence numbers are contiguous: coalescing happens before they are assigned.
     let seqs: Vec<u64> = envelopes.iter().map(|e| e.seq.get()).collect();
-    assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "the stream must have no gaps");
+    assert!(
+        seqs.windows(2).all(|w| w[1] == w[0] + 1),
+        "the stream must have no gaps"
+    );
 }
