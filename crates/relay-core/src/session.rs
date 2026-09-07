@@ -317,6 +317,18 @@ impl SessionHandle {
     }
 }
 
+/// Whether an operation's failure means the connection is gone, and what to say
+/// about it.
+///
+/// A network fault is the connection; everything else is one operation failing on a
+/// session that still works, and a missing path is not a dead session.
+fn fatal_reason<T>(out: &Result<T>) -> Option<String> {
+    match out {
+        Err(err @ EngineError::Network { .. }) => Some(err.to_string()),
+        _ => None,
+    }
+}
+
 fn closed() -> EngineError {
     EngineError::protocol("the session is closed")
 }
@@ -669,7 +681,20 @@ impl SessionActor {
                             Some((lane, _)) => Ok(lane),
                             None => self.backend.open_lane().await,
                         };
+                        // A lane that cannot be opened is usually the connection
+                        // rather than the lane. Noticing here rather than waiting for
+                        // the next keepalive is the difference between reconnecting
+                        // now and failing every dispatch for up to thirty seconds.
+                        //
+                        // Classified before the lane is handed over, because holding a
+                        // `TransferLane` across an await would make this whole future
+                        // require `Sync` — and a lane is owned by one task by design.
+                        let reason = fatal_reason(&lane);
                         let _ = reply.send(lane);
+                        if let Some(reason) = reason {
+                            self.out.log(LogKind::Error, reason.clone()).await;
+                            return Outcome::Lost { reason, retryable: true };
+                        }
                     }
                     ActorRequest::ReturnLane { lane } => {
                         self.idle_lanes.push((lane, Instant::now()));
@@ -679,10 +704,14 @@ impl SessionActor {
                             self.backend.stat(&path), "stat", OP_DEADLINE, &self.cancel.clone(),
                         )
                         .await;
+                        let fatal = self.check_fatal(&taken).await;
                         // A stat that fails is not proof the path is free, so a name
                         // that cannot be checked counts as taken and the search moves
                         // on. Guessing the other way overwrites somebody's file.
                         let _ = reply.send(!matches!(taken, Ok(None)));
+                        if let ControlFlow::Break(reason) = fatal {
+                            return Outcome::Lost { reason, retryable: true };
+                        }
                     }
                 },
                 cmd = cmd_rx.recv() => {
@@ -897,12 +926,12 @@ impl SessionActor {
     /// decides whether this becomes a banner counting down or a disconnection, and it
     /// needs the words either way.
     async fn check_fatal<T>(&mut self, out: &Result<T>) -> ControlFlow<String> {
-        match out {
-            Err(err @ EngineError::Network { .. }) => {
-                self.out.log(LogKind::Error, err.to_string()).await;
-                ControlFlow::Break(err.to_string())
+        match fatal_reason(out) {
+            Some(reason) => {
+                self.out.log(LogKind::Error, reason.clone()).await;
+                ControlFlow::Break(reason)
             }
-            _ => ControlFlow::Continue(()),
+            None => ControlFlow::Continue(()),
         }
     }
 

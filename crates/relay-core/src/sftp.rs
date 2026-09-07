@@ -1284,9 +1284,18 @@ fn ssh_error(err: russh::Error) -> EngineError {
             message: "the server rejected these credentials".into(),
         },
         russh::Error::IO(io) => EngineError::network(io.to_string()),
-        russh::Error::Disconnect | russh::Error::HUP | russh::Error::ConnectionTimeout => {
-            EngineError::network(err.to_string())
-        }
+        // Every way a connection can be gone. `SendError` — russh's "Channel send
+        // error" — is the one that matters most and read as a protocol fault until a
+        // real server was restarted underneath a transfer: nothing treated it as an
+        // outage, so the session never reconnected and the job failed where it should
+        // have waited. The keepalive and inactivity timeouts are the same fact
+        // arriving from a different direction.
+        russh::Error::Disconnect
+        | russh::Error::HUP
+        | russh::Error::ConnectionTimeout
+        | russh::Error::SendError
+        | russh::Error::KeepaliveTimeout
+        | russh::Error::InactivityTimeout => EngineError::network(err.to_string()),
         other => EngineError::protocol(other.to_string()),
     }
 }
@@ -1316,6 +1325,54 @@ fn sftp_error(err: SftpError) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The classification the reconnect depends on. A dropped connection has to look
+    /// like a network fault, or `check_fatal` will not notice, the session will not
+    /// reconnect, and the job will fail immediately instead of being retried.
+    ///
+    /// This was wrong until a real server was restarted underneath a transfer: the
+    /// mock backend reports its own severance as `Network`, so every test agreed with
+    /// the code rather than with OpenSSH.
+    #[test]
+    fn a_dropped_connection_is_a_network_fault_however_it_arrives() {
+        for err in [
+            russh::Error::SendError,
+            russh::Error::HUP,
+            russh::Error::Disconnect,
+            russh::Error::ConnectionTimeout,
+            russh::Error::KeepaliveTimeout,
+            russh::Error::InactivityTimeout,
+        ] {
+            let text = err.to_string();
+            let mapped = ssh_error(err);
+            assert!(
+                matches!(mapped, EngineError::Network { .. }),
+                "{text} must be retryable, got {mapped:?}"
+            );
+            assert!(mapped.is_retryable(), "{text}");
+        }
+
+        for err in [SftpError::IO("broken pipe".into()), SftpError::Timeout] {
+            let mapped = sftp_error(err);
+            assert!(matches!(mapped, EngineError::Network { .. }), "{mapped:?}");
+        }
+    }
+
+    /// And the ones a reconnect would not help with stay where they are: rejected
+    /// credentials are an answer, and a server talking nonsense will talk the same
+    /// nonsense to the next connection.
+    #[test]
+    fn a_rejection_is_not_a_connection_problem() {
+        assert!(matches!(
+            ssh_error(russh::Error::NotAuthenticated),
+            EngineError::Auth { .. }
+        ));
+        let mapped = sftp_error(SftpError::UnexpectedBehavior(
+            "two replies to one request".into(),
+        ));
+        assert!(matches!(mapped, EngineError::Protocol { .. }), "{mapped:?}");
+        assert!(!mapped.is_retryable());
+    }
 
     #[test]
     fn permissions_render_the_way_ls_does() {
