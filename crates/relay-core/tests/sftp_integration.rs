@@ -24,10 +24,13 @@ use async_trait::async_trait;
 use relay_core::error::EngineError;
 use relay_core::interact::{Interact, Prompt, PromptReply};
 use relay_core::model::{AuthMethod, FileKind, ServerConfig, SessionId};
+use relay_core::model::{Direction, FileFacts};
 use relay_core::protocol::{CheckpointSink, ProgressSink, Protocol, TransferReq};
+use relay_core::queue::ResumeRecord;
 use relay_core::secrets::{MemorySecrets, SecretKind};
 use relay_core::sftp::SftpBackend;
 use relay_core::trust::{TrustDecision, TrustStore};
+use relay_core::wire::Bytes;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
@@ -568,4 +571,194 @@ async fn two_lanes_transfer_while_the_browse_channel_keeps_listing() {
         let outcome = lane.await.expect("no panic").expect("download");
         assert_eq!(outcome.final_size, 32 * 1024 * 1024);
     }
+}
+
+/// Phase 2 §2.4, against a real server: stop a transfer, verify what it left, continue
+/// from there, and get the file the server has rather than something the right length.
+#[tokio::test]
+async fn a_paused_download_resumes_from_a_verified_checkpoint() {
+    let mut c = connect(AuthMethod::Password).await;
+    let source = remote("assets/thirty-two-mib.bin");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let local = dir.path().join("thirty-two-mib.bin");
+    let job = uuid::Uuid::new_v4();
+
+    // ---- the interrupted attempt -------------------------------------------
+    let checkpoints: Arc<std::sync::Mutex<Vec<(u64, String)>>> = Arc::default();
+    let cancel = CancellationToken::new();
+    let keep = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let request = TransferReq {
+        job,
+        remote_path: source.clone(),
+        local_path: local.clone(),
+        offset: 0,
+        prefix: None,
+        progress: ProgressSink::noop(),
+        checkpoint: {
+            let seen = Arc::clone(&checkpoints);
+            CheckpointSink::new(move |at, digest| seen.lock().unwrap().push((at, digest)))
+        },
+        cancel: cancel.clone(),
+        // A pause, not a cancellation: the bytes are what the resume will continue.
+        keep_partial: Arc::clone(&keep),
+    };
+
+    let mut lane = c.backend.open_lane().await.expect("lane");
+    let task = tokio::spawn(async move {
+        let outcome = lane.download(request).await;
+        lane.close().await;
+        outcome
+    });
+    // Long enough to move past the first checkpoint, which the backend takes every
+    // eight megabytes.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    cancel.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("the pause is observed")
+        .expect("no panic");
+    assert!(
+        matches!(outcome, Err(EngineError::Cancelled)),
+        "{outcome:?}"
+    );
+
+    let recorded = checkpoints.lock().unwrap().clone();
+    assert!(
+        !recorded.is_empty(),
+        "no checkpoint was taken in 1.5s; the transfer is too slow for this test to \
+         mean anything"
+    );
+    let (at, digest) = recorded.last().cloned().expect("a checkpoint");
+
+    // The partial survived the pause, and is at least as long as the checkpoint.
+    let partial = relay_core::protocol::local_partial(&local, job);
+    let held = std::fs::metadata(&partial)
+        .expect("the partial is still there")
+        .len();
+    assert!(
+        held >= at,
+        "the partial holds {held}, the checkpoint claims {at}"
+    );
+
+    // ---- verification -------------------------------------------------------
+    let record = ResumeRecord {
+        checkpoint: Bytes(at),
+        prefix_sha256: digest.clone(),
+        ..ResumeRecord::new(
+            FileFacts {
+                path: source.clone(),
+                // Zero means "unknown" to the facts check, which is what the engine
+                // records when the source size was not read up front.
+                size: Bytes(0),
+                modified: None,
+                digest: None,
+            },
+            partial.display().to_string(),
+        )
+    };
+    let mut lane = c.backend.open_lane().await.expect("lane");
+    let prefix = relay_core::resume::check(
+        relay_core::resume::Verify {
+            record: &record,
+            direction: Direction::Down,
+            source_now: Some(&FileFacts {
+                path: source.clone(),
+                size: Bytes(0),
+                modified: None,
+                digest: None,
+            }),
+            local_path: &local,
+            remote_path: &source,
+        },
+        lane.as_mut(),
+    )
+    .await
+    .expect("the partial this engine wrote verifies against the source it came from");
+
+    // ---- the resumed attempt ------------------------------------------------
+    let request = TransferReq {
+        job,
+        remote_path: source.clone(),
+        local_path: local.clone(),
+        offset: at,
+        prefix: Some(prefix),
+        progress: ProgressSink::noop(),
+        checkpoint: CheckpointSink::noop(),
+        cancel: CancellationToken::new(),
+        keep_partial: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let outcome = lane.download(request).await.expect("the resume completes");
+    lane.close().await;
+
+    assert_eq!(outcome.final_size, 32 * 1024 * 1024);
+    assert_eq!(
+        sha256(&std::fs::read(&local).expect("read back")),
+        sha256(&std::fs::read(host_file("assets/thirty-two-mib.bin")).expect("source")),
+        "the resumed file is the server's file, not a splice that is the right length"
+    );
+    let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("dir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.contains("relaypart"))
+        .collect();
+    assert!(leftovers.is_empty(), "partials remain: {leftovers:?}");
+}
+
+/// The other half of the same rule: a partial whose bytes do not match what the source
+/// starts with must be refused, however plausible its length is.
+#[tokio::test]
+async fn a_partial_that_does_not_match_the_source_is_refused() {
+    let mut c = connect(AuthMethod::Password).await;
+    let source = remote("assets/one-mib.bin");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let job = uuid::Uuid::new_v4();
+    let local = dir.path().join("one-mib.bin");
+
+    // A partial of exactly the right length, holding entirely the wrong bytes — the
+    // case a size comparison cannot see.
+    let partial = relay_core::protocol::local_partial(&local, job);
+    let bogus = vec![b'x'; 4096];
+    std::fs::write(&partial, &bogus).expect("seed the partial");
+
+    let record = ResumeRecord {
+        checkpoint: Bytes(4096),
+        // The digest the engine *would* have recorded had it written those bytes.
+        prefix_sha256: sha256(&bogus),
+        ..ResumeRecord::new(
+            FileFacts {
+                path: source.clone(),
+                size: Bytes(0),
+                modified: None,
+                digest: None,
+            },
+            partial.display().to_string(),
+        )
+    };
+
+    let mut lane = c.backend.open_lane().await.expect("lane");
+    let verdict = relay_core::resume::check(
+        relay_core::resume::Verify {
+            record: &record,
+            direction: Direction::Down,
+            source_now: Some(&FileFacts {
+                path: source.clone(),
+                size: Bytes(0),
+                modified: None,
+                digest: None,
+            }),
+            local_path: &local,
+            remote_path: &source,
+        },
+        lane.as_mut(),
+    )
+    .await;
+    lane.close().await;
+
+    let reason = verdict.expect_err("the source does not start with those bytes");
+    assert!(
+        reason.contains("no longer starts with"),
+        "the refusal should name the side that disagreed: {reason}"
+    );
 }
