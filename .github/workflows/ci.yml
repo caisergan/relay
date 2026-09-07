@@ -125,5 +125,39 @@ jobs:
       - name: Engine tests on the shipped platform
         run: cargo test -p relay-core
 
-      - name: Debug bundle smoke build
-        run: pnpm tauri build --debug --no-bundle
+      # A real bundle, not just a compile check: an app nobody has launched is not
+      # evidence that the shell works. Debug profile, because these are for looking
+      # at, and unsigned — signing and notarisation are phase 5.
+      - name: Bundle (macOS)
+        if: runner.os == 'macOS'
+        run: pnpm tauri build --debug --bundles app
+
+      - name: Bundle (Windows)
+        if: runner.os == 'Windows'
+        run: pnpm tauri build --debug --bundles nsis
+
+      # Zip the .app ourselves: upload-artifact would otherwise flatten the bundle
+      # and lose the executable bit, producing something macOS refuses to open.
+      - name: Package the macOS bundle
+        if: runner.os == 'macOS'
+        run: |
+          cd target/debug/bundle/macos
+          ditto -c -k --sequesterRsrc --keepParent Relay.app Relay-app.zip
+
+      - name: Upload the macOS app
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-macos-aarch64-debug
+          path: target/debug/bundle/macos/Relay-app.zip
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload the Windows installer
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-windows-x64-debug
+          path: target/debug/bundle/nsis/*-setup.exe
+          retention-days: 14
+          if-no-files-found: error
