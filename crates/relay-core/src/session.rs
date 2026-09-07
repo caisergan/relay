@@ -88,6 +88,14 @@ const LANE_SWEEP: Duration = Duration::from_secs(30);
 pub enum SessionCmd {
     List {
         path: String,
+        /// Whether the listing is also broadcast as a [`ListingSnapshot`].
+        ///
+        /// Navigation says yes: the pane draws itself from that event. A walk says no.
+        /// A recursive read that announced every directory it passed through would
+        /// replace the listing under the user mid-gesture — they right-click a folder
+        /// to size it and the pane they were reading jumps to some subdirectory three
+        /// levels down.
+        announce: bool,
         reply: oneshot::Sender<Result<Vec<RemoteEntry>>>,
     },
     Stat {
@@ -209,9 +217,26 @@ impl SessionHandle {
         rx.await.map_err(|_| closed())?
     }
 
+    /// A listing the pane will draw.
     pub async fn list_dir(&self, path: &str) -> Result<Vec<RemoteEntry>> {
         self.call(|reply| SessionCmd::List {
             path: path.to_string(),
+            announce: true,
+            reply,
+        })
+        .await
+    }
+
+    /// A listing for a walk: same request, no snapshot, so the pane keeps showing what
+    /// the user is actually looking at.
+    ///
+    /// It still goes through the one command queue, one directory at a time, which is
+    /// what keeps browsing responsive while a tree is being read — the worst anyone
+    /// waits for their next directory is the one listing already in flight.
+    pub async fn list_quiet(&self, path: &str) -> Result<Vec<RemoteEntry>> {
+        self.call(|reply| SessionCmd::List {
+            path: path.to_string(),
+            announce: false,
             reply,
         })
         .await
@@ -782,10 +807,14 @@ impl SessionActor {
     ) -> ControlFlow<String> {
         let cancel = self.cancel.clone();
         match cmd {
-            SessionCmd::List { path, reply } => {
+            SessionCmd::List {
+                path,
+                announce,
+                reply,
+            } => {
                 let out =
                     with_deadline(self.backend.list(&path), "list", OP_DEADLINE, &cancel).await;
-                if let Ok(entries) = &out {
+                if let (true, Ok(entries)) = (announce, &out) {
                     self.out.listing(&path, entries.clone()).await;
                 }
                 let flow = self.check_fatal(&out).await;

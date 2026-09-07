@@ -171,7 +171,10 @@ impl Walk {
     async fn read(&self, relative: &Path) -> Result<(Vec<String>, Vec<String>)> {
         match self.direction {
             Direction::Down => {
-                let entries = self.session.list_dir(&self.remote_path(relative)).await?;
+                // Quiet: a recursive transfer walks directories the user is not
+                // looking at, and announcing each one replaced the listing in their
+                // pane as the walk descended.
+                let entries = self.session.list_quiet(&self.remote_path(relative)).await?;
                 Ok(split(
                     entries
                         .into_iter()
