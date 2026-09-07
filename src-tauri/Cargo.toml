@@ -21,7 +21,9 @@ relay-core.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2.11.5", features = ["protocol-asset"] }
+# No feature is enabled speculatively: Tauri's build script requires every one to
+# have matching configuration, and an unused capability is attack surface anyway.
+tauri = { version = "2.11.5", features = [] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 tracing.workspace = true
