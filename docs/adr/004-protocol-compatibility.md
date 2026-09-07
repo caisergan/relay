@@ -139,14 +139,17 @@ Fourteen tests, all passing (2026-09-07):
 | A missing path is `NotFound`, and `stat` reports absence as `None` | Both, separately — the pane needs to distinguish "gone" from "broken" |
 | `read_file` refuses to pull a large file into memory | 1 MiB under a 2 MiB cap succeeds; the same file under a 64 KiB cap is refused |
 | A download is byte-identical, with monotonic progress and no leftovers | SHA-256 against the host's copy; a progress recorder counts regressions (zero) and the directory is checked for `.relaypart` files |
-| Cancellation is bounded and touches only its own partial | **4.9 ms**, with the pre-existing destination file unchanged and no partial left |
+| Cancellation is bounded and touches only its own partial | **4.9 ms** locally, **41 ms** on a GitHub runner, with the pre-existing destination file unchanged and no partial left |
 | An upload finalises atomically and can replace an existing file | Uploads to a fresh path, then over it; the second needs `posix-rename@openssh.com`, and the digest proves the replacement |
-| Two lanes transfer while the browse channel keeps listing | 2 × 32 MiB downloading; **worst listing 90 ms** across ten listings |
+| Two lanes transfer while the browse channel keeps listing | 2 × 32 MiB downloading; **worst listing 90 ms** locally, **208 ms** on a GitHub runner, across ten listings |
 | mkdir / rename / delete round-trip | Each step asserted through `stat` rather than assumed |
 
-Cancellation at 4.9 ms is much faster than the prototype's 1.28 ms measurement was
-generous about, and the 90 ms worst listing is in line with phase 0's 94.7 ms — both
-on loopback, so both are lower bounds, not promises.
+Two figures each, because the gap is the point. A shared CI runner is roughly four to
+eight times worse than this workstation on the same code and the same container, and
+both are loopback — so neither is a promise about a real network, and the runner's
+numbers are the more honest starting point. The assertions are set at 2 s and 5 s
+respectively, far enough above both that they fail on a regression rather than on a
+noisy neighbour.
 
 ## Still open
 
