@@ -1,12 +1,27 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useRef, useState } from 'react'
+import { useRef } from 'react'
 
-import { FileIcon } from '@react-symbols/icons/utils'
+import { DefaultFolderIcon, FileIcon, getIconForFolder } from '@react-symbols/icons/utils'
 
-import { EXTENSIONS, NAMES } from '@/lib/fileIcon'
+import { EXTENSIONS, FOLDERS, NAMES } from '@/lib/fileIcon'
+import {
+  PANE_ATTR,
+  ROW_DIR_ATTR,
+  ROW_NAME_ATTR,
+  ZONE_ATTR,
+  type DropTarget,
+  type RowDrag,
+} from '@/lib/rowDrag'
 import { formatBytes, formatWhen } from '@/lib/format'
 
-import { IconArrowLeft, IconArrowRight, IconFolder, IconPencil, IconTrash } from './Icons'
+import {
+  IconArrowDown,
+  IconArrowLeft,
+  IconArrowRight,
+  IconFolder,
+  IconPencil,
+  IconTrash,
+} from './Icons'
 import { PaneMessage } from './PaneMessage'
 
 /** File icons are 20px in a 20px slot, filling it exactly.
@@ -18,14 +33,59 @@ import { PaneMessage } from './PaneMessage'
  * which is why nothing here has to be told which theme is showing. */
 const ICON = 20
 
-/** Folders keep the design's own stroked mark, and do not come from the icon library.
- *
- * The library has a `folder`, but it is a page with a small folder stamped inside it —
- * at row size that reads as a document, which is the one thing a directory must never
- * look like. Ours is a folder at any size, and the blue is what says "you can go in
- * here". Smaller than `ICON` because a stroked outline carries less internal padding
- * than a filled page and would otherwise tower over its neighbours. */
+/** A folder Relay draws itself, at the size the design set. Smaller than `ICON`
+ * because a stroked outline carries less internal padding than a filled glyph and
+ * would otherwise tower over its neighbours. */
 const FOLDER_ICON = 16
+
+/** The icon for a directory.
+ *
+ * A recognised name gets the pack's folder for it — `src`, `node_modules`, `secrets`,
+ * `logs` — and everything else keeps Relay's blue mark rather than the pack's grey
+ * default. That is the whole reason this is not just `<FolderIcon />`: most of a
+ * server's directories have names nobody has ever drawn an icon for, and the blue is
+ * what says "you can go in here". Falling back to a grey outline would take that
+ * signal away from the majority to give a picture to the few.
+ *
+ * The fallback is detected by identity rather than by rendering and comparing: the
+ * library hands back an element, and its `type` is the component it chose, so this
+ * costs a pointer comparison per row rather than a second render. */
+function FolderRowIcon({ name }: { name: string }) {
+  const look = (folderName: string) =>
+    getIconForFolder({ folderName, editFolderNameData: FOLDERS, width: ICON, height: ICON })
+
+  // Asked twice, because the library matches folder names case-sensitively while it
+  // matches file names case-insensitively — so `Logs` and `Documents` find nothing
+  // where `logs` and `documents` do. Capitalised directories are ordinary on a server
+  // and on a Mac's home folder, and the second lookup is only reached when the first
+  // has already missed.
+  let chosen = look(name)
+  if (chosen.type === DefaultFolderIcon) {
+    const lower = name.toLowerCase()
+    if (lower !== name) chosen = look(lower)
+  }
+
+  if (chosen.type === DefaultFolderIcon) {
+    return <IconFolder size={FOLDER_ICON} stroke="var(--signal)" />
+  }
+  return chosen
+}
+
+/** The icon for an entry: a folder's, or the file pack's pick for its name. Exported
+ * for the drag ghost, which shows the row being carried. */
+export function RowIcon({ name, isDir }: { name: string; isDir: boolean }) {
+  if (isDir) return <FolderRowIcon name={name} />
+  return (
+    <FileIcon
+      fileName={name}
+      autoAssign
+      editFileExtensionData={EXTENSIONS}
+      editFileNameData={NAMES}
+      width={ICON}
+      height={ICON}
+    />
+  )
+}
 
 export interface FileRow {
   key: string
@@ -65,14 +125,40 @@ function compare(a: FileRow, b: FileRow, key: SortKey): number {
   }
 }
 
-/** The MIME type carried by a drag between panes. A private type rather than
- * `text/plain`, so a stray text drag from another app cannot start a transfer. */
-export const ROW_DRAG = 'application/x-relay-rows'
-
 /** The one permission string the design tints: readable and writable by its owner and
  * by nobody else. Matched exactly, as the design does — `rwx------` on a directory is
  * ordinary and stays faint. */
 const OWNER_ONLY = 'rw-------'
+
+/** The landing area that appears in the receiving pane while a drag is in flight.
+ *
+ * It exists because "drop anywhere in the pane" was invisible: the only way to learn
+ * that the far pane would accept a file was to drag one over it and watch for a
+ * border. This says so before the pointer gets there, and says *where* the file will
+ * land, which the pane never did.
+ *
+ * Floating rather than in flow, so revealing it does not shove the listing upward at
+ * the exact moment someone is aiming at a row in it. Translucent for the same reason:
+ * the rows behind stay legible, and a folder they were aiming for stays visible and
+ * droppable underneath. */
+function DropZone({
+  pane,
+  label,
+  active,
+}: {
+  pane: 'local' | 'remote'
+  label: string
+  active: boolean
+}) {
+  return (
+    <div className={`dropzone${active ? ' dropzone--over' : ''}`} {...{ [ZONE_ATTR]: pane }}>
+      <IconArrowDown size={16} />
+      <span className="dropzone__label">
+        Drop in <span className="dropzone__path">{label}</span>
+      </span>
+    </div>
+  )
+}
 
 /** Exported so the rule can be tested directly: the rows themselves are virtualised,
  * and a virtualiser measures its scroll container, which in jsdom is zero pixels tall
@@ -101,8 +187,23 @@ interface Props {
    * "remove this" depending on which keyboard someone learned. */
   onDelete?: (row: FileRow) => void
   showPerms?: boolean
-  /** Names dragged in from the other pane. Absent while the pane cannot receive. */
-  onDropRows?: (names: string[]) => void
+  /** Whether this pane can take rows dragged from the other one. Absent while it
+   * cannot — the local pane with no connection to download from, say. */
+  canReceive?: boolean
+  /** A press on a row that may become a drag. Absent while there is nowhere for a
+   * drag from this pane to land, so nothing lifts off with no destination. */
+  onDragStart?: (row: FileRow, e: React.PointerEvent) => void
+  /** The drag in flight, if any, and where it would land right now.
+   *
+   * Shared rather than local because the destination has to reveal its drop zone the
+   * moment the drag *begins*, not when the pointer finally arrives over it. A pane
+   * cannot know that on its own — the press that starts it lands in the other one.
+   * And the hit test that decides `over` runs on the window, not in either pane. */
+  drag?: RowDrag | null
+  over?: DropTarget | null
+  /** The directory a plain drop lands in, written out on the drop zone so the
+   * destination is a thing you read rather than a thing you assume. */
+  dropLabel?: string
 }
 
 /** Virtualized from the first commit: phase 5 budgets a 10k-entry directory at 60 fps,
@@ -123,11 +224,24 @@ export function FileList({
   onRename,
   onDelete,
   showPerms = false,
-  onDropRows,
+  canReceive = false,
+  onDragStart,
+  drag = null,
+  over = null,
+  dropLabel,
 }: Props) {
   const parentRef = useRef<HTMLDivElement>(null)
   const rowHeight = readRowHeight()
-  const [dropping, setDropping] = useState(false)
+
+  /** This pane can take what is being dragged: it accepts drops at all, something is
+   * being dragged, and it started somewhere else. Dragging within one pane is not a
+   * transfer of a file onto itself, so the source pane offers no targets. */
+  const receiving = canReceive && drag !== null && drag.from !== pane
+  /** Where the pointer is, if it is over this pane. */
+  const here = over?.pane === pane ? over : null
+  /** Over the listing but not over a folder or the landing area: a drop lands in the
+   * directory on show. */
+  const dropping = here !== null && here.folder === null && !here.zone
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -136,28 +250,25 @@ export function FileList({
     overscan: 12,
   })
 
-  const dropProps = onDropRows
-    ? {
-        onDragOver: (e: React.DragEvent) => {
-          if (!e.dataTransfer.types.includes(ROW_DRAG)) return
-          e.preventDefault()
-          e.dataTransfer.dropEffect = 'copy' as const
-          setDropping(true)
-        },
-        onDragLeave: () => setDropping(false),
-        onDrop: (e: React.DragEvent) => {
-          setDropping(false)
-          const raw = e.dataTransfer.getData(ROW_DRAG)
-          if (raw === '') return
-          e.preventDefault()
-          const payload = JSON.parse(raw) as { pane: string; names: string[] }
-          // A drag that starts and ends in the same pane is a no-op, not a transfer
-          // of a file onto itself.
-          if (payload.pane === pane) return
-          onDropRows(payload.names)
-        },
-      }
-    : {}
+  /** Rendered by both the populated and the empty listing: an empty directory is a
+   * perfectly good destination, and is in fact the one most in need of being told it
+   * can receive something. */
+  const zone = receiving ? (
+    <DropZone pane={pane} label={dropLabel ?? 'this folder'} active={here?.zone === true} />
+  ) : null
+
+  /** Marks the listing as a target for the hit test, for exactly as long as it is one. */
+  const listingProps = receiving ? { [PANE_ATTR]: pane } : {}
+
+  /** A press on a row. Selects it, as picking something up should, and arms a drag
+   * that only becomes one if the pointer travels. Not from the row's own buttons: a
+   * press on "delete" is a press on "delete". */
+  const press = (row: FileRow) => (e: React.PointerEvent) => {
+    if (!onDragStart || e.button !== 0) return
+    if (e.target instanceof Element && e.target.closest('button')) return
+    onSelect(row.name)
+    onDragStart(row, e)
+  }
 
   const header = (
     <div className="cols">
@@ -202,9 +313,12 @@ export function FileList({
 
   if (rows.length === 0) {
     return (
-      <div className={`rows${dropping ? ' rows--dropping' : ''}`} {...dropProps}>
-        <PaneMessage kind="empty" side={pane} {...(onBack ? { onBack } : {})} />
-      </div>
+      <>
+        <div className={`rows${dropping ? ' rows--dropping' : ''}`} {...listingProps}>
+          <PaneMessage kind="empty" side={pane} {...(onBack ? { onBack } : {})} />
+        </div>
+        {zone}
+      </>
     )
   }
 
@@ -216,7 +330,7 @@ export function FileList({
       <div
         className={`rows${dropping ? ' rows--dropping' : ''}`}
         ref={parentRef}
-        {...dropProps}
+        {...listingProps}
       >
         <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
           {virtualizer.getVirtualItems().map((item) => {
@@ -227,7 +341,7 @@ export function FileList({
                 key={row.key}
                 className={`row${row.hidden ? ' row--hidden' : ''}${
                   selected === row.name ? ' row--selected' : ''
-                }`}
+                }${here?.folder === row.name ? ' row--into' : ''}`}
                 style={{
                   position: 'absolute',
                   top: 0,
@@ -236,12 +350,8 @@ export function FileList({
                   height: item.size,
                   transform: `translateY(${item.start}px)`,
                 }}
-                draggable
-                onDragStart={(e) => {
-                  onSelect(row.name)
-                  e.dataTransfer.setData(ROW_DRAG, JSON.stringify({ pane, names: [row.name] }))
-                  e.dataTransfer.effectAllowed = 'copy'
-                }}
+                {...{ [ROW_NAME_ATTR]: row.name, [ROW_DIR_ATTR]: String(row.isDir) }}
+                onPointerDown={press(row)}
                 onClick={() => onSelect(row.name)}
                 onDoubleClick={() => onOpen(row)}
                 tabIndex={0}
@@ -260,18 +370,7 @@ export function FileList({
                 }}
               >
                 <span className="row__icon">
-                  {row.isDir ? (
-                    <IconFolder size={FOLDER_ICON} stroke="var(--signal)" />
-                  ) : (
-                    <FileIcon
-                      fileName={row.name}
-                      autoAssign
-                      editFileExtensionData={EXTENSIONS}
-                      editFileNameData={NAMES}
-                      width={ICON}
-                      height={ICON}
-                    />
-                  )}
+                  <RowIcon name={row.name} isDir={row.isDir} />
                 </span>
                 <span className={`row__name${row.isDir ? ' row__name--dir' : ''}`}>
                   {row.name}
@@ -328,6 +427,7 @@ export function FileList({
           })}
         </div>
       </div>
+      {zone}
     </>
   )
 }

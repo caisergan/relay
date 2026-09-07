@@ -668,6 +668,10 @@
   flex-direction: column;
   min-width: 0;
   background: var(--panel);
+  /* The drag-and-drop landing area floats against this box. Positioning it here rather
+     than inside `.rows` is deliberate: `.rows` is the scroll container, and anything
+     absolute inside a scroller scrolls away with the content. */
+  position: relative;
 }
 /* Asymmetric on purpose, per the design: the local pane is a shelf you pick from and
    the remote pane is the thing you are working in. The 37% is now the starting ratio
@@ -986,6 +990,58 @@
   background: var(--signal-soft);
 }
 
+/* The landing area, shown in the receiving pane for as long as a drag is in flight.
+   Translucent on purpose — the listing behind it has to stay readable, because a
+   folder somebody is aiming at may be underneath it and is still droppable there. */
+.dropzone {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 64px;
+  padding: 12px;
+  border: 1.5px dashed var(--signal);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--signal-soft) 82%, transparent);
+  backdrop-filter: blur(3px);
+  color: var(--signal);
+  font-weight: 500;
+  /* It appears mid-gesture, so it must never be the thing that swallows a click, and
+     it must not animate its way into position while someone is already aiming at it. */
+  animation: dropzone-in 120ms ease-out;
+}
+.dropzone--over {
+  background: color-mix(in srgb, var(--signal-soft-hi) 92%, transparent);
+  border-style: solid;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 18%, transparent);
+}
+.dropzone__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dropzone__path {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+@keyframes dropzone-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dropzone {
+    animation: none;
+  }
+}
+
 .row {
   position: relative;
   display: flex;
@@ -995,6 +1051,10 @@
   height: var(--row);
   border-bottom: 1px solid var(--line-2);
   cursor: default;
+  /* A row is picked up by pressing and moving, and a press that moves must not also
+     sweep a selection across the name. File managers do not select text in a listing. */
+  user-select: none;
+  -webkit-user-select: none;
   /* An integer line box, shared by every column.
 
      Inheriting the body's unitless 1.45 gave each column its own fractional one —
@@ -1016,6 +1076,75 @@
 .row--selected:hover {
   background: var(--signal-soft);
   box-shadow: inset 2px 0 0 var(--signal);
+}
+/* A folder the pointer is over during a drag: the transfer will land inside it rather
+   than beside it, which is a different outcome from the pane taking the drop and is
+   worth looking different.
+
+   Written to outrank both neighbours above, and it has to be — a single class loses to
+   `.row:hover`, which WebKit keeps applied to whatever is under the pointer mid-drag,
+   and ties with `.row--selected` while losing on source order. The highlight was there
+   the whole time and painted over, which reads exactly like a feature that does not
+   work. */
+.row--into,
+.row--into:hover,
+.row--selected.row--into,
+.row--selected.row--into:hover {
+  background: var(--signal-soft-hi);
+  box-shadow: inset 0 0 0 2px var(--signal);
+}
+/* The row being carried between panes. Fixed to the viewport and moved by transform
+   from the pointer handler, so following the cursor costs a style write and not a
+   render. `pointer-events: none` keeps it out of its own hit test. */
+.dragghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 280px;
+  padding: 5px 12px 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  font-size: 12.5px;
+  color: var(--ink);
+  pointer-events: none;
+  will-change: transform;
+}
+.dragghost__icon {
+  flex: none;
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+}
+.dragghost__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The cursor for the whole gesture. Set on the body because a drag's pointer events
+   are handled on the window, and whatever is under the pointer would otherwise show
+   its own cursor — a text beam over a name, a hand over a button — while the ghost
+   says "carrying". Copy when a drop would land, plain otherwise. */
+body.dragging,
+body.dragging * {
+  cursor: default !important;
+  /* WebKit keeps extending a text selection from the press for as long as the button
+     is down, and would sweep it across the column headers and the landing area on the
+     way to a drop. Nothing is selectable for the length of the gesture. */
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+body.dragging--ok,
+body.dragging--ok * {
+  cursor: copy !important;
 }
 /* Dotfiles recede by name, not by dimming the whole row: the size and date of a
    hidden file are exactly as true as any other row's. Directories are not exempt —

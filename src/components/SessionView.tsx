@@ -1,17 +1,19 @@
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import { commands } from '@/ipc/commands'
 import type { LocalEntry, LogLine, RemoteEntry, ServerConfig, TransferItem } from '@/ipc/gen'
 import { faultText, toFault } from '@/lib/errors'
 import { baseName, crumbs, joinPath, parentPath } from '@/lib/format'
+import { transferPaths } from '@/lib/transfer'
 import { canGoBack, canGoForward, peek, push, type History } from '@/lib/history'
 import { useOrderedJobs } from '@/state/queueStore'
 import { useServersStore } from '@/state/serversStore'
 import { emptyPane, useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
 
-import { FileList, sortRows, type FileRow, type Sort, type SortKey } from './FileList'
+import { FileList, RowIcon, sortRows, type FileRow, type Sort, type SortKey } from './FileList'
 import { FlowGutter } from './FlowGutter'
 import {
   IconActivity,
@@ -30,6 +32,7 @@ import { PaneFault, PaneMessage } from './PaneMessage'
 import { PaneSplitter } from './PaneSplitter'
 import { loadRoots, RootMenu, type Root } from './RootMenu'
 import { ServerAvatar } from './ServerAvatar'
+import { useRowDrag } from './useRowDrag'
 
 interface Props {
   sessionId: string
@@ -223,6 +226,54 @@ export function SessionView({ sessionId }: Props) {
     }
   }, [acceptOsDrop, ready])
 
+  /// One gesture is one batch, so "apply to remaining" on a conflict covers the files
+  /// that were dragged together and nothing else. Dropping ten files used to send ten
+  /// separate requests, which left the queue with no way to tell them apart.
+  ///
+  /// Above the early return, on the hoisted values, because the drag hook below needs
+  /// it and a hook cannot sit past a conditional return.
+  const enqueue = (
+    direction: 'up' | 'down',
+    names: { name: string; isDir: boolean }[],
+    /** A folder in the *destination* pane to land inside, rather than the directory
+     * that pane is showing. Set when the drop was aimed at a folder row. */
+    intoFolder?: string,
+  ) => {
+    if (!serverId) return
+    const items: TransferItem[] = names.map((entry) => ({
+      session: sessionId,
+      serverId,
+      direction,
+      ...transferPaths({
+        direction,
+        remoteDir: intoPath,
+        localDir: pane.localPath,
+        name: entry.name,
+        intoFolder,
+      }),
+      // A folder becomes a parent job the engine walks; its files arrive as children.
+      isDir: entry.isDir,
+    }))
+    if (items.length === 0) return
+    void commands
+      .queueEnqueue(crypto.randomUUID(), items)
+      .catch((error: unknown) => toast('error', faultText(error)))
+  }
+
+  /// Rows dragged from one pane to the other. Pointer-driven rather than the HTML
+  /// drag model, which Tauri's native handler swallows before the page sees it; see
+  /// `lib/rowDrag.ts`. The destination decides the direction: a drop on the remote
+  /// pane is an upload, on the local pane a download.
+  const { drag, over, ghostRef, begin } = useRowDrag((carried, target) => {
+    enqueue(
+      target.pane === 'remote' ? 'up' : 'down',
+      carried.entries,
+      target.folder ?? undefined,
+    )
+  })
+  const lift = (from: 'local' | 'remote') => (row: FileRow, e: React.PointerEvent) =>
+    begin({ from, entries: [{ name: row.name, isDir: row.isDir }] }, e)
+
   if (!session) return null
 
   const remotePath = listing?.path ?? session.remotePath ?? '/'
@@ -272,39 +323,8 @@ export function SessionView({ sessionId }: Props) {
     navigateRemote(target, false)
   }
 
-  /// One gesture is one batch, so "apply to remaining" on a conflict covers the files
-  /// that were dragged together and nothing else. Dropping ten files used to send ten
-  /// separate requests, which left the queue with no way to tell them apart.
-  const enqueue = (direction: 'up' | 'down', names: { name: string; isDir: boolean }[]) => {
-    const items: TransferItem[] = names.map((entry) => ({
-      session: sessionId,
-      serverId: session.serverId,
-      direction,
-      remotePath: joinPath(remotePath, entry.name),
-      localPath: joinPath(pane.localPath, entry.name),
-      // A folder becomes a parent job the engine walks; its files arrive as children.
-      isDir: entry.isDir,
-    }))
-    if (items.length === 0) return
-    void commands
-      .queueEnqueue(crypto.randomUUID(), items)
-      .catch((error: unknown) => toast('error', faultText(error)))
-  }
-
   const transfer = (direction: 'up' | 'down') => (row: FileRow) =>
     enqueue(direction, [{ name: row.name, isDir: row.isDir }])
-
-  /// A drag names files, not rows: the source pane's row objects are not in scope by
-  /// the time the drop lands, so the destination looks them up in its own listing.
-  const dropped = (direction: 'up' | 'down', from: FileRow[]) => (names: string[]) => {
-    enqueue(
-      direction,
-      names.map((name) => ({
-        name,
-        isDir: from.find((row) => row.name === name)?.isDir ?? false,
-      })),
-    )
-  }
 
   /// Refresh after a change, because SFTP has no directory notifications: what the
   /// pane shows is whatever the last listing said.
@@ -398,7 +418,10 @@ export function SessionView({ sessionId }: Props) {
               onSelect={(localSelected) => patchPane(sessionId, { localSelected })}
               onOpen={(row) => row.isDir && void loadLocal(joinPath(pane.localPath, row.name))}
               onAction={transfer('up')}
-              {...(connected ? { onDropRows: dropped('down', remoteRows) } : {})}
+              {...(connected ? { canReceive: true, onDragStart: lift('local') } : {})}
+              drag={drag}
+              over={over}
+              dropLabel={pane.localPath}
             />
           )}
         </div>
@@ -463,13 +486,32 @@ export function SessionView({ sessionId }: Props) {
               onAction={transfer('down')}
               onRename={renameRemote}
               onDelete={confirmDelete}
-              onDropRows={dropped('up', localRows)}
+              canReceive
+              onDragStart={lift('remote')}
+              drag={drag}
+              over={over}
+              dropLabel={remotePath}
               showPerms
             />
           )}
         </div>
       </div>
       {logOpen && <LogPanel sessionId={sessionId} onClose={() => setLogOpen(false)} />}
+      {/* The row being carried, following the pointer. In the body rather than in the
+          pane, so no ancestor's transform can turn "fixed" into "relative to me". */}
+      {drag &&
+        createPortal(
+          <div className="dragghost" ref={ghostRef} aria-hidden>
+            <span className="dragghost__icon">
+              <RowIcon
+                name={drag.entries[0]?.name ?? ''}
+                isDir={drag.entries[0]?.isDir ?? false}
+              />
+            </span>
+            <span className="dragghost__name">{drag.entries[0]?.name}</span>
+          </div>,
+          document.body,
+        )}
       {pendingDelete && (
         <div className="scrim" role="dialog" aria-modal="true">
           <div className="sheet sheet--danger">
