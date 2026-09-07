@@ -56,6 +56,13 @@ pub const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
 /// 32/64/128/256 KiB, so the largest was clearly worth taking. Short reads are normal
 /// and handled, so asking for more than a server will give costs nothing.
 const READ_CHUNK: u32 = 256 * 1024;
+/// How much moves between checkpoints.
+///
+/// A checkpoint costs an fsync, so one per chunk would put a disk flush in the middle
+/// of the byte loop. Eight megabytes is the most a resume can be asked to re-send —
+/// seconds on any link fast enough for the file to be worth resuming — in exchange for
+/// roughly one flush per eight megabytes rather than one per quarter megabyte.
+const CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
 /// Every SFTP v3 server accepts a 32 KiB write. Raised only when the server states its
 /// own limit, because an over-sized write is a protocol error, not a slow one.
 const DEFAULT_WRITE_CHUNK: usize = 32 * 1024;
@@ -701,21 +708,17 @@ struct SftpLane {
 }
 
 impl SftpLane {
-    /// The partial file a download owns. The job id is in the name because ownership
-    /// has to be provable: a suffix alone would let two jobs, or a stale file from a
-    /// previous run, claim the same partial.
+    /// The partial file a download owns. See [`crate::protocol::partial_name`] for why
+    /// the job id is in it.
     fn partial_path(local: &Path, job: JobId) -> PathBuf {
-        let name = local
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        local.with_file_name(format!(".{name}.{job}.relaypart"))
+        crate::protocol::local_partial(local, job)
     }
 
     fn remote_partial(remote: &str, job: JobId) -> String {
-        let name = base_name(remote);
-        let parent = parent_of(remote);
-        join(&parent, &format!(".{name}.{job}.relaypart"))
+        join(
+            &parent_of(remote),
+            &crate::protocol::partial_name(&base_name(remote), job),
+        )
     }
 
     /// Replace `to` with `from`, or say why it cannot be done.
@@ -775,15 +778,18 @@ impl TransferLane for SftpLane {
 
         let mut at = req.offset;
         let mut written = 0u64;
+        let mut rolling = req.prefix.clone().unwrap_or_default();
+        let mut checkpointed = req.offset;
         loop {
             // Checked before *and* awaited during the read, so cancellation lands
             // within one round trip rather than one chunk of bytes.
             if req.cancel.is_cancelled() {
-                return cancel_download(&self.raw, handle, file, &partial).await;
+                return stop_download(&self.raw, handle, file, &partial, req.keeping_partial())
+                    .await;
             }
             let read = tokio::select! {
                 _ = req.cancel.cancelled() => {
-                    return cancel_download(&self.raw, handle, file, &partial).await;
+                    return stop_download(&self.raw, handle, file, &partial, req.keeping_partial()).await;
                 }
                 result = self.raw.read(handle.clone(), at, READ_CHUNK) => result,
             };
@@ -803,9 +809,23 @@ impl TransferLane for SftpLane {
             file.write_all(&data)
                 .await
                 .map_err(|e| EngineError::from_io(&partial, &e))?;
+            rolling.update(&data);
             at += data.len() as u64;
             written += data.len() as u64;
             req.progress.report(at);
+
+            // A checkpoint is a promise that these bytes are still there after a power
+            // cut, so it is made *after* the fsync, never before it.
+            if at - checkpointed >= CHECKPOINT_BYTES {
+                file.flush()
+                    .await
+                    .map_err(|e| EngineError::from_io(&partial, &e))?;
+                file.sync_all()
+                    .await
+                    .map_err(|e| EngineError::from_io(&partial, &e))?;
+                checkpointed = at;
+                req.checkpoint.report(at, rolling.snapshot());
+            }
         }
 
         let _ = self.raw.close(handle).await;
@@ -860,13 +880,16 @@ impl TransferLane for SftpLane {
         }
 
         let temp = Self::remote_partial(&req.remote_path, req.job);
+        // Truncating is right for a fresh upload and catastrophic for a resumed one:
+        // it would throw away the very bytes the offset was verified against.
+        let flags = if req.offset > 0 {
+            OpenFlags::WRITE | OpenFlags::CREATE
+        } else {
+            OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE
+        };
         let opened = self
             .raw
-            .open(
-                &temp,
-                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
-                FileAttributes::default(),
-            )
+            .open(&temp, flags, FileAttributes::default())
             .await
             .map_err(sftp_error)?;
         let handle = opened.handle;
@@ -874,9 +897,11 @@ impl TransferLane for SftpLane {
         let mut buf = vec![0u8; self.write_chunk];
         let mut at = req.offset;
         let mut written = 0u64;
+        let mut rolling = req.prefix.clone().unwrap_or_default();
+        let mut checkpointed = req.offset;
         loop {
             if req.cancel.is_cancelled() {
-                return cancel_upload(&self.raw, handle, &temp).await;
+                return stop_upload(&self.raw, handle, &temp, req.keeping_partial()).await;
             }
             let read = file
                 .read(&mut buf)
@@ -888,7 +913,7 @@ impl TransferLane for SftpLane {
             let chunk = buf[..read].to_vec();
             let outcome = tokio::select! {
                 _ = req.cancel.cancelled() => {
-                    return cancel_upload(&self.raw, handle, &temp).await;
+                    return stop_upload(&self.raw, handle, &temp, req.keeping_partial()).await;
                 }
                 result = self.raw.write(handle.clone(), at, chunk) => result,
             };
@@ -897,9 +922,20 @@ impl TransferLane for SftpLane {
                 let _ = self.raw.remove(&temp).await;
                 return Err(sftp_error(err));
             }
+            rolling.update(&buf[..read]);
             at += read as u64;
             written += read as u64;
             req.progress.report(at);
+
+            if at - checkpointed >= CHECKPOINT_BYTES {
+                // A write acknowledgement is not durability, so this asks the server to
+                // flush. Where it cannot, the checkpoint still stands: recovery reads
+                // the remote prefix back and checks it against this digest before
+                // trusting a single byte of it.
+                let _ = self.raw.fsync(handle.clone()).await;
+                checkpointed = at;
+                req.checkpoint.report(at, rolling.snapshot());
+            }
         }
 
         // Not every server implements fsync; a failure here is not a reason to throw
@@ -917,6 +953,52 @@ impl TransferLane for SftpLane {
             bytes: written,
             final_size: total,
         })
+    }
+
+    async fn prefix_digest(&mut self, path: &str, len: u64) -> Result<String> {
+        let opened = self
+            .raw
+            .open(path, OpenFlags::READ, FileAttributes::default())
+            .await
+            .map_err(sftp_error)?;
+        let handle = opened.handle;
+
+        let mut rolling = crate::digest::Rolling::new();
+        while rolling.len() < len {
+            let want = (len - rolling.len()).min(READ_CHUNK as u64) as u32;
+            match self.raw.read(handle.clone(), rolling.len(), want).await {
+                Ok(data) if data.data.is_empty() => break,
+                Ok(data) => rolling.update(&data.data),
+                Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
+                Err(err) => {
+                    let _ = self.raw.close(handle).await;
+                    return Err(sftp_error(err));
+                }
+            }
+        }
+        let _ = self.raw.close(handle).await;
+
+        // Short of the length the checkpoint claims, so the checkpoint is not about
+        // this file. Refusing beats hashing whatever happens to be there.
+        if rolling.len() < len {
+            return Err(EngineError::ResumeUnverifiable {
+                reason: format!(
+                    "{path} holds {} bytes, fewer than the {len} the checkpoint claims",
+                    rolling.len()
+                ),
+            });
+        }
+        Ok(rolling.snapshot())
+    }
+
+    async fn size_of(&mut self, path: &str) -> Result<Option<u64>> {
+        match self.raw.stat(path).await {
+            Ok(attrs) => Ok(Some(attrs.attrs.size.unwrap_or(0))),
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
+                Ok(None)
+            }
+            Err(err) => Err(sftp_error(err)),
+        }
     }
 
     async fn close(self: Box<Self>) {
@@ -954,32 +1036,60 @@ async fn open_partial(partial: &Path, offset: u64) -> Result<tokio::fs::File> {
             reason: format!("the partial file holds {len} bytes, the offset claims {offset}"),
         });
     }
+    // Anything past the checkpoint was written after the last durable point and is not
+    // covered by the digest that authorised this resume. Truncating is what makes the
+    // file exactly the prefix that was verified, rather than the prefix plus whatever
+    // a crash left behind it.
+    if len > offset {
+        file.set_len(offset)
+            .await
+            .map_err(|e| EngineError::from_io(partial, &e))?;
+    }
     file.seek(std::io::SeekFrom::Start(offset))
         .await
         .map_err(|e| EngineError::from_io(partial, &e))?;
     Ok(file)
 }
 
-async fn cancel_download(
+/// Stop a download.
+///
+/// A paused job is coming back to these bytes, so they are flushed and left where they
+/// are. A cancelled one is not, and its partial is litter. Either way the destination
+/// is untouched and the only file this ever removes is the one this job created.
+async fn stop_download(
     raw: &RawSftpSession,
     handle: String,
-    file: tokio::fs::File,
+    mut file: tokio::fs::File,
     partial: &Path,
+    keep: bool,
 ) -> Result<TransferOutcome> {
     let _ = raw.close(handle).await;
-    drop(file);
-    // Only ever the partial this job created; the destination is untouched.
-    let _ = tokio::fs::remove_file(partial).await;
+    if keep {
+        // Durability before anything else looks at it: a checkpoint is only worth
+        // resuming from if the bytes behind it survived.
+        let _ = file.flush().await;
+        let _ = file.sync_all().await;
+        drop(file);
+    } else {
+        drop(file);
+        let _ = tokio::fs::remove_file(partial).await;
+    }
     Err(EngineError::Cancelled)
 }
 
-async fn cancel_upload(
+async fn stop_upload(
     raw: &RawSftpSession,
     handle: String,
     temp: &str,
+    keep: bool,
 ) -> Result<TransferOutcome> {
+    if keep {
+        let _ = raw.fsync(handle.clone()).await;
+    }
     let _ = raw.close(handle).await;
-    let _ = raw.remove(temp).await;
+    if !keep {
+        let _ = raw.remove(temp).await;
+    }
     Err(EngineError::Cancelled)
 }
 

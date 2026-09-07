@@ -40,7 +40,9 @@ use crate::events::EngineEvent;
 use crate::interact::ConflictAction;
 use crate::job::{JobKind, JobSnapshot, JobState, PauseReason, QueueOp, QueueStats};
 use crate::model::{Direction, JobId, PromptId, SessionId};
-use crate::queue::{BatchId, Job, JobEvent, JobSpec, ORDER_STRIDE, advance, between, position};
+use crate::queue::{
+    BatchId, Job, JobEvent, JobSpec, ORDER_STRIDE, ResumeRecord, advance, between, position,
+};
 use crate::store::QueueStore;
 use crate::wire::{Bytes, Order};
 
@@ -88,7 +90,16 @@ enum Msg {
     Concurrency {
         limit: u8,
     },
-    Report(Report),
+    Report {
+        from: Option<(JobId, u64)>,
+        report: Report,
+    },
+    /// A start, with somewhere to say the record is committed.
+    Started {
+        from: Option<(JobId, u64)>,
+        report: Report,
+        ack: oneshot::Sender<()>,
+    },
     Snapshot {
         reply: oneshot::Sender<Vec<JobSnapshot>>,
     },
@@ -117,13 +128,26 @@ pub enum Report {
         /// inherits the decision instead of asking again.
         apply_to_remaining: bool,
     },
-    /// Bytes are moving.
+    /// Bytes are about to move.
+    ///
+    /// Carries the ownership record for the partial file. The scheduler commits it
+    /// before acknowledging, and the transfer waits for that acknowledgement, so a
+    /// partial always has a record behind it — a partial without one is resumable by
+    /// nothing, which is the point of writing it first.
     Started {
         job: JobId,
         /// Learned during preparation, when it was not known at enqueue time.
         size: Option<Bytes>,
         /// A *verified* offset. Zero unless the resume checks passed.
         resume_from: Bytes,
+        record: ResumeRecord,
+    },
+    /// Bytes that are on the destination for good, and the digest that identifies
+    /// them. See [`crate::resume`] for why a length would not do.
+    Checkpoint {
+        job: JobId,
+        offset: Bytes,
+        digest: String,
     },
     /// A folder job finished walking, and this many children were queued under it.
     /// Zero means an empty folder, which is finished rather than waiting.
@@ -144,9 +168,17 @@ pub enum Report {
 
 /// A cheap handle a running transfer keeps, so it can report without holding the
 /// scheduler.
+///
+/// Bound to the *run* that was given it, not just the job. A paused transfer stops by
+/// being cancelled, and its final report can arrive after the job has been resumed and
+/// dispatched again — at which point applying it would cancel the new attempt on
+/// behalf of the old one. The scheduler drops anything from a run it has replaced.
 #[derive(Clone)]
 pub struct Reporter {
     tx: mpsc::Sender<Msg>,
+    /// `None` for a reporter that is not a dispatched transfer — a folder walk, whose
+    /// reports belong to a job the scheduler never dispatched.
+    run: Option<(JobId, u64)>,
 }
 
 impl std::fmt::Debug for Reporter {
@@ -159,16 +191,52 @@ impl Reporter {
     pub async fn send(&self, report: Report) {
         // A closed scheduler means the app is shutting down; the report has nowhere
         // useful to go and dropping it is correct.
-        let _ = self.tx.send(Msg::Report(report)).await;
+        let _ = self
+            .tx
+            .send(Msg::Report {
+                from: self.run,
+                report,
+            })
+            .await;
     }
 
     /// For the progress sink, which is called from inside the transfer loop and must
     /// never park it. Dropping a tick is safe: progress is coalesced downstream and
     /// the final state is always sent with `send`.
     pub fn progress(&self, job: JobId, transferred: Bytes) {
-        let _ = self
-            .tx
-            .try_send(Msg::Report(Report::Progress { job, transferred }));
+        let _ = self.tx.try_send(Msg::Report {
+            from: self.run,
+            report: Report::Progress { job, transferred },
+        });
+    }
+
+    /// Likewise from inside the loop. A checkpoint that does not get through means a
+    /// resume starts from an earlier point, which is the safe direction to lose in.
+    pub fn checkpoint(&self, job: JobId, offset: Bytes, digest: String) {
+        let _ = self.tx.try_send(Msg::Report {
+            from: self.run,
+            report: Report::Checkpoint {
+                job,
+                offset,
+                digest,
+            },
+        });
+    }
+
+    /// Report a start and wait for the ownership record to be on disk.
+    ///
+    /// The one report that blocks its transfer. Everything else may be late or lost;
+    /// this may not, because the bytes that follow it are only resumable if it landed.
+    pub async fn started(&self, report: Report) {
+        let (ack, wait) = oneshot::channel();
+        let msg = Msg::Started {
+            from: self.run,
+            report,
+            ack,
+        };
+        if self.tx.send(msg).await.is_ok() {
+            let _ = wait.await;
+        }
     }
 }
 
@@ -180,11 +248,12 @@ pub struct RunRequest {
     pub direction: Direction,
     pub remote_path: String,
     pub local_path: PathBuf,
-    /// Where to start. Non-zero only after resume verification has passed.
-    pub offset: Bytes,
     /// A decision already made for this job — from settings, or inherited from a
     /// sibling through "apply to remaining". `None` means ask.
     pub conflict: Option<ConflictAction>,
+    /// The ownership record for a partial this job left behind, when there is one.
+    /// Whether it may be *used* is decided by [`crate::resume`], never here.
+    pub resume: Option<ResumeRecord>,
     /// How many other jobs in this batch a person's "apply to remaining" would cover.
     pub remaining: u32,
     pub report: Reporter,
@@ -197,9 +266,15 @@ pub trait Dispatcher: Send + Sync {
     /// arrives through the request's [`Reporter`].
     async fn dispatch(&self, run: RunRequest) -> Result<()>;
 
-    /// Stop one running job. Best effort — a job that has already finished is not an
-    /// error, it is a race that the completion won.
-    async fn abort(&self, session: SessionId, job: JobId);
+    /// Stop one running job.
+    ///
+    /// `keep_partial` distinguishes a pause from a cancellation. They look identical
+    /// from inside a transfer loop and mean opposite things for the bytes already
+    /// written: a paused job is coming back to them, a cancelled one is not.
+    ///
+    /// Best effort — a job that has already finished is not an error, it is a race
+    /// that the completion won.
+    async fn abort(&self, session: SessionId, job: JobId, keep_partial: bool);
 }
 
 pub struct SchedulerContext {
@@ -233,7 +308,12 @@ impl Scheduler {
             events: ctx.events,
             dispatcher: ctx.dispatcher,
             concurrency: ctx.concurrency.max(1),
-            me: Reporter { tx: tx.clone() },
+            runs: HashMap::new(),
+            next_run: 0,
+            me: Reporter {
+                tx: tx.clone(),
+                run: None,
+            },
         };
         ctx.rt.spawn(inner.run(rx));
         Ok(Self { tx })
@@ -298,6 +378,7 @@ impl Scheduler {
     pub fn reporter(&self) -> Reporter {
         Reporter {
             tx: self.tx.clone(),
+            run: None,
         }
     }
 
@@ -325,6 +406,9 @@ struct Inner {
     events: mpsc::Sender<EngineEvent>,
     dispatcher: Arc<dyn Dispatcher>,
     concurrency: u8,
+    /// Which run of each job is the live one. See [`Reporter`].
+    runs: HashMap<JobId, u64>,
+    next_run: u64,
     me: Reporter,
 }
 
@@ -413,7 +497,19 @@ impl Inner {
                 // control would only apply to a queue that has not started yet.
                 self.throttle().await;
             }
-            Msg::Report(report) => self.report(report).await,
+            Msg::Report { from, report } => {
+                if self.current(from) {
+                    self.report(report).await;
+                }
+            }
+            Msg::Started { from, report, ack } => {
+                if self.current(from) {
+                    self.report(report).await;
+                }
+                // Acknowledged either way: a stale transfer waiting on this would
+                // otherwise never wake up to notice it has been replaced.
+                let _ = ack.send(());
+            }
             Msg::Snapshot { reply } => {
                 let _ = reply.send(self.snapshots());
             }
@@ -461,7 +557,7 @@ impl Inner {
     async fn control(&mut self, op: QueueOp) -> Result<()> {
         match op {
             QueueOp::Cancel { job } => {
-                self.abort(job).await;
+                self.abort(job, false).await;
                 self.apply(job, JobEvent::Cancel).await;
                 Ok(())
             }
@@ -472,7 +568,7 @@ impl Inner {
             }
             QueueOp::Pause { job } => {
                 self.require(job)?;
-                self.abort(job).await;
+                self.abort(job, true).await;
                 self.apply(
                     job,
                     JobEvent::Pause {
@@ -489,7 +585,7 @@ impl Inner {
             }
             QueueOp::PauseAll => {
                 for id in self.ids() {
-                    self.abort(id).await;
+                    self.abort(id, true).await;
                     self.apply(
                         id,
                         JobEvent::Pause {
@@ -601,6 +697,17 @@ impl Inner {
 
     // ------------------------------------------------------------------- reports
 
+    /// Whether a report comes from the run that is currently live for its job.
+    ///
+    /// `None` is always current: it belongs to something the scheduler did not
+    /// dispatch, such as a folder walk.
+    fn current(&self, from: Option<(JobId, u64)>) -> bool {
+        match from {
+            None => true,
+            Some((job, generation)) => self.runs.get(&job) == Some(&generation),
+        }
+    }
+
     async fn report(&mut self, report: Report) {
         match report {
             Report::Asking { job, prompt } => {
@@ -620,12 +727,52 @@ impl Inner {
                 job,
                 size,
                 resume_from,
+                record,
             } => {
                 if let Some(size) = size {
                     self.apply(job, JobEvent::Size { size }).await;
                 }
+                // Committed before the transfer is told to go. `apply` writes the job
+                // and its record in one transaction and waits for it, because this is
+                // the write everything downstream depends on.
+                if let Some(job) = self.jobs.get_mut(&job) {
+                    job.resume = Some(record);
+                }
                 self.rates.insert(job, Rate::new());
                 self.apply(job, JobEvent::Start { resume_from }).await;
+                if let Some(job) = self.jobs.get(&job).cloned()
+                    && let Err(err) = self.store.save(job.clone()).await
+                {
+                    tracing::error!(id = %job.id, %err, "could not record a transfer's ownership");
+                }
+            }
+            Report::Checkpoint {
+                job,
+                offset,
+                digest,
+            } => {
+                let Some(record) = self.jobs.get(&job).and_then(|job| job.resume.clone()) else {
+                    return;
+                };
+                let advanced = ResumeRecord {
+                    checkpoint: offset,
+                    prefix_sha256: digest,
+                    ..record
+                };
+                // Durable before it is believed. The in-memory record only moves once
+                // the database says the new one is there, so a crash between the two
+                // leaves a checkpoint that is behind the bytes rather than ahead of
+                // them — which costs a re-send and never a wrong file.
+                match self.store.checkpoint(job, advanced.clone()).await {
+                    Ok(()) => {
+                        if let Some(job) = self.jobs.get_mut(&job) {
+                            job.resume = Some(advanced);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(%job, %err, "a checkpoint could not be committed");
+                    }
+                }
             }
             Report::Scanned { job, children } => {
                 self.apply(job, JobEvent::Scanned { children }).await;
@@ -667,12 +814,24 @@ impl Inner {
                             },
                         )
                         .await;
-                        JobEvent::Complete
+                        Some(JobEvent::Complete)
                     }
-                    Err(EngineError::Cancelled) => JobEvent::Cancel,
-                    Err(error) => JobEvent::Fail { error },
+                    // A cancelled transfer is usually the *acknowledgement* of a stop
+                    // this scheduler ordered, not news. Pausing works by cancelling
+                    // the transfer, so applying `Cancel` here would turn every pause
+                    // into a cancellation one message later — and the paused job would
+                    // never come back.
+                    Err(EngineError::Cancelled) => {
+                        let already_stopped = self.jobs.get(&job).is_some_and(|job| {
+                            matches!(job.state, JobState::Paused { .. }) || job.state.is_terminal()
+                        });
+                        (!already_stopped).then_some(JobEvent::Cancel)
+                    }
+                    Err(error) => Some(JobEvent::Fail { error }),
                 };
-                self.apply(job, event).await;
+                if let Some(event) = event {
+                    self.apply(job, event).await;
+                }
                 if let Some(parent) = self.jobs.get(&job).and_then(|job| job.parent) {
                     self.refresh_folder(parent).await;
                 }
@@ -800,18 +959,24 @@ impl Inner {
                 continue;
             }
 
+            self.next_run += 1;
+            let generation = self.next_run;
             let run = RunRequest {
                 job: id,
                 session,
+                resume: job.resume.clone(),
                 direction: job.direction,
                 remote_path: job.remote_path.clone(),
                 local_path: job.local_path.clone(),
-                offset: job.verified_offset(),
                 conflict: job.chosen.or(job.conflict_policy),
                 remaining: self.remaining_in_batch(job.batch, id),
-                report: self.me.clone(),
+                report: Reporter {
+                    tx: self.me.tx.clone(),
+                    run: Some((id, generation)),
+                },
             };
 
+            self.runs.insert(id, generation);
             self.apply(id, JobEvent::Prepare).await;
             match self.dispatcher.dispatch(run).await {
                 Ok(()) => {
@@ -862,7 +1027,7 @@ impl Inner {
         running.sort();
         while running.len() > global {
             let Some((_, id)) = running.pop() else { break };
-            self.abort(id).await;
+            self.abort(id, true).await;
             self.apply(
                 id,
                 JobEvent::Pause {
@@ -902,11 +1067,14 @@ impl Inner {
         }
     }
 
-    async fn abort(&self, job: JobId) {
+    /// Stop a running transfer, saying whether its partial is worth keeping.
+    async fn abort(&self, job: JobId, keep_partial: bool) {
         if let Some(target) = self.jobs.get(&job)
             && target.holds_slot()
         {
-            self.dispatcher.abort(target.session, job).await;
+            self.dispatcher
+                .abort(target.session, job, keep_partial)
+                .await;
         }
     }
 
@@ -1067,7 +1235,7 @@ mod tests {
     #[derive(Default)]
     struct Bench {
         started: Mutex<Vec<RunRequest>>,
-        aborted: Mutex<Vec<JobId>>,
+        aborted: Mutex<Vec<(JobId, bool)>>,
         refuse: Mutex<bool>,
     }
 
@@ -1081,8 +1249,8 @@ mod tests {
             Ok(())
         }
 
-        async fn abort(&self, _session: SessionId, job: JobId) {
-            self.aborted.lock().unwrap().push(job);
+        async fn abort(&self, _session: SessionId, job: JobId, keep_partial: bool) {
+            self.aborted.lock().unwrap().push((job, keep_partial));
         }
     }
 
@@ -1126,6 +1294,19 @@ mod tests {
         }
     }
 
+    /// The record a transfer claims its partial with, before a byte moves.
+    fn fresh_record() -> ResumeRecord {
+        ResumeRecord::new(
+            crate::model::FileFacts {
+                path: "/remote/f".into(),
+                size: Bytes(1_000_000),
+                modified: None,
+                digest: None,
+            },
+            "/local/.f.relaypart",
+        )
+    }
+
     fn spec(session: SessionId, name: &str) -> JobSpec {
         JobSpec {
             session,
@@ -1150,6 +1331,7 @@ mod tests {
                 job,
                 size: None,
                 resume_from: Bytes::ZERO,
+                record: fresh_record(),
             })
             .await;
         h.scheduler
@@ -1287,7 +1469,11 @@ mod tests {
             .await
             .unwrap();
         settle(&h).await;
-        assert_eq!(h.bench.aborted.lock().unwrap().as_slice(), &[ids[0]]);
+        assert_eq!(
+            h.bench.aborted.lock().unwrap().as_slice(),
+            &[(ids[0], true)],
+            "a pause keeps the bytes it is coming back to"
+        );
         assert!(matches!(
             states(&h).await[0].1,
             JobState::Paused {
@@ -1487,7 +1673,11 @@ mod tests {
             .unwrap();
         settle(&h).await;
 
-        assert_eq!(h.bench.aborted.lock().unwrap().as_slice(), &[ids[0]]);
+        assert_eq!(
+            h.bench.aborted.lock().unwrap().as_slice(),
+            &[(ids[0], false)],
+            "a cancellation leaves no partial behind"
+        );
         assert!(matches!(states(&h).await[0].1, JobState::Cancelled { .. }));
     }
 
@@ -1626,6 +1816,49 @@ mod tests {
         assert!(matches!(left[0].1, JobState::Failed { .. }));
     }
 
+    /// The race this guards: pausing stops a transfer by cancelling it, and the
+    /// transfer's final report can arrive after the job has been resumed and
+    /// dispatched again. Applying it then would cancel the new attempt on behalf of
+    /// the old one, and the job would never come back.
+    #[tokio::test]
+    async fn a_report_from_a_replaced_run_is_ignored() {
+        let h = harness(1, 8).await;
+        let batch = Uuid::new_v4();
+        let ids = h
+            .scheduler
+            .enqueue(batch, vec![spec(h.session, "a")])
+            .await
+            .unwrap();
+        settle(&h).await;
+        // Hold on to the first run's reporter, the way a transfer task does.
+        let stale = h.bench.take().pop().expect("dispatched").report;
+
+        h.scheduler
+            .control(QueueOp::Pause { job: ids[0] })
+            .await
+            .unwrap();
+        h.scheduler
+            .control(QueueOp::Resume { job: ids[0] })
+            .await
+            .unwrap();
+        settle(&h).await;
+
+        // The first run finally notices it was cancelled, long after it was replaced.
+        stale
+            .send(Report::Finished {
+                job: ids[0],
+                result: Err(EngineError::Cancelled),
+            })
+            .await;
+        settle(&h).await;
+
+        assert!(
+            !states(&h).await[0].1.is_terminal(),
+            "the new attempt survived the old one's dying words: {:?}",
+            states(&h).await[0].1
+        );
+    }
+
     #[tokio::test]
     async fn a_command_for_a_job_that_does_not_exist_is_an_error_not_a_panic() {
         let h = harness(1, 8).await;
@@ -1655,6 +1888,7 @@ mod tests {
                 job: ids[0],
                 size: Some(Bytes(1_000_000)),
                 resume_from: Bytes::ZERO,
+                record: fresh_record(),
             })
             .await;
         h.scheduler

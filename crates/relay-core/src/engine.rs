@@ -130,9 +130,9 @@ impl Dispatcher for SessionRegistry {
             .await
     }
 
-    async fn abort(&self, session: SessionId, job: JobId) {
+    async fn abort(&self, session: SessionId, job: JobId, keep_partial: bool) {
         if let Some(handle) = self.get(session) {
-            let _ = handle.cancel_job(job).await;
+            let _ = handle.cancel_job(job, keep_partial).await;
         }
     }
 }

@@ -10,6 +10,8 @@
 //! - [`model`] / [`job`] — the value types the shell and the generated TypeScript share.
 //! - [`protocol`] — what a backend must implement, and the transfer lanes it hands out.
 //! - [`queue`] — the job record and the single function allowed to change its state.
+//! - [`digest`] — what makes a resume an identity check rather than a length check.
+//! - [`resume`] — the four things that must hold before a partial may be continued.
 //! - [`store`] — the same records on disk, so a restart resumes rather than forgets.
 //! - [`scheduler`] — the one task that decides which job runs, and when.
 //! - [`interact`] — prompts, and the broker that owns every unanswered question.
@@ -23,6 +25,7 @@
 
 pub mod bindings;
 pub mod coordinator;
+pub mod digest;
 pub mod engine;
 pub mod error;
 pub mod events;
@@ -34,6 +37,7 @@ pub mod mock;
 pub mod model;
 pub mod protocol;
 pub mod queue;
+pub mod resume;
 pub mod scheduler;
 pub mod secrets;
 pub mod servers;

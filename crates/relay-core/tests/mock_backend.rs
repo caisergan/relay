@@ -10,7 +10,7 @@ use relay_core::error::EngineError;
 use relay_core::interact::{Interact, Prompt, PromptReply};
 use relay_core::mock::{MockBackend, MockFs, MockOptions, NoSecrets};
 use relay_core::model::{AuthMethod, Proto, ServerConfig, SessionId};
-use relay_core::protocol::{ProgressSink, Protocol, TransferReq};
+use relay_core::protocol::{CheckpointSink, ProgressSink, Protocol, TransferReq};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -51,8 +51,11 @@ fn req(job: Uuid, remote: &str, local: PathBuf, cancel: CancellationToken) -> Tr
         remote_path: remote.into(),
         local_path: local,
         offset: 0,
+        prefix: None,
         progress: ProgressSink::noop(),
+        checkpoint: CheckpointSink::noop(),
         cancel,
+        keep_partial: Default::default(),
     }
 }
 
@@ -161,8 +164,11 @@ async fn progress_is_monotonic_and_ends_at_the_full_size() {
         remote_path: "/var/log/nginx/access.log".into(),
         local_path: dir.path().join("access.log"),
         offset: 0,
+        prefix: None,
         progress: sink,
+        checkpoint: CheckpointSink::noop(),
         cancel: CancellationToken::new(),
+        keep_partial: Default::default(),
     })
     .await
     .expect("download");
@@ -286,8 +292,11 @@ async fn a_resume_offset_is_refused_when_the_partial_does_not_back_it_up() {
             remote_path: "/var/www/assets/app.js".into(),
             local_path: local.clone(),
             offset: 100 * 1024,
+            prefix: None,
             progress: ProgressSink::noop(),
+            checkpoint: CheckpointSink::noop(),
             cancel: CancellationToken::new(),
+            keep_partial: Default::default(),
         })
         .await
         .unwrap_err();

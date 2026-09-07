@@ -13,8 +13,9 @@
 //! FTP (phase 3) it is an additional control connection, which is why the per-server
 //! connection cap lives on [`BackendCapabilities`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -57,23 +58,106 @@ impl std::fmt::Debug for ProgressSink {
     }
 }
 
+/// A durable point a resume may start from.
+///
+/// Called only after the bytes it describes are on the destination for good — flushed
+/// and fsynced locally, acknowledged and re-readable remotely. `digest` is the SHA-256
+/// of exactly the first `offset` bytes, which is what makes the checkpoint an identity
+/// claim rather than a length.
+///
+/// Fire and forget, like [`ProgressSink`]. A checkpoint that does not reach the
+/// database means a resume starts from an earlier point, which is the safe direction
+/// to be wrong in; blocking the transfer until it commits would put an fsync in the
+/// middle of the byte loop to prevent re-sending a few megabytes.
+#[derive(Clone)]
+pub struct CheckpointSink(Arc<dyn Fn(u64, String) + Send + Sync>);
+
+impl CheckpointSink {
+    pub fn new(f: impl Fn(u64, String) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    pub fn noop() -> Self {
+        Self::new(|_, _| {})
+    }
+
+    pub fn report(&self, offset: u64, digest: String) {
+        (self.0)(offset, digest)
+    }
+}
+
+impl std::fmt::Debug for CheckpointSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CheckpointSink")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TransferReq {
     pub job: JobId,
     pub remote_path: String,
     pub local_path: PathBuf,
-    /// Byte offset to start from. Non-zero **only** after phase 2 has verified the
-    /// source facts and the partial file's content prefix. A backend must never
-    /// infer resumability from a size match on its own.
+    /// Byte offset to start from. Non-zero **only** after the source facts and the
+    /// partial file's content prefix have been verified. A backend must never infer
+    /// resumability from a size match on its own.
     pub offset: u64,
+    /// The running hash of the first `offset` bytes, from the verification that
+    /// authorised this resume.
+    ///
+    /// Passed in rather than re-derived because the prefix was just read to check it,
+    /// and reading it twice would double the cost of the one operation that is already
+    /// the expensive part of resuming. `None` at offset zero, where there is nothing
+    /// to carry.
+    pub prefix: Option<crate::digest::Rolling>,
     pub progress: ProgressSink,
+    pub checkpoint: CheckpointSink,
     pub cancel: CancellationToken,
+    /// Whether the partial survives a cancellation.
+    ///
+    /// A pause and a cancel look identical from inside a transfer loop — the token is
+    /// cancelled either way — and they mean opposite things for the bytes already
+    /// written. A paused job is coming back to them; a cancelled one is not, and
+    /// leaving its partial behind is litter a person has to find and delete.
+    ///
+    /// Set by whoever stops the transfer, read by the backend when it notices. Shared
+    /// rather than passed because the decision is made after the request was built.
+    pub keep_partial: Arc<AtomicBool>,
+}
+
+impl TransferReq {
+    /// Whether the partial should be left where it is, now that the transfer is over.
+    pub fn keeping_partial(&self) -> bool {
+        self.keep_partial.load(Ordering::SeqCst)
+    }
 }
 
 impl TransferReq {
     pub fn is_resume(&self) -> bool {
         self.offset > 0
     }
+}
+
+/// The partial file a job owns, on either side.
+///
+/// One function because three places have to agree on it exactly: the backend that
+/// creates it, the backend that finalises it, and the resume record that claims
+/// ownership of it. A name derived independently in any of them would produce a
+/// record pointing at a file nothing wrote.
+///
+/// The job id is in the name because ownership has to be provable. A bare `.relaypart`
+/// suffix would let a stale file from a previous run — or another job aimed at the
+/// same destination — be mistaken for this job's work.
+pub fn partial_name(file_name: &str, job: JobId) -> String {
+    format!(".{file_name}.{job}.relaypart")
+}
+
+/// The local partial for a path.
+pub fn local_partial(local: &Path, job: JobId) -> PathBuf {
+    let name = local
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    local.with_file_name(partial_name(&name, job))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +223,19 @@ pub trait Protocol: Send {
 pub trait TransferLane: Send {
     async fn download(&mut self, req: TransferReq) -> Result<TransferOutcome>;
     async fn upload(&mut self, req: TransferReq) -> Result<TransferOutcome>;
+
+    /// SHA-256 of the first `len` bytes of a remote file, for verifying an upload's
+    /// partial before continuing it.
+    ///
+    /// Reading a prefix back costs as much I/O as re-sending it would, and the queue
+    /// says so out loud rather than pretending resume is free. It is still worth it on
+    /// a large file, and it is the only thing that distinguishes "the same length" from
+    /// "the same bytes".
+    async fn prefix_digest(&mut self, path: &str, len: u64) -> Result<String>;
+
+    /// The size of a remote path, or `None` when it is not there. Used to find a free
+    /// name for keep-both, and to tell an owned partial from nothing at all.
+    async fn size_of(&mut self, path: &str) -> Result<Option<u64>>;
     /// Release the lane. Called even after a cancelled transfer, where protocol state
     /// may be uncertain and the lane must be discarded rather than reused.
     async fn close(self: Box<Self>);

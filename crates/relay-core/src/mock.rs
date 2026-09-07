@@ -487,13 +487,36 @@ pub struct MockLane {
 }
 
 impl MockLane {
-    fn partial_path(local: &Path, job: uuid::Uuid) -> PathBuf {
-        let name = local
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        local.with_file_name(format!(".{name}.{job}.relaypart"))
+    /// A lane over an in-memory filesystem with no session behind it, for testing the
+    /// parts of the engine that only need something implementing the trait.
+    pub fn over(fs: MockFs) -> Self {
+        Self {
+            fs,
+            opts: MockOptions::default(),
+        }
     }
+
+    fn partial_path(local: &Path, job: uuid::Uuid) -> PathBuf {
+        crate::protocol::local_partial(local, job)
+    }
+}
+
+/// Stop a download: keep the partial for a pause, remove it for a cancel.
+async fn stop(
+    mut file: tokio::fs::File,
+    partial: &Path,
+    keep: bool,
+) -> Result<crate::protocol::TransferOutcome> {
+    if keep {
+        let _ = file.flush().await;
+        let _ = file.sync_all().await;
+        drop(file);
+    } else {
+        drop(file);
+        // Only ever the partial this job owns.
+        let _ = tokio::fs::remove_file(partial).await;
+    }
+    Err(EngineError::Cancelled)
 }
 
 #[async_trait]
@@ -517,7 +540,7 @@ impl TransferLane for MockLane {
 
         let partial = Self::partial_path(&req.local_path, req.job);
         let mut file = if req.offset > 0 {
-            let mut f = tokio::fs::OpenOptions::new()
+            let f = tokio::fs::OpenOptions::new()
                 .write(true)
                 .open(&partial)
                 .await
@@ -536,6 +559,12 @@ impl TransferLane for MockLane {
                     ),
                 });
             }
+            // Bytes past the checkpoint were never covered by the digest that
+            // authorised this resume.
+            f.set_len(req.offset)
+                .await
+                .map_err(|e| EngineError::from_io(&partial, &e))?;
+            let mut f = f;
             f.seek(std::io::SeekFrom::Start(req.offset))
                 .await
                 .map_err(|e| EngineError::from_io(&partial, &e))?;
@@ -547,25 +576,32 @@ impl TransferLane for MockLane {
         };
 
         let mut written = 0u64;
+        let mut rolling = req.prefix.clone().unwrap_or_default();
         for chunk in data[req.offset as usize..].chunks(self.opts.chunk.max(1)) {
             if req.cancel.is_cancelled() {
-                drop(file);
-                // Only ever remove the partial this job owns.
-                let _ = tokio::fs::remove_file(&partial).await;
-                return Err(EngineError::Cancelled);
+                return stop(file, &partial, req.keeping_partial()).await;
             }
             file.write_all(chunk)
                 .await
                 .map_err(|e| EngineError::from_io(&partial, &e))?;
+            rolling.update(chunk);
             written += chunk.len() as u64;
             req.progress.report(req.offset + written);
+            // Every chunk, unlike the real backend's eight megabytes: a test needs a
+            // checkpoint it can reach without moving eight megabytes to get there.
+            file.flush()
+                .await
+                .map_err(|e| EngineError::from_io(&partial, &e))?;
+            file.sync_all()
+                .await
+                .map_err(|e| EngineError::from_io(&partial, &e))?;
+            req.checkpoint
+                .report(req.offset + written, rolling.snapshot());
             if !self.opts.chunk_delay.is_zero() {
                 tokio::select! {
                     _ = tokio::time::sleep(self.opts.chunk_delay) => {}
                     _ = req.cancel.cancelled() => {
-                        drop(file);
-                        let _ = tokio::fs::remove_file(&partial).await;
-                        return Err(EngineError::Cancelled);
+                        return stop(file, &partial, req.keeping_partial()).await;
                     }
                 }
             }
@@ -645,6 +681,26 @@ impl TransferLane for MockLane {
             bytes: written,
             final_size,
         })
+    }
+
+    async fn prefix_digest(&mut self, path: &str, len: u64) -> Result<String> {
+        let data = self
+            .fs
+            .read_file(path)
+            .ok_or_else(|| EngineError::NotFound { path: path.into() })?;
+        if (data.len() as u64) < len {
+            return Err(EngineError::ResumeUnverifiable {
+                reason: format!(
+                    "{path} holds {} bytes, fewer than the {len} the checkpoint claims",
+                    data.len()
+                ),
+            });
+        }
+        Ok(crate::digest::of(&data[..len as usize]))
+    }
+
+    async fn size_of(&mut self, path: &str) -> Result<Option<u64>> {
+        Ok(self.fs.read_file(path).map(|data| data.len() as u64))
     }
 
     async fn close(self: Box<Self>) {}

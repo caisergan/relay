@@ -257,15 +257,6 @@ impl Job {
             .map(|size| Bytes(size.get().saturating_sub(self.transferred.get())))
     }
 
-    /// The offset a resume would start from. Zero unless a verified checkpoint exists,
-    /// and deliberately not derived from `transferred`.
-    pub fn verified_offset(&self) -> Bytes {
-        match &self.resume {
-            Some(record) if self.chosen == Some(ConflictAction::Resume) => record.checkpoint,
-            _ => Bytes::ZERO,
-        }
-    }
-
     /// What the drawer and the flow gutter render.
     pub fn snapshot(&self) -> JobSnapshot {
         JobSnapshot {
@@ -906,36 +897,6 @@ mod tests {
             Bytes::ZERO,
             "progress must not advance a checkpoint"
         );
-        assert_eq!(
-            job.verified_offset(),
-            Bytes::ZERO,
-            "and no resume was authorised, so the offset is zero"
-        );
-    }
-
-    #[test]
-    fn a_resume_offset_needs_both_a_record_and_a_decision() {
-        let mut job = in_state(JobState::Preparing);
-        job.resume = Some(ResumeRecord {
-            checkpoint: Bytes(400),
-            ..ResumeRecord::new(
-                FileFacts {
-                    path: "/remote/file".into(),
-                    size: Bytes(1000),
-                    modified: None,
-                    digest: None,
-                },
-                "/local/.file.relaypart",
-            )
-        });
-        assert_eq!(
-            job.verified_offset(),
-            Bytes::ZERO,
-            "a checkpoint alone does not authorise resuming"
-        );
-
-        job.chosen = Some(ConflictAction::Resume);
-        assert_eq!(job.verified_offset(), Bytes(400));
     }
 
     #[test]

@@ -15,8 +15,8 @@
 
 use std::collections::HashMap;
 use std::ops::ControlFlow;
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -35,7 +35,11 @@ use crate::model::{
     Direction, FileFacts, JobId, PromptId, RemoteEntry, ServerConfig, Session, SessionId,
     SessionState,
 };
-use crate::protocol::{ProgressSink, Protocol, SecretSource, TransferLane, TransferReq};
+use crate::protocol::{
+    CheckpointSink, ProgressSink, Protocol, SecretSource, TransferLane, TransferReq,
+};
+use crate::queue::ResumeRecord;
+use crate::resume;
 use crate::scheduler::{Report, RunRequest, Scheduler};
 use crate::wire::{Bytes, Seq};
 
@@ -101,6 +105,9 @@ pub enum SessionCmd {
     /// outside it has to keep a parallel map that could disagree.
     CancelJob {
         job: JobId,
+        /// True for a pause, which is coming back to the bytes already written; false
+        /// for a cancellation, which is not.
+        keep_partial: bool,
         reply: oneshot::Sender<Result<()>>,
     },
     Disconnect,
@@ -238,9 +245,13 @@ impl SessionHandle {
         .await
     }
 
-    pub async fn cancel_job(&self, job: JobId) -> Result<()> {
-        self.call(|reply| SessionCmd::CancelJob { job, reply })
-            .await
+    pub async fn cancel_job(&self, job: JobId, keep_partial: bool) -> Result<()> {
+        self.call(|reply| SessionCmd::CancelJob {
+            job,
+            keep_partial,
+            reply,
+        })
+        .await
     }
 
     pub async fn transfer(&self, run: RunRequest) -> Result<()> {
@@ -393,10 +404,16 @@ struct SessionActor {
     queue: Scheduler,
     /// Where transfer tasks ask for a lane. They cannot open one themselves: the actor
     /// owns the backend, and this is the only way through it.
-    lane_tx: mpsc::Sender<LaneRequest>,
-    /// Cancellation tokens for the transfers this session is running, so `CancelJob`
-    /// reaches the right one without a second map living somewhere else.
-    running: HashMap<JobId, CancellationToken>,
+    lane_tx: mpsc::Sender<ActorRequest>,
+    /// What the session is running, so a stop reaches the right transfer without a
+    /// second map living somewhere else that could disagree.
+    running: HashMap<JobId, Running>,
+}
+
+/// The handles on one in-flight transfer.
+struct Running {
+    cancel: CancellationToken,
+    keep_partial: Arc<AtomicBool>,
 }
 
 impl SessionActor {
@@ -405,7 +422,7 @@ impl SessionActor {
         cfg: ServerConfig,
         secrets: Arc<dyn SecretSource>,
         mut cmd_rx: mpsc::Receiver<SessionCmd>,
-        mut lane_rx: mpsc::Receiver<LaneRequest>,
+        mut lane_rx: mpsc::Receiver<ActorRequest>,
     ) {
         let (internal_tx, mut internal_rx) = mpsc::channel::<Internal>(LANE_BUFFER);
 
@@ -491,12 +508,24 @@ impl SessionActor {
                 Some(Internal::LaneFinished(job)) = internal_rx.recv() => {
                     self.running.remove(&job);
                 }
-                // A transfer asking for its channel. Served here because the actor is
-                // the only thing that may touch the backend.
-                Some(request) = lane_rx.recv() => {
-                    let lane = self.backend.open_lane().await;
-                    let _ = request.reply.send(lane);
-                }
+                // A transfer asking the backend for something. Served here because
+                // the actor is the only thing that may touch it.
+                Some(request) = lane_rx.recv() => match request {
+                    ActorRequest::Lane { reply } => {
+                        let lane = self.backend.open_lane().await;
+                        let _ = reply.send(lane);
+                    }
+                    ActorRequest::Exists { path, reply } => {
+                        let taken = with_deadline(
+                            self.backend.stat(&path), "stat", OP_DEADLINE, &self.cancel.clone(),
+                        )
+                        .await;
+                        // A stat that fails is not proof the path is free, so a name
+                        // that cannot be checked counts as taken and the search moves
+                        // on. Guessing the other way overwrites somebody's file.
+                        let _ = reply.send(!matches!(taken, Ok(None)));
+                    }
+                },
                 cmd = cmd_rx.recv() => {
                     let Some(cmd) = cmd else { break };
                     if matches!(cmd, SessionCmd::Disconnect) {
@@ -613,8 +642,12 @@ impl SessionActor {
                 self.start_transfer(run, internal_tx).await;
                 ControlFlow::Continue(())
             }
-            SessionCmd::CancelJob { job, reply } => {
-                let _ = reply.send(self.cancel_job(job).await);
+            SessionCmd::CancelJob {
+                job,
+                keep_partial,
+                reply,
+            } => {
+                let _ = reply.send(self.cancel_job(job, keep_partial).await);
                 ControlFlow::Continue(())
             }
             // The run loop takes this one before it reaches here.
@@ -628,9 +661,12 @@ impl SessionActor {
     /// now, so by the time a cancellation arrives the transfer may have finished on
     /// its own, or may never have started — both are races the caller already handles,
     /// and neither is a failure to report.
-    async fn cancel_job(&mut self, job: JobId) -> Result<()> {
-        if let Some(token) = self.running.get(&job) {
-            token.cancel();
+    async fn cancel_job(&mut self, job: JobId, keep_partial: bool) -> Result<()> {
+        if let Some(running) = self.running.get(&job) {
+            // Set before cancelling, so the transfer cannot notice the cancellation
+            // and act on a stale answer to "do these bytes matter".
+            running.keep_partial.store(keep_partial, Ordering::SeqCst);
+            running.cancel.cancel();
         }
         Ok(())
     }
@@ -710,9 +746,11 @@ impl SessionActor {
             }
         };
 
-        // Source size for the progress bar. Best effort: its absence is a state the
-        // drawer already draws, and not worth failing a transfer over.
-        let size = match run.direction {
+        // The source as it is right now. Its size draws the progress bar; its size and
+        // time together are the cheap half of deciding whether a partial may be
+        // continued. Best effort: a server that withholds either is a state the drawer
+        // and the resume check both already handle.
+        let source = match run.direction {
             Direction::Down => with_deadline(
                 self.backend.stat(&run.remote_path),
                 "stat",
@@ -722,25 +760,34 @@ impl SessionActor {
             .await
             .ok()
             .flatten()
-            .map(|entry| entry.size),
-            Direction::Up => tokio::fs::metadata(&run.local_path)
-                .await
-                .ok()
-                .map(|meta| Bytes(meta.len())),
+            .map(|entry| remote_facts(&run.remote_path, &entry)),
+            Direction::Up => local_facts(&run.local_path).await,
         };
+        let size = source.as_ref().map(|facts| facts.size);
 
         // A child of the session token, so closing the tab stops every transfer on it
         // without the engine having to enumerate them.
         let cancel = self.cancel.child_token();
-        self.running.insert(run.job, cancel.clone());
+        // Discard by default: a transfer that stops for any reason other than a
+        // deliberate pause leaves nothing behind.
+        let keep_partial = Arc::new(AtomicBool::new(false));
+        self.running.insert(
+            run.job,
+            Running {
+                cancel: cancel.clone(),
+                keep_partial: Arc::clone(&keep_partial),
+            },
+        );
         self.rt.spawn(run_transfer(TransferTask {
             session: self.id,
             run,
             size,
+            source,
             destination,
-            backend: LaneSource::Actor(self.lane_tx.clone()),
+            actor: self.lane_tx.clone(),
             interact: Arc::clone(&self.interact),
             cancel,
+            keep_partial,
             done: internal_tx.clone(),
         }));
     }
@@ -751,26 +798,43 @@ struct TransferTask {
     session: SessionId,
     run: Box<RunRequest>,
     size: Option<Bytes>,
+    /// The source as it was when this transfer was dispatched.
+    source: Option<FileFacts>,
     /// Facts about what is already at the destination, when anything is.
     destination: Option<FileFacts>,
-    backend: LaneSource,
+    actor: mpsc::Sender<ActorRequest>,
     interact: Arc<dyn Interact>,
     cancel: CancellationToken,
+    keep_partial: Arc<AtomicBool>,
     done: mpsc::Sender<Internal>,
 }
 
-/// How a transfer task gets its lane.
+/// What a transfer task needs the backend for.
 ///
-/// It cannot open one itself — the actor owns the backend exclusively — so it asks,
-/// and it asks *after* the conflict is settled. Opening a channel for a file that is
-/// about to be skipped costs a round trip and a lane the queue could have given to
-/// something that is actually going to move.
-enum LaneSource {
-    Actor(mpsc::Sender<LaneRequest>),
+/// It cannot touch the backend itself — the actor owns it exclusively — so it asks.
+/// The lane is asked for *after* the conflict is settled: opening a channel for a file
+/// that is about to be skipped costs a round trip and a lane the queue could have
+/// spent on something that was going to move. The exception is a job with a resume
+/// record, which needs a lane to read the remote prefix before it can decide whether
+/// resuming is even on the menu.
+enum ActorRequest {
+    Lane {
+        reply: oneshot::Sender<Result<Box<dyn TransferLane>>>,
+    },
+    /// Whether a remote path is taken, for finding a free name for keep-both.
+    Exists {
+        path: String,
+        reply: oneshot::Sender<bool>,
+    },
 }
 
-struct LaneRequest {
-    reply: oneshot::Sender<Result<Box<dyn TransferLane>>>,
+/// Ask the actor for a lane.
+async fn open_lane(actor: &mpsc::Sender<ActorRequest>) -> Result<Box<dyn TransferLane>> {
+    let (reply, wait) = oneshot::channel();
+    match actor.send(ActorRequest::Lane { reply }).await {
+        Ok(()) => wait.await.unwrap_or_else(|_| Err(closed())),
+        Err(_) => Err(closed()),
+    }
 }
 
 async fn run_transfer(task: TransferTask) {
@@ -778,31 +842,70 @@ async fn run_transfer(task: TransferTask) {
         session,
         run,
         size,
+        source,
         destination,
-        backend,
+        actor,
         interact,
         cancel,
+        keep_partial,
         done,
     } = task;
     let job = run.job;
     let report = run.report.clone();
+    let finish = |result| async {
+        report.send(finished(job, result)).await;
+        let _ = done.send(Internal::LaneFinished(job)).await;
+    };
+
+    // A job with a resume record needs its lane before the sheet opens, because
+    // whether "Resume" is even offered depends on reading the remote prefix back.
+    let mut lane = match &run.resume {
+        Some(_) => match open_lane(&actor).await {
+            Ok(lane) => Some(lane),
+            Err(err) => return finish(Err(err)).await,
+        },
+        None => None,
+    };
+
+    // Nothing here decides to resume. It decides whether resuming is *offerable*, and
+    // a refusal carries the reason so the sheet can say why the option is missing.
+    let verified = match (&run.resume, lane.as_deref_mut()) {
+        (Some(record), Some(lane)) => {
+            match resume::check(
+                resume::Verify {
+                    record,
+                    direction: run.direction,
+                    source_now: source.as_ref(),
+                    local_path: &run.local_path,
+                    remote_path: &run.remote_path,
+                },
+                lane,
+            )
+            .await
+            {
+                Ok(prefix) => Some((record.checkpoint, prefix)),
+                Err(reason) => {
+                    tracing::info!(%job, reason, "resume refused; the transfer restarts");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
 
     let decision = resolve_conflict(&Conflict {
         session,
         run: &run,
         size,
         destination: destination.as_ref(),
+        resume_allowed: verified.is_some(),
         interact: interact.as_ref(),
     })
     .await;
 
     let action = match decision {
         Ok(action) => action,
-        Err(outcome) => {
-            report.send(finished(job, outcome)).await;
-            let _ = done.send(Internal::LaneFinished(job)).await;
-            return;
-        }
+        Err(outcome) => return finish(outcome).await,
     };
     report
         .send(Report::Decided {
@@ -813,31 +916,57 @@ async fn run_transfer(task: TransferTask) {
         .await;
     if action.action == ConflictAction::Skip {
         // The scheduler finishes the job on the decision alone; there is nothing to
-        // transfer and no lane to open.
+        // transfer and no lane to give back.
+        if let Some(lane) = lane {
+            lane.close().await;
+        }
         let _ = done.send(Internal::LaneFinished(job)).await;
         return;
     }
 
-    let LaneSource::Actor(lanes) = backend;
-    let (reply_tx, reply_rx) = oneshot::channel();
-    let lane = match lanes.send(LaneRequest { reply: reply_tx }).await {
-        Ok(()) => reply_rx.await.unwrap_or_else(|_| Err(closed())),
-        Err(_) => Err(closed()),
-    };
-    let mut lane = match lane {
-        Ok(lane) => lane,
-        Err(err) => {
-            report.send(finished(job, Err(err))).await;
-            let _ = done.send(Internal::LaneFinished(job)).await;
-            return;
-        }
+    // Keep-both means a new destination, so it is settled before anything opens: the
+    // partial file's name and the finalisation target are both derived from it.
+    let (remote_path, local_path) = match action.action {
+        ConflictAction::KeepBoth => match free_name(&run, &actor).await {
+            Ok(paths) => paths,
+            Err(err) => return finish(Err(err)).await,
+        },
+        _ => (run.remote_path.clone(), run.local_path.clone()),
     };
 
+    let mut lane = match lane {
+        Some(lane) => lane,
+        None => match open_lane(&actor).await {
+            Ok(lane) => lane,
+            Err(err) => return finish(Err(err)).await,
+        },
+    };
+
+    // Only a verified checkpoint *and* a decision to use it produce an offset.
+    let (offset, prefix) = match (action.action, verified) {
+        (ConflictAction::Resume, Some((checkpoint, prefix))) => (checkpoint, Some(prefix)),
+        _ => (Bytes::ZERO, None),
+    };
+
+    let temporary_path = temp_path(run.direction, &remote_path, &local_path, job);
+    // Ownership is recorded before a byte moves, and the scheduler confirms it is on
+    // disk before this returns. A partial with no record behind it is not resumable by
+    // anything, which is the whole point of writing it first.
     report
-        .send(Report::Started {
+        .started(Report::Started {
             job,
             size,
-            resume_from: run.offset,
+            resume_from: offset,
+            record: ResumeRecord {
+                checkpoint: offset,
+                prefix_sha256: prefix
+                    .as_ref()
+                    .map_or_else(|| crate::queue::EMPTY_SHA256.to_string(), |p| p.snapshot()),
+                ..ResumeRecord::new(
+                    source.clone().unwrap_or_else(|| source_facts(&run, size)),
+                    temporary_path,
+                )
+            },
         })
         .await;
 
@@ -845,16 +974,22 @@ async fn run_transfer(task: TransferTask) {
         let report = report.clone();
         ProgressSink::new(move |bytes| report.progress(job, Bytes(bytes)))
     };
+    let checkpoint = {
+        let report = report.clone();
+        CheckpointSink::new(move |offset, digest| report.checkpoint(job, Bytes(offset), digest))
+    };
 
     let req = TransferReq {
         job,
-        remote_path: run.remote_path.clone(),
-        local_path: run.local_path.clone(),
-        // A verified offset or zero. The scheduler is the only thing that can make it
-        // non-zero, and only after the resume checks in ADR 005 have passed.
-        offset: run.offset.get(),
+        remote_path: remote_path.clone(),
+        local_path: local_path.clone(),
+        // A verified offset or zero. Nothing else can put a number here.
+        offset: offset.get(),
+        prefix,
         progress,
+        checkpoint,
         cancel,
+        keep_partial,
     };
 
     let outcome = match run.direction {
@@ -880,6 +1015,10 @@ struct Conflict<'a> {
     run: &'a RunRequest,
     size: Option<Bytes>,
     destination: Option<&'a FileFacts>,
+    /// Whether the engine has *already proven* a resume would be safe. The sheet
+    /// offers the option only when this is true, so a person is never given a choice
+    /// the engine cannot honour.
+    resume_allowed: bool,
     interact: &'a dyn Interact,
 }
 
@@ -894,14 +1033,28 @@ struct Decision {
 /// `Err` is a terminal outcome for the job, which is what it carries.
 async fn resolve_conflict(ctx: &Conflict<'_>) -> std::result::Result<Decision, Result<Bytes>> {
     let Some(existing) = ctx.destination else {
-        // Nothing is in the way, so there is nothing to ask about.
+        // Nothing is in the way, so there is nothing to ask about — but this job may
+        // still own a verified partial from an earlier attempt. Continuing it is not a
+        // conflict and needs no decision: the only file involved is one this engine
+        // wrote and has just proven still matches the source.
         return Ok(Decision {
-            action: ConflictAction::Overwrite,
+            action: if ctx.resume_allowed {
+                ConflictAction::Resume
+            } else {
+                ConflictAction::Overwrite
+            },
             apply_to_remaining: false,
         });
     };
 
     if let Some(action) = ctx.run.conflict {
+        // A policy that says "resume" cannot override the verification: it is a
+        // preference, and this is a proof. Falling back to overwrite restarts from
+        // zero, which is always safe.
+        let action = match action {
+            ConflictAction::Resume if !ctx.resume_allowed => ConflictAction::Overwrite,
+            other => other,
+        };
         return Ok(Decision {
             action,
             apply_to_remaining: false,
@@ -934,10 +1087,7 @@ async fn resolve_conflict(ctx: &Conflict<'_>) -> std::result::Result<Decision, R
                 remote,
                 direction: ctx.run.direction,
                 remaining: ctx.run.remaining,
-                // Phase 2 §2.4 owns verified resume. Offering it before the source
-                // facts and the partial's prefix have been checked would be offering
-                // a guarantee nothing has established.
-                resume_allowed: false,
+                resume_allowed: ctx.resume_allowed,
             },
         )
         .await;
@@ -989,5 +1139,83 @@ fn remote_facts(path: &str, entry: &RemoteEntry) -> FileFacts {
         size: entry.size,
         modified: entry.modified,
         digest: None,
+    }
+}
+
+/// Where the partial for this transfer lives, so the resume record can claim it before
+/// the backend creates it.
+fn temp_path(direction: Direction, remote: &str, local: &Path, job: JobId) -> String {
+    match direction {
+        Direction::Down => crate::protocol::local_partial(local, job)
+            .display()
+            .to_string(),
+        Direction::Up => {
+            let (parent, name) = match remote.rsplit_once('/') {
+                Some(("", name)) => ("", name),
+                Some((parent, name)) => (parent, name),
+                None => ("", remote),
+            };
+            format!("{parent}/{}", crate::protocol::partial_name(name, job))
+        }
+    }
+}
+
+/// A destination that is not taken, for keep-both.
+///
+/// The design's copy is `name (2).ext`, counting up. The extension is kept where the
+/// name has one, because `report (2).pdf` opens and `report.pdf (2)` does not.
+async fn free_name(
+    run: &RunRequest,
+    actor: &mpsc::Sender<ActorRequest>,
+) -> Result<(String, PathBuf)> {
+    const LIMIT: u32 = 1000;
+    for n in 2..=LIMIT {
+        match run.direction {
+            Direction::Down => {
+                let candidate = run.local_path.with_file_name(numbered(
+                    &run.local_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
+                    n,
+                ));
+                // `try_exists` rather than `exists`: a path we cannot look at is not a
+                // path we may write to.
+                if !tokio::fs::try_exists(&candidate).await.unwrap_or(true) {
+                    return Ok((run.remote_path.clone(), candidate));
+                }
+            }
+            Direction::Up => {
+                let (parent, name) = match run.remote_path.rsplit_once('/') {
+                    Some((parent, name)) => (parent, name),
+                    None => ("", run.remote_path.as_str()),
+                };
+                let candidate = format!("{parent}/{}", numbered(name, n));
+                let (reply, wait) = oneshot::channel();
+                actor
+                    .send(ActorRequest::Exists {
+                        path: candidate.clone(),
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| closed())?;
+                if !wait.await.unwrap_or(true) {
+                    return Ok((candidate, run.local_path.clone()));
+                }
+            }
+        }
+    }
+    Err(EngineError::LocalIo {
+        path: run.local_path.display().to_string(),
+        message: format!("every name up to ({LIMIT}) is taken"),
+    })
+}
+
+/// `report.pdf` + 2 → `report (2).pdf`; `README` + 2 → `README (2)`.
+fn numbered(name: &str, n: u32) -> String {
+    match name.rsplit_once('.') {
+        // A leading dot is the whole name of a dotfile, not an extension.
+        Some((stem, ext)) if !stem.is_empty() => format!("{stem} ({n}).{ext}"),
+        _ => format!("{name} ({n})"),
     }
 }

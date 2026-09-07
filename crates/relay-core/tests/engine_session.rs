@@ -825,3 +825,153 @@ async fn a_folder_upload_creates_the_remote_tree_before_filling_it() {
         "an empty directory is created even though nothing is queued for it"
     );
 }
+
+/// The exit criterion resume exists for: interrupt a transfer, continue it, and get
+/// the file that was on the server rather than a plausible-looking splice.
+#[tokio::test]
+async fn a_paused_download_continues_from_its_checkpoint_and_the_bytes_are_right() {
+    let h = harness(MockOptions {
+        chunk: 64 * 1024,
+        chunk_delay: Duration::from_millis(20),
+        ..MockOptions::default()
+    })
+    .await;
+    let cfg = server();
+    let server_id = cfg.id;
+    let session = h.engine.open_session(cfg).expect("session opens");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let local = dir.path().join("access.log");
+    let job = enqueue_one(
+        &h.engine,
+        session,
+        server_id,
+        Direction::Down,
+        "/var/log/nginx/access.log",
+        local.clone(),
+    )
+    .await;
+
+    // Let it get far enough that there is something to resume from.
+    poll_job(&h, job, |state| matches!(state, JobState::Transferring)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let moved = h
+            .engine
+            .queue()
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|j| j.id == job)
+            .map(|j| j.transferred.get())
+            .unwrap_or(0);
+        if moved > 256 * 1024 {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no progress at all");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    h.engine
+        .queue_control(QueueOp::Pause { job })
+        .await
+        .expect("pause");
+    poll_job(&h, job, |state| matches!(state, JobState::Paused { .. })).await;
+
+    // A pause keeps the bytes it is coming back to. A cancellation would not.
+    let partial = partial_in(dir.path());
+    assert!(
+        partial.is_some(),
+        "the partial a paused job will continue must still be there"
+    );
+    let stopped_at = std::fs::metadata(partial.as_ref().unwrap())
+        .expect("partial")
+        .len();
+    assert!(stopped_at > 0);
+
+    h.engine
+        .queue_control(QueueOp::Resume { job })
+        .await
+        .expect("resume");
+    let state = poll_job(&h, job, |state| state.is_terminal()).await;
+    assert!(
+        matches!(state, JobState::Done { skipped: false, .. }),
+        "the resumed transfer finished: {state:?}"
+    );
+
+    // The whole point: the file is the file, not a splice that happens to be the
+    // right length.
+    assert_eq!(
+        std::fs::read(&local).expect("the finished download"),
+        h.fs.read_file("/var/log/nginx/access.log").expect("source"),
+    );
+    assert_eq!(
+        partial_in(dir.path()),
+        None,
+        "nothing is left behind for a person to find and delete"
+    );
+}
+
+/// The failure resume verification exists to prevent. The source is replaced while the
+/// job is paused; continuing would splice the tail of a new file onto the head of an
+/// old one, and every length involved would still add up.
+#[tokio::test]
+async fn a_source_that_changed_while_paused_restarts_instead_of_splicing() {
+    let h = harness(MockOptions {
+        chunk: 64 * 1024,
+        chunk_delay: Duration::from_millis(20),
+        ..MockOptions::default()
+    })
+    .await;
+    let cfg = server();
+    let server_id = cfg.id;
+    let session = h.engine.open_session(cfg).expect("session opens");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let local = dir.path().join("access.log");
+    let job = enqueue_one(
+        &h.engine,
+        session,
+        server_id,
+        Direction::Down,
+        "/var/log/nginx/access.log",
+        local.clone(),
+    )
+    .await;
+
+    poll_job(&h, job, |state| matches!(state, JobState::Transferring)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    h.engine
+        .queue_control(QueueOp::Pause { job })
+        .await
+        .expect("pause");
+    poll_job(&h, job, |state| matches!(state, JobState::Paused { .. })).await;
+
+    // Same length, different bytes — the case a size comparison cannot see.
+    let replacement = vec![b'!'; 3 * 1024 * 1024];
+    h.fs.write_file("/var/log/nginx/access.log", replacement.clone());
+
+    h.engine
+        .queue_control(QueueOp::Resume { job })
+        .await
+        .expect("resume");
+    let state = poll_job(&h, job, |state| state.is_terminal()).await;
+    assert!(
+        matches!(state, JobState::Done { skipped: false, .. }),
+        "the transfer completed by restarting: {state:?}"
+    );
+    assert_eq!(
+        std::fs::read(&local).expect("the finished download"),
+        replacement,
+        "the file is the replacement in full, not the old head with a new tail"
+    );
+}
+
+/// Whatever `.relaypart` file is in a directory, if any.
+fn partial_in(dir: &std::path::Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .expect("dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.to_string_lossy().ends_with(".relaypart"))
+}
