@@ -1063,6 +1063,12 @@ impl Inner {
             .map(|job| job.id)
             .collect();
         for id in affected {
+            // Stopping the transfer is not optional. Marking the job paused while its
+            // task keeps running against a dead connection leaves the old attempt
+            // renaming its partial onto the destination underneath a new one that was
+            // dispatched when the session came back. Both write to the same paths,
+            // because they are the same job.
+            self.abort(id, true).await;
             self.apply(id, JobEvent::Pause { reason }).await;
         }
     }

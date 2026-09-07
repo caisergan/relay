@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -239,6 +240,12 @@ pub struct MockOptions {
     pub prompt_host_key: bool,
     /// Fail the next transfer with this error.
     pub fail_transfer: Option<EngineError>,
+    /// A switch a test can throw to make the connection go away.
+    ///
+    /// Shared rather than a count, because "the network dropped" is something that
+    /// happens *to* a session at a moment of the test's choosing, and a counter would
+    /// make the test depend on how many operations the engine happens to issue.
+    pub severed: Arc<AtomicBool>,
 }
 
 impl Default for MockOptions {
@@ -250,6 +257,7 @@ impl Default for MockOptions {
             max_lanes: 4,
             prompt_host_key: false,
             fail_transfer: None,
+            severed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -288,6 +296,16 @@ impl MockBackend {
         if !self.opts.op_latency.is_zero() {
             tokio::time::sleep(self.opts.op_latency).await;
         }
+    }
+}
+
+impl MockBackend {
+    /// `Err` once a test has thrown the switch, as a real dropped connection reports.
+    fn severed(&self) -> Result<()> {
+        if self.opts.severed.load(Ordering::SeqCst) {
+            return Err(EngineError::network("the connection was severed"));
+        }
+        Ok(())
     }
 }
 
@@ -366,6 +384,7 @@ impl Protocol for MockBackend {
 
     async fn list(&mut self, path: &str) -> Result<Vec<RemoteEntry>> {
         self.latency().await;
+        self.severed()?;
         self.fs.list(path)
     }
 
@@ -465,7 +484,9 @@ impl Protocol for MockBackend {
 
     async fn noop(&mut self) -> Result<()> {
         self.latency().await;
-        Ok(())
+        // The keepalive is the liveness probe, so this is where a severed connection
+        // is noticed even when nobody is browsing.
+        self.severed()
     }
 
     async fn open_lane(&mut self) -> Result<Box<dyn TransferLane>> {

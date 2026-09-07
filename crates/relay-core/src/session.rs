@@ -62,6 +62,18 @@ pub const CLOSE_GRACE: Duration = Duration::from_secs(5);
 pub const MAX_SESSION_LANES: u8 = 4;
 /// Commands buffered before a caller has to wait for the actor.
 const CMD_BUFFER: usize = 64;
+/// How many times a lost connection is retried before it waits for a person.
+///
+/// The queue's jobs stay paused either way; this is only how long the session keeps
+/// trying on its own before saying so and leaving the decision to someone who might
+/// know whether the server is coming back.
+pub const MAX_RECONNECTS: u32 = 10;
+/// The wait before each attempt, in seconds, holding at the last one.
+///
+/// Quick at first, because most drops are a few seconds of nothing; slow later,
+/// because a server that has been gone for a minute is not usually about to return
+/// within one, and hammering it does not help.
+const BACKOFF_SECS: [u64; 5] = [1, 2, 5, 10, 30];
 /// Lane requests and completions buffered before a transfer task has to wait.
 const LANE_BUFFER: usize = 8;
 
@@ -101,6 +113,9 @@ pub enum SessionCmd {
     /// Run one job the scheduler has already decided to start. Fire and forget: the
     /// job's life is told through its `Reporter`.
     Transfer(Box<RunRequest>),
+    /// Try again now, and start the backoff over. A person pressing this knows
+    /// something the timer does not.
+    Reconnect,
     /// Stop one transfer. The actor owns its jobs' cancellation tokens, so nothing
     /// outside it has to keep a parallel map that could disagree.
     CancelJob {
@@ -252,6 +267,14 @@ impl SessionHandle {
             reply,
         })
         .await
+    }
+
+    /// Try to connect again now, whatever the backoff was going to do.
+    pub async fn reconnect(&self) -> Result<()> {
+        self.cmd
+            .send(SessionCmd::Reconnect)
+            .await
+            .map_err(|_| closed())
     }
 
     pub async fn transfer(&self, run: RunRequest) -> Result<()> {
@@ -410,6 +433,22 @@ struct SessionActor {
     running: HashMap<JobId, Running>,
 }
 
+/// Why the serving loop stopped.
+enum Outcome {
+    /// The tab was closed, or the engine asked the session to stop.
+    Closed,
+    /// The connection went away. `retryable` is false for the answers a person has to
+    /// give — a declined host key, rejected credentials — where retrying is either
+    /// impossible or just the same rejection ten more times.
+    Lost { reason: String, retryable: bool },
+}
+
+/// How a wait between attempts ended.
+enum Idle {
+    Reconnect,
+    Close,
+}
+
 /// The handles on one in-flight transfer.
 struct Running {
     cancel: CancellationToken,
@@ -439,6 +478,94 @@ impl SessionActor {
                 }),
             })
             .await;
+
+        // Attempts since the last time this session was *working*, so a connection
+        // that comes back and drops again gets the full allowance rather than the
+        // remains of the previous outage's.
+        let mut attempt = 0u32;
+        loop {
+            let outcome = match self.dial(&cfg, &secrets).await {
+                Ok(max_lanes) => {
+                    attempt = 0;
+                    self.serve(
+                        &mut cmd_rx,
+                        &mut lane_rx,
+                        &mut internal_rx,
+                        &internal_tx,
+                        max_lanes,
+                    )
+                    .await
+                }
+                Err(err) => Outcome::Lost {
+                    retryable: worth_retrying(&err),
+                    reason: err.to_string(),
+                },
+            };
+
+            let Outcome::Lost { reason, retryable } = outcome else {
+                break;
+            };
+
+            // Every transfer on this session is doomed: their lanes were channels on
+            // the connection that just went. Stopping them here rather than waiting
+            // for the queue to ask is what keeps a dying attempt from renaming its
+            // partial onto the destination underneath the attempt that replaces it.
+            // The bytes are kept — this is a pause, and the job is coming back to them.
+            self.stop_all(true);
+            // The queue pauses this session's work rather than failing it: the jobs
+            // are fine, the connection is not.
+            self.queue.session_down(self.id).await;
+            self.backend.disconnect().await;
+
+            attempt += 1;
+            let give_up = !retryable || attempt > MAX_RECONNECTS;
+            if give_up {
+                self.out.disconnected(reason, retryable).await;
+                // Not the end of the actor. A person can still press Reconnect, and
+                // the queue still holds this session's paused jobs waiting for them
+                // to. Exiting here would strand both.
+                match self.idle(None, &mut cmd_rx).await {
+                    Idle::Reconnect => attempt = 0,
+                    Idle::Close => break,
+                }
+                continue;
+            }
+
+            let wait = backoff(attempt);
+            self.out
+                .log(
+                    LogKind::Status,
+                    format!(
+                        "Connection lost: {reason}. Retrying in {}s…",
+                        wait.as_secs()
+                    ),
+                )
+                .await;
+            self.out
+                .emit(EngineEvent::SessionState {
+                    id: self.id,
+                    state: SessionState::Reconnecting {
+                        attempt,
+                        retry_in_secs: wait.as_secs() as u32,
+                    },
+                })
+                .await;
+            match self.idle(Some(wait), &mut cmd_rx).await {
+                // Pressing "Reconnect now" resets the backoff: the person knows
+                // something the timer does not.
+                Idle::Reconnect => attempt = 0,
+                Idle::Close => break,
+            }
+        }
+
+        self.out.log(LogKind::Status, "Disconnecting.").await;
+        self.backend.disconnect().await;
+        self.out.disconnected("closed", false).await;
+        self.queue.session_down(self.id).await;
+    }
+
+    /// Connect, land in a directory, and tell the queue this session can take work.
+    async fn dial(&mut self, cfg: &ServerConfig, secrets: &Arc<dyn SecretSource>) -> Result<u8> {
         self.out
             .log(
                 LogKind::Status,
@@ -448,26 +575,14 @@ impl SessionActor {
 
         let connected = tokio::select! {
             // A connect can park on a host-key sheet; closing the tab must still work.
-            _ = self.cancel.cancelled() => {
-                self.out.disconnected("closed before the connection was established", false).await;
-                self.backend.disconnect().await;
-                return;
-            }
-            result = self.backend.connect(&cfg, secrets.as_ref(), Arc::clone(&self.interact)) => result,
+            _ = self.cancel.cancelled() => Err(EngineError::Cancelled),
+            result = self.backend.connect(cfg, secrets.as_ref(), Arc::clone(&self.interact)) => result,
         };
-
         let info = match connected {
             Ok(info) => info,
             Err(err) => {
                 self.out.log(LogKind::Error, err.to_string()).await;
-                // Declining a host key is a decision, not a fault: no "connection lost".
-                let unexpected = !matches!(
-                    err,
-                    EngineError::TrustRejected { .. } | EngineError::Cancelled
-                );
-                self.out.disconnected(err.to_string(), unexpected).await;
-                self.backend.disconnect().await;
-                return;
+                return Err(err);
             }
         };
 
@@ -486,7 +601,8 @@ impl SessionActor {
             })
             .await;
 
-        // The landing directory, so a fresh tab is not empty while the user waits.
+        // The landing directory, so a fresh tab is not empty while the user waits, and
+        // a reconnected one comes back where it was rather than blank.
         let cancel = self.cancel.clone();
         if let Ok(entries) =
             with_deadline(self.backend.list(&home), "list", OP_DEADLINE, &cancel).await
@@ -494,9 +610,22 @@ impl SessionActor {
             self.out.listing(&home, entries).await;
         }
 
-        // The queue may dispatch to this session from here on, and not before.
+        // The queue may dispatch to this session from here on, and not before. It also
+        // resumes whatever the last drop paused, which is what makes a reconnect
+        // continue the queue instead of merely restoring a tab.
         self.queue.session_up(self.id, max_lanes).await;
+        Ok(max_lanes)
+    }
 
+    /// Serve commands until the connection dies or the session is closed.
+    async fn serve(
+        &mut self,
+        cmd_rx: &mut mpsc::Receiver<SessionCmd>,
+        lane_rx: &mut mpsc::Receiver<ActorRequest>,
+        internal_rx: &mut mpsc::Receiver<Internal>,
+        internal_tx: &mpsc::Sender<Internal>,
+        _max_lanes: u8,
+    ) -> Outcome {
         let mut keepalive = tokio::time::interval(KEEPALIVE);
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         keepalive.tick().await; // The first tick is immediate, and we just connected.
@@ -504,7 +633,7 @@ impl SessionActor {
         loop {
             tokio::select! {
                 biased;
-                _ = self.cancel.cancelled() => break,
+                _ = self.cancel.cancelled() => return Outcome::Closed,
                 Some(Internal::LaneFinished(job)) = internal_rx.recv() => {
                     self.running.remove(&job);
                 }
@@ -527,29 +656,62 @@ impl SessionActor {
                     }
                 },
                 cmd = cmd_rx.recv() => {
-                    let Some(cmd) = cmd else { break };
-                    if matches!(cmd, SessionCmd::Disconnect) {
-                        break;
-                    }
-                    // A broken connection ends the actor; it has already said so.
-                    if self.handle(cmd, &internal_tx).await.is_break() {
-                        return;
+                    let Some(cmd) = cmd else { return Outcome::Closed };
+                    match cmd {
+                        SessionCmd::Disconnect => return Outcome::Closed,
+                        // Already connected, so there is nothing to reconnect.
+                        SessionCmd::Reconnect => {}
+                        cmd => if let ControlFlow::Break(reason) =
+                            self.handle(cmd, internal_tx).await
+                        {
+                            return Outcome::Lost { reason, retryable: true };
+                        }
                     }
                 }
                 _ = keepalive.tick() => {
-                    if self.keepalive().await.is_break() {
-                        return;
+                    if let ControlFlow::Break(reason) = self.keepalive().await {
+                        return Outcome::Lost { reason, retryable: true };
                     }
                 }
             }
         }
+    }
 
-        self.out.log(LogKind::Status, "Disconnecting.").await;
-        self.backend.disconnect().await;
-        self.out.disconnected("closed", false).await;
-        // Whatever the queue had running here stops being runnable. It pauses rather
-        // than fails: the jobs are fine, the connection is not.
-        self.queue.session_down(self.id).await;
+    /// Wait out a backoff, or wait indefinitely for a person.
+    ///
+    /// Commands keep being answered while this waits — with an error, because there is
+    /// no connection behind them. A caller left holding a reply channel that never
+    /// answers is worse than one told plainly that the session is down.
+    async fn idle(
+        &mut self,
+        wait: Option<Duration>,
+        cmd_rx: &mut mpsc::Receiver<SessionCmd>,
+    ) -> Idle {
+        let deadline = wait.map(|wait| tokio::time::Instant::now() + wait);
+        loop {
+            let tick = async {
+                match deadline {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => return Idle::Close,
+                _ = tick => return Idle::Reconnect,
+                cmd = cmd_rx.recv() => match cmd {
+                    None | Some(SessionCmd::Disconnect) => return Idle::Close,
+                    Some(SessionCmd::Reconnect) => return Idle::Reconnect,
+                    // Stopping a transfer needs no connection, and a person cancelling
+                    // a job while the banner counts down must not be told to wait for
+                    // a server that may never come back.
+                    Some(SessionCmd::CancelJob { job, keep_partial, reply }) => {
+                        let _ = reply.send(self.cancel_job(job, keep_partial).await);
+                    }
+                    Some(cmd) => refuse(cmd),
+                },
+            }
+        }
     }
 
     /// Run one command. `Break` means the connection is gone and the actor is done.
@@ -557,7 +719,7 @@ impl SessionActor {
         &mut self,
         cmd: SessionCmd,
         internal_tx: &mpsc::Sender<Internal>,
-    ) -> ControlFlow<()> {
+    ) -> ControlFlow<String> {
         let cancel = self.cancel.clone();
         match cmd {
             SessionCmd::List { path, reply } => {
@@ -650,8 +812,19 @@ impl SessionActor {
                 let _ = reply.send(self.cancel_job(job, keep_partial).await);
                 ControlFlow::Continue(())
             }
-            // The run loop takes this one before it reaches here.
-            SessionCmd::Disconnect => ControlFlow::Break(()),
+            // The serving loop takes these before they reach here.
+            SessionCmd::Disconnect | SessionCmd::Reconnect => ControlFlow::Continue(()),
+        }
+    }
+
+    /// Stop every transfer this session is running.
+    ///
+    /// Synchronous on purpose: it is called on the way out of a lost connection, and
+    /// awaiting anything there would let a transfer get further before it is told.
+    fn stop_all(&mut self, keep_partial: bool) {
+        for running in self.running.values() {
+            running.keep_partial.store(keep_partial, Ordering::SeqCst);
+            running.cancel.cancel();
         }
     }
 
@@ -673,19 +846,21 @@ impl SessionActor {
 
     /// A network failure means the connection is gone. Anything else is one operation
     /// failing on a session that still works — a missing path is not a dead session.
-    async fn check_fatal<T>(&mut self, out: &Result<T>) -> ControlFlow<()> {
+    ///
+    /// `Break` carries the reason rather than announcing it: the reconnect loop above
+    /// decides whether this becomes a banner counting down or a disconnection, and it
+    /// needs the words either way.
+    async fn check_fatal<T>(&mut self, out: &Result<T>) -> ControlFlow<String> {
         match out {
             Err(err @ EngineError::Network { .. }) => {
                 self.out.log(LogKind::Error, err.to_string()).await;
-                self.backend.disconnect().await;
-                self.out.disconnected(err.to_string(), true).await;
-                ControlFlow::Break(())
+                ControlFlow::Break(err.to_string())
             }
             _ => ControlFlow::Continue(()),
         }
     }
 
-    async fn keepalive(&mut self) -> ControlFlow<()> {
+    async fn keepalive(&mut self) -> ControlFlow<String> {
         let started = Instant::now();
         let cancel = self.cancel.clone();
         match with_deadline(
@@ -709,9 +884,7 @@ impl SessionActor {
                 self.out
                     .log(LogKind::Error, format!("Keepalive failed: {err}"))
                     .await;
-                self.backend.disconnect().await;
-                self.out.disconnected(err.to_string(), true).await;
-                ControlFlow::Break(())
+                ControlFlow::Break(err.to_string())
             }
         }
     }
@@ -1217,5 +1390,59 @@ fn numbered(name: &str, n: u32) -> String {
         // A leading dot is the whole name of a dotfile, not an extension.
         Some((stem, ext)) if !stem.is_empty() => format!("{stem} ({n}).{ext}"),
         _ => format!("{name} ({n})"),
+    }
+}
+
+/// How long to wait before attempt `n`, counting from one.
+fn backoff(attempt: u32) -> Duration {
+    let index = (attempt.max(1) as usize - 1).min(BACKOFF_SECS.len() - 1);
+    Duration::from_secs(BACKOFF_SECS[index])
+}
+
+/// Whether a failed connection is worth trying again without asking anyone.
+///
+/// The excluded ones are all answers rather than accidents: a declined host key, a
+/// rejected password, a protocol this build does not speak. Retrying them produces
+/// the same answer ten more times, and ten more prompts along the way.
+fn worth_retrying(err: &EngineError) -> bool {
+    !matches!(
+        err,
+        EngineError::Auth { .. }
+            | EngineError::TrustRejected { .. }
+            | EngineError::Cancelled
+            | EngineError::Unsupported { .. }
+            | EngineError::PermissionDenied { .. }
+    )
+}
+
+/// Answer a command that arrived while there is no connection behind it.
+///
+/// Every variant is answered rather than dropped: a caller holding a reply channel
+/// that never answers waits for ever, which is worse than being told the session is
+/// down.
+fn refuse(cmd: SessionCmd) {
+    fn no_connection<T>() -> Result<T> {
+        Err(EngineError::network("the session is not connected"))
+    }
+    match cmd {
+        SessionCmd::List { reply, .. } => {
+            let _ = reply.send(no_connection());
+        }
+        SessionCmd::Stat { reply, .. } => {
+            let _ = reply.send(no_connection());
+        }
+        SessionCmd::Mkdir { reply, .. }
+        | SessionCmd::Rename { reply, .. }
+        | SessionCmd::RemoveFile { reply, .. }
+        | SessionCmd::RemoveDir { reply, .. }
+        | SessionCmd::CancelJob { reply, .. } => {
+            let _ = reply.send(no_connection());
+        }
+        SessionCmd::ReadFile { reply, .. } => {
+            let _ = reply.send(no_connection());
+        }
+        // The queue is told the session is down and pauses the job itself, so a
+        // dispatch that lands in the gap needs no answer of its own.
+        SessionCmd::Transfer(_) | SessionCmd::Disconnect | SessionCmd::Reconnect => {}
     }
 }

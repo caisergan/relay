@@ -49,6 +49,7 @@ pub fn run() {
             commands::secrets_set,
             commands::secrets_clear,
             commands::session_close,
+            commands::session_reconnect,
             commands::session_list_dir,
             commands::session_mkdir,
             commands::session_rename,

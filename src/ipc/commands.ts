@@ -48,6 +48,7 @@ export const commands = {
     invoke<Unit>('secrets_set', { id, kind, value }),
   secretsClear: (id: string, kind: SecretKind) => invoke<Unit>('secrets_clear', { id, kind }),
   sessionClose: (id: string) => invoke<Unit>('session_close', { id }),
+  sessionReconnect: (id: string) => invoke<Unit>('session_reconnect', { id }),
   sessionListDir: (id: string, path: string) =>
     invoke<RemoteEntry[]>('session_list_dir', { id, path }),
   sessionMkdir: (id: string, path: string) => invoke<Unit>('session_mkdir', { id, path }),

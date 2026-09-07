@@ -318,6 +318,13 @@ impl Engine {
         }
     }
 
+    /// Reconnect a session that has given up, or is counting down to its next
+    /// attempt. Resets the backoff — a person pressing this knows something the timer
+    /// does not.
+    pub async fn reconnect(&self, id: SessionId) -> Result<()> {
+        self.session(id)?.reconnect().await
+    }
+
     pub async fn read_file(&self, id: SessionId, path: &str) -> Result<Vec<u8>> {
         self.session(id)?.read_file(path, READ_FILE_MAX).await
     }

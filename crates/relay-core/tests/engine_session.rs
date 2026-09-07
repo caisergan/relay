@@ -15,7 +15,7 @@ use relay_core::hub::EngineHub;
 use relay_core::interact::{ConflictAction, PromptReply};
 use relay_core::job::{JobState, QueueOp};
 use relay_core::mock::{MockFactory, MockFs, MockOptions, NoSecrets};
-use relay_core::model::{AuthMethod, Direction, Proto, ServerConfig, SessionId};
+use relay_core::model::{AuthMethod, Direction, Proto, ServerConfig, SessionId, SessionState};
 use relay_core::servers::ServerStore;
 use relay_core::store::QueueStore;
 use relay_core::{EngineSnapshot, Subscription};
@@ -974,4 +974,111 @@ fn partial_in(dir: &std::path::Path) -> Option<PathBuf> {
         .flatten()
         .map(|entry| entry.path())
         .find(|path| path.to_string_lossy().ends_with(".relaypart"))
+}
+
+/// The design's amber banner, and what has to be true behind it: a dropped connection
+/// pauses the queue rather than failing it, the session counts down and tries again,
+/// and the work continues when it comes back.
+#[tokio::test]
+async fn a_dropped_connection_reconnects_and_the_queue_carries_on() {
+    let severed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let h = harness(MockOptions {
+        chunk: 32 * 1024,
+        chunk_delay: Duration::from_millis(20),
+        severed: std::sync::Arc::clone(&severed),
+        ..MockOptions::default()
+    })
+    .await;
+    let sub = h.hub.subscribe();
+    let cfg = server();
+    let server_id = cfg.id;
+    let session = h.engine.open_session(cfg).expect("session opens");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let local = dir.path().join("access.log");
+    let job = enqueue_one(
+        &h.engine,
+        session,
+        server_id,
+        Direction::Down,
+        "/var/log/nginx/access.log",
+        local.clone(),
+    )
+    .await;
+    poll_job(&h, job, |state| matches!(state, JobState::Transferring)).await;
+
+    // Pull the cable.
+    severed.store(true, std::sync::atomic::Ordering::SeqCst);
+    h.engine
+        .list_dir(session, "/home/deploy")
+        .await
+        .expect_err("a browse on a severed connection fails");
+
+    // The banner: reconnecting, with an attempt number to show.
+    until("the session to report it is reconnecting", || {
+        snapshot(&h.hub, &sub)
+            .sessions
+            .into_iter()
+            .find(|s| s.id == session && matches!(s.state, SessionState::Reconnecting { .. }))
+    })
+    .await;
+
+    // The queue paused rather than failed. The transfer is fine; the connection is not.
+    let paused = poll_job(&h, job, |state| {
+        matches!(state, JobState::Paused { .. } | JobState::Queued)
+    })
+    .await;
+    assert!(
+        !paused.is_terminal(),
+        "a dropped connection must not fail a transfer: {paused:?}"
+    );
+
+    // Plug it back in, and press Reconnect rather than waiting out the backoff.
+    severed.store(false, std::sync::atomic::Ordering::SeqCst);
+    h.engine.reconnect(session).await.expect("reconnect");
+
+    let state = poll_job(&h, job, |state| state.is_terminal()).await;
+    assert!(
+        matches!(state, JobState::Done { skipped: false, .. }),
+        "the queue carried on once the connection came back: {state:?}"
+    );
+    assert_eq!(
+        std::fs::read(&local).expect("the finished download"),
+        h.fs.read_file("/var/log/nginx/access.log").expect("source"),
+    );
+}
+
+/// A rejected host key is an answer, not an accident. Retrying it ten times would
+/// produce the same answer ten times and ten more sheets along the way.
+#[tokio::test]
+async fn a_declined_host_key_does_not_start_a_reconnect_countdown() {
+    let h = harness(MockOptions {
+        prompt_host_key: true,
+        ..MockOptions::default()
+    })
+    .await;
+    let sub = h.hub.subscribe();
+    let session = h.engine.open_session(server()).expect("session opens");
+
+    let prompt = until("the host key sheet", || {
+        snapshot(&h.hub, &sub).prompts.into_iter().next()
+    })
+    .await;
+    h.hub
+        .prompts()
+        .resolve(prompt.id, PromptReply::Deny)
+        .expect("deny");
+
+    let state = until("the session to settle", || {
+        snapshot(&h.hub, &sub)
+            .sessions
+            .into_iter()
+            .find(|s| s.id == session && !matches!(s.state, SessionState::Connecting))
+            .map(|s| s.state)
+    })
+    .await;
+    assert!(
+        matches!(state, SessionState::Disconnected { .. }),
+        "a decision is final until someone changes it: {state:?}"
+    );
 }

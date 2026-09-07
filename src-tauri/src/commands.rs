@@ -121,6 +121,11 @@ pub async fn secrets_clear(id: ServerId, kind: SecretKind) -> Result<()> {
 }
 
 #[tauri::command]
+pub async fn session_reconnect(state: State<'_, AppState>, id: SessionId) -> Result<()> {
+    state.engine.reconnect(id).await
+}
+
+#[tauri::command]
 pub async fn session_close(state: State<'_, AppState>, id: SessionId) -> Result<()> {
     state.engine.close_session(id).await;
     Ok(())
