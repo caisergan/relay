@@ -11,28 +11,28 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::error::{EngineError, Result};
 use crate::hub::EngineHub;
-use crate::job::QueueOp;
+use crate::job::{JobKind, QueueOp};
 use crate::model::{
     Direction, JobId, Proto, RemoteEntry, ServerConfig, ServerId, ServerInfo, SessionId,
 };
 use crate::protocol::{Protocol, SecretSource};
+use crate::queue::{BatchId, JobSpec};
+use crate::scheduler::{Dispatcher, RunRequest, Scheduler, SchedulerContext};
 use crate::secrets::{Credentials, KeyringSecrets, Overlay};
 use crate::servers::ServerStore;
-use crate::session::{SessionContext, SessionHandle, TransferOrder};
+use crate::session::{SessionContext, SessionHandle};
 use crate::settings::Settings;
 use crate::sftp::SftpBackend;
+use crate::store::QueueStore;
 use crate::trust::TrustStore;
-use crate::wire::{Bytes, Order};
 
-/// Space left between queue positions so phase 2 can reorder without renumbering.
-const ORDER_STRIDE: i64 = 1024;
 /// Cap on a `read_file`, for Quick Look and the built-in editor.
 pub const READ_FILE_MAX: u64 = 512 * 1024;
 
@@ -67,9 +67,74 @@ impl BackendFactory for SftpFactory {
 }
 
 /// Where the engine keeps its files.
+/// One thing a person asked to move. Part of the IPC surface: the interface builds
+/// these from a drag or a click and sends the whole gesture at once.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferItem {
+    pub session: SessionId,
+    pub server_id: ServerId,
+    pub direction: Direction,
+    pub remote_path: String,
+    pub local_path: PathBuf,
+    /// A directory, which becomes a folder job the walker fills in.
+    pub is_dir: bool,
+}
+
 pub struct EnginePaths {
     pub servers: PathBuf,
     pub trust: PathBuf,
+    pub queue: PathBuf,
+}
+
+/// The sessions, shared by the engine that opens them and the scheduler that
+/// dispatches to them.
+///
+/// A shared map rather than the scheduler holding the engine: the scheduler is built
+/// first, because a session has to be able to report itself ready the moment it
+/// connects. Handing it this instead of an `Engine` keeps that ordering possible and
+/// stops the two from owning each other.
+#[derive(Clone, Default)]
+pub struct SessionRegistry(Arc<Mutex<HashMap<SessionId, Arc<SessionHandle>>>>);
+
+impl SessionRegistry {
+    fn get(&self, id: SessionId) -> Option<Arc<SessionHandle>> {
+        self.0.lock().expect("sessions poisoned").get(&id).cloned()
+    }
+
+    fn insert(&self, id: SessionId, handle: Arc<SessionHandle>) {
+        self.0.lock().expect("sessions poisoned").insert(id, handle);
+    }
+
+    fn remove(&self, id: SessionId) -> Option<Arc<SessionHandle>> {
+        self.0.lock().expect("sessions poisoned").remove(&id)
+    }
+
+    fn ids(&self) -> Vec<SessionId> {
+        self.0
+            .lock()
+            .expect("sessions poisoned")
+            .keys()
+            .copied()
+            .collect()
+    }
+}
+
+#[async_trait]
+impl Dispatcher for SessionRegistry {
+    async fn dispatch(&self, run: RunRequest) -> Result<()> {
+        let session = run.session;
+        self.get(session)
+            .ok_or_else(|| EngineError::protocol(format!("no such session {session}")))?
+            .transfer(run)
+            .await
+    }
+
+    async fn abort(&self, session: SessionId, job: JobId) {
+        if let Some(handle) = self.get(session) {
+            let _ = handle.cancel_job(job).await;
+        }
+    }
 }
 
 pub struct Engine {
@@ -78,17 +143,19 @@ pub struct Engine {
     factory: Arc<dyn BackendFactory>,
     secrets: Arc<dyn SecretSource>,
     servers: Arc<ServerStore>,
-    sessions: Mutex<HashMap<SessionId, Arc<SessionHandle>>>,
-    /// Which session a job belongs to, so `Cancel` reaches the actor that owns it.
-    jobs: Mutex<HashMap<JobId, SessionId>>,
+    sessions: SessionRegistry,
+    queue: Scheduler,
     settings: Mutex<Settings>,
-    next_order: AtomicI64,
 }
 
 impl Engine {
     /// The real engine: SFTP backends, the OS keychain, files under the app data
     /// directory.
-    pub fn new(hub: Arc<EngineHub>, rt: tokio::runtime::Handle, paths: EnginePaths) -> Self {
+    pub async fn new(
+        hub: Arc<EngineHub>,
+        rt: tokio::runtime::Handle,
+        paths: EnginePaths,
+    ) -> Result<Self> {
         let trust = Arc::new(TrustStore::load(paths.trust));
         Self::with_parts(
             hub,
@@ -96,27 +163,46 @@ impl Engine {
             Arc::new(SftpFactory::new(trust)),
             Arc::new(KeyringSecrets::new()),
             Arc::new(ServerStore::load(paths.servers)),
+            QueueStore::open(paths.queue).await?,
         )
+        .await
     }
 
-    pub fn with_parts(
+    pub async fn with_parts(
         hub: Arc<EngineHub>,
         rt: tokio::runtime::Handle,
         factory: Arc<dyn BackendFactory>,
         secrets: Arc<dyn SecretSource>,
         servers: Arc<ServerStore>,
-    ) -> Self {
-        Self {
+        store: QueueStore,
+    ) -> Result<Self> {
+        let settings = Settings::default();
+        let sessions = SessionRegistry::default();
+        // The scheduler starts before any session, because a session announces itself
+        // ready as soon as it connects and has to have somewhere to announce it to.
+        let queue = Scheduler::spawn(SchedulerContext {
+            store,
+            events: hub.events(),
+            dispatcher: Arc::new(sessions.clone()) as Arc<dyn Dispatcher>,
+            rt: rt.clone(),
+            concurrency: settings.concurrency,
+        })
+        .await?;
+        Ok(Self {
             hub,
             rt,
             factory,
             secrets,
             servers,
-            sessions: Mutex::new(HashMap::new()),
-            jobs: Mutex::new(HashMap::new()),
-            settings: Mutex::new(Settings::default()),
-            next_order: AtomicI64::new(ORDER_STRIDE),
-        }
+            sessions,
+            queue,
+            settings: Mutex::new(settings),
+        })
+    }
+
+    /// The queue, for the snapshot the shell serves to a remounting UI.
+    pub fn queue(&self) -> &Scheduler {
+        &self.queue
     }
 
     pub fn servers(&self) -> &Arc<ServerStore> {
@@ -127,9 +213,11 @@ impl Engine {
         self.settings.lock().expect("settings poisoned").clone()
     }
 
-    pub fn set_settings(&self, settings: Settings) -> Settings {
+    pub async fn set_settings(&self, settings: Settings) -> Settings {
         let normalised = settings.normalised();
         *self.settings.lock().expect("settings poisoned") = normalised.clone();
+        // The slider is only a setting if it reaches work already running.
+        self.queue.set_concurrency(normalised.concurrency).await;
         normalised
     }
 
@@ -149,12 +237,10 @@ impl Engine {
                 interact: Arc::clone(self.hub.prompts()) as Arc<_>,
                 secrets: Arc::clone(&self.secrets),
                 rt: self.rt.clone(),
+                queue: self.queue.clone(),
             },
         );
-        self.sessions
-            .lock()
-            .expect("sessions poisoned")
-            .insert(id, Arc::new(handle));
+        self.sessions.insert(id, Arc::new(handle));
         Ok(id)
     }
 
@@ -165,15 +251,15 @@ impl Engine {
     /// unanswered sheet; only then is the join awaited. Denying prompts after the wait
     /// would mean waiting for a task that cannot finish.
     pub async fn close_session(&self, id: SessionId) {
-        let handle = self.sessions.lock().expect("sessions poisoned").remove(&id);
-        let Some(handle) = handle else { return };
+        let Some(handle) = self.sessions.remove(id) else {
+            return;
+        };
 
         self.hub.prompts().deny_session(id);
         handle.close().await;
-        self.jobs
-            .lock()
-            .expect("jobs poisoned")
-            .retain(|_, session| *session != id);
+        // The queue keeps this session's jobs, paused. Closing a tab is not a decision
+        // to abandon its transfers, and reopening the server picks them back up.
+        self.queue.session_closed(id).await;
         let _ = self
             .hub
             .events()
@@ -238,100 +324,75 @@ impl Engine {
 
     // ------------------------------------------------------------ transfers
 
-    /// Queue one transfer. Returns as soon as the order is accepted; everything after
-    /// that is events.
-    pub async fn enqueue(
-        &self,
-        id: SessionId,
-        server_id: ServerId,
-        direction: Direction,
-        remote_path: String,
-        local_path: PathBuf,
-    ) -> Result<JobId> {
-        let session = self.session(id)?;
-        let job = Uuid::new_v4();
-
-        // Best effort: a size makes the progress bar determinate, and its absence is a
-        // legitimate state the UI already draws. Not worth failing the transfer over.
-        let size = match direction {
-            Direction::Down => session
-                .stat(&remote_path)
-                .await
-                .ok()
-                .flatten()
-                .map(|e| e.size),
-            Direction::Up => tokio::fs::metadata(&local_path)
-                .await
-                .ok()
-                .map(|m| Bytes(m.len())),
-        };
-
-        let order = TransferOrder {
-            job,
-            server_id,
-            direction,
-            remote_path,
-            local_path,
-            size,
-            order: Order(self.next_order.fetch_add(ORDER_STRIDE, Ordering::SeqCst)),
-            // Read now, not when the transfer starts: a person changing the default
-            // mid-transfer should not retroactively change a decision already made.
-            conflict: self.settings().default_conflict,
-        };
-        session.transfer(order).await?;
-        self.jobs.lock().expect("jobs poisoned").insert(job, id);
-        Ok(job)
+    /// Queue one gesture's worth of transfers.
+    ///
+    /// `batch` identifies the gesture, not the engine's own bookkeeping: it comes from
+    /// the caller so that a command re-sent after an uncertain delivery is recognised
+    /// as the same request and returns the jobs it already made. A user who clicks
+    /// Download once must not watch the folder arrive twice.
+    ///
+    /// The conflict default is read now rather than when a transfer starts. Someone
+    /// changing the setting mid-queue should not retroactively change a decision that
+    /// was already made on their behalf.
+    pub async fn enqueue(&self, batch: BatchId, items: Vec<TransferItem>) -> Result<Vec<JobId>> {
+        // Checked before anything is queued. A job aimed at a session that does not
+        // exist could never run, and leaving it in the queue would show the user a row
+        // that is waiting for nothing.
+        for item in &items {
+            self.session(item.session)?;
+            // Until §2.5's walker exists, a folder job would be created, enter
+            // `Scanning`, and stay there: nothing would ever report what is in it.
+            // Refusing is the honest answer, and it lives here rather than in the
+            // interface so no caller can route around it.
+            if item.is_dir {
+                return Err(EngineError::Unsupported {
+                    operation: "recursive folder transfers".into(),
+                });
+            }
+        }
+        let specs = items
+            .into_iter()
+            .map(|item| JobSpec {
+                session: item.session,
+                server_id: item.server_id,
+                kind: if item.is_dir {
+                    JobKind::Folder
+                } else {
+                    JobKind::File
+                },
+                direction: item.direction,
+                // Stable within the batch, and the natural name for the thing being
+                // moved: asking for the same file in the same gesture is one job.
+                item: format!("{:?}:{}", item.direction, item.remote_path),
+                remote_path: item.remote_path,
+                local_path: item.local_path,
+                size: None,
+                parent: None,
+            })
+            .collect();
+        self.queue.enqueue(batch, specs).await
     }
 
-    /// Queue commands. Phase 1 owns cancellation honestly and says the rest is phase 2
-    /// rather than accepting a command it cannot carry out.
+    /// Pause, resume, retry, cancel, reorder, clear. Every one of them is the
+    /// scheduler's to answer now; the engine only carries the message.
     pub async fn queue_control(&self, op: QueueOp) -> Result<()> {
-        match op {
-            QueueOp::Cancel { job } => {
-                let session = self
-                    .jobs
-                    .lock()
-                    .expect("jobs poisoned")
-                    .get(&job)
-                    .copied()
-                    .ok_or_else(|| EngineError::NotFound {
-                        path: job.to_string(),
-                    })?;
-                self.session(session)?.cancel_job(job).await
-            }
-            QueueOp::Retry { .. }
-            | QueueOp::Pause { .. }
-            | QueueOp::Resume { .. }
-            | QueueOp::PauseAll
-            | QueueOp::ResumeAll
-            | QueueOp::Reorder { .. }
-            | QueueOp::ClearCompleted => Err(EngineError::Unsupported {
-                operation: "queue scheduling arrives with the phase 2 queue".into(),
-            }),
-        }
+        self.queue.control(op).await
     }
 
     /// Stop every session, then the pump. Called on app exit.
     pub async fn shutdown(&self) {
-        let ids: Vec<SessionId> = self
-            .sessions
-            .lock()
-            .expect("sessions poisoned")
-            .keys()
-            .copied()
-            .collect();
-        for id in ids {
+        for id in self.sessions.ids() {
             self.close_session(id).await;
         }
+        // After the sessions, so anything they reported on the way out is applied and
+        // any unflushed progress reaches the disk.
+        self.queue.shutdown().await;
         self.hub.shutdown().await;
     }
 
     fn session(&self, id: SessionId) -> Result<Arc<SessionHandle>> {
         self.sessions
-            .lock()
-            .expect("sessions poisoned")
-            .get(&id)
-            .cloned()
+            .get(id)
             .ok_or_else(|| EngineError::protocol(format!("no such session {id}")))
     }
 }

@@ -51,6 +51,7 @@ pub use hub::EngineHub;
 pub use interact::{Interact, Prompt, PromptBroker, PromptReply};
 pub use model::{ServerConfig, SessionId};
 pub use protocol::{Protocol, TransferLane, TransferReq};
-pub use session::{SessionHandle, TransferOrder};
+pub use scheduler::{Dispatcher, RunRequest, Scheduler};
+pub use session::SessionHandle;
 pub use trust::{TrustDecision, TrustStore};
 pub use wire::{Bytes, Order, Seq};

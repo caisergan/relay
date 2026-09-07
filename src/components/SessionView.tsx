@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { commands } from '@/ipc/commands'
-import type { LocalEntry, LogLine, RemoteEntry, ServerConfig } from '@/ipc/gen'
+import type { LocalEntry, LogLine, RemoteEntry, ServerConfig, TransferItem } from '@/ipc/gen'
 import { faultText, toFault } from '@/lib/errors'
 import { crumbs, joinPath, parentPath } from '@/lib/format'
 import { canGoBack, canGoForward, peek, push, type History } from '@/lib/history'
@@ -197,31 +197,43 @@ export function SessionView({ sessionId }: Props) {
     navigateRemote(target, false)
   }
 
-  const enqueue = (direction: 'up' | 'down', name: string, isDir: boolean) => {
-    if (isDir) {
-      toast('info', 'Folder transfers arrive with the phase 2 queue.')
-      return
+  /// One gesture is one batch, so "apply to remaining" on a conflict covers the files
+  /// that were dragged together and nothing else. Dropping ten files used to send ten
+  /// separate requests, which left the queue with no way to tell them apart.
+  const enqueue = (direction: 'up' | 'down', names: { name: string; isDir: boolean }[]) => {
+    const folders = names.filter((entry) => entry.isDir)
+    if (folders.length > 0) {
+      toast('info', 'Folder transfers arrive with the recursive walker.')
     }
-    void commands
-      .queueEnqueue(
-        sessionId,
-        session.serverId,
+    const items: TransferItem[] = names
+      .filter((entry) => !entry.isDir)
+      .map((entry) => ({
+        session: sessionId,
+        serverId: session.serverId,
         direction,
-        joinPath(remotePath, name),
-        joinPath(pane.localPath, name),
-      )
+        remotePath: joinPath(remotePath, entry.name),
+        localPath: joinPath(pane.localPath, entry.name),
+        isDir: false,
+      }))
+    if (items.length === 0) return
+    void commands
+      .queueEnqueue(crypto.randomUUID(), items)
       .catch((error: unknown) => toast('error', faultText(error)))
   }
 
   const transfer = (direction: 'up' | 'down') => (row: FileRow) =>
-    enqueue(direction, row.name, row.isDir)
+    enqueue(direction, [{ name: row.name, isDir: row.isDir }])
 
   /// A drag names files, not rows: the source pane's row objects are not in scope by
   /// the time the drop lands, so the destination looks them up in its own listing.
   const dropped = (direction: 'up' | 'down', from: FileRow[]) => (names: string[]) => {
-    for (const name of names) {
-      enqueue(direction, name, from.find((row) => row.name === name)?.isDir ?? false)
-    }
+    enqueue(
+      direction,
+      names.map((name) => ({
+        name,
+        isDir: from.find((row) => row.name === name)?.isDir ?? false,
+      })),
+    )
   }
 
   /// Refresh after a change, because SFTP has no directory notifications: what the

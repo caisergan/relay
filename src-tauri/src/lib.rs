@@ -26,7 +26,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            app.manage(AppState::start(app.handle()));
+            // The queue database is opened here, so a failure to open it stops the app
+            // with a real error rather than starting an app whose queue silently does
+            // nothing.
+            let state = tauri::async_runtime::block_on(AppState::start(app.handle()))?;
+            app.manage(state);
 
             // The window is created hidden so the first paint is themed rather than a
             // white flash; the frontend reveals it once tokens are applied.

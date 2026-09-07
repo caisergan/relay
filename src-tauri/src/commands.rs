@@ -8,17 +8,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use relay_core::coordinator::{EngineEnvelope, EngineSnapshot, SnapshotError, SubscriptionId};
+use relay_core::engine::TransferItem;
 use relay_core::error::EngineError;
 use relay_core::events::LogLine;
 use relay_core::interact::{PromptReply, ResolveError};
 use relay_core::job::QueueOp;
 use relay_core::model::{
-    Direction, JobId, LocalEntry, RemoteEntry, ServerConfig, ServerId, ServerInfo, SessionId,
+    JobId, LocalEntry, RemoteEntry, ServerConfig, ServerId, ServerInfo, SessionId,
 };
 use relay_core::secrets::{Credentials, KeyringSecrets, SecretKind, SecretStatus};
 use relay_core::settings::Settings;
 use tauri::State;
 use tauri::ipc::Channel;
+use uuid::Uuid;
 
 use crate::state::AppState;
 
@@ -189,19 +191,18 @@ pub fn local_roots() -> Vec<PathBuf> {
 
 // ---------------------------------------------------------------- queue
 
+/// Queue one gesture's worth of transfers.
+///
+/// `batch` comes from the interface rather than being minted here, and that is the
+/// point: a command re-sent after an uncertain delivery carries the same id, so the
+/// engine recognises it as the same request instead of queueing every file twice.
 #[tauri::command]
 pub async fn queue_enqueue(
     state: State<'_, AppState>,
-    session: SessionId,
-    server_id: ServerId,
-    direction: Direction,
-    remote_path: String,
-    local_path: PathBuf,
-) -> Result<JobId> {
-    state
-        .engine
-        .enqueue(session, server_id, direction, remote_path, local_path)
-        .await
+    batch: Uuid,
+    items: Vec<TransferItem>,
+) -> Result<Vec<JobId>> {
+    state.engine.enqueue(batch, items).await
 }
 
 #[tauri::command]
@@ -229,7 +230,7 @@ pub async fn settings_get(state: State<'_, AppState>) -> Result<Settings> {
 
 #[tauri::command]
 pub async fn settings_set(state: State<'_, AppState>, settings: Settings) -> Result<Settings> {
-    Ok(state.engine.set_settings(settings))
+    Ok(state.engine.set_settings(settings).await)
 }
 
 // ---------------------------------------------------------------- engine stream

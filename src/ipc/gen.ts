@@ -386,3 +386,18 @@ export type SnapshotError =
 export type Theme = "light" | "dark" | 
 /**  Follow the operating system. */
 "system";
+
+/**
+ *  Where the engine keeps its files.
+ *  One thing a person asked to move. Part of the IPC surface: the interface builds
+ *  these from a drag or a click and sends the whole gesture at once.
+ */
+export type TransferItem = {
+	session: string,
+	serverId: string,
+	direction: Direction,
+	remotePath: string,
+	localPath: string,
+	/**  A directory, which becomes a folder job the walker fills in. */
+	isDir: boolean,
+};

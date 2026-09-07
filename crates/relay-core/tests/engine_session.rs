@@ -9,8 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use relay_core::engine::{BackendFactory, Engine};
-use relay_core::error::EngineError;
+use relay_core::engine::{BackendFactory, Engine, TransferItem};
 use relay_core::events::EngineEvent;
 use relay_core::hub::EngineHub;
 use relay_core::interact::{ConflictAction, PromptReply};
@@ -18,7 +17,9 @@ use relay_core::job::{JobState, QueueOp};
 use relay_core::mock::{MockFactory, MockFs, MockOptions, NoSecrets};
 use relay_core::model::{AuthMethod, Direction, Proto, ServerConfig, SessionId};
 use relay_core::servers::ServerStore;
+use relay_core::store::QueueStore;
 use relay_core::{EngineSnapshot, Subscription};
+use uuid::Uuid;
 
 fn server() -> ServerConfig {
     ServerConfig {
@@ -44,18 +45,48 @@ struct Harness {
     fs: MockFs,
 }
 
-fn harness(opts: MockOptions) -> Harness {
+async fn harness(opts: MockOptions) -> Harness {
     let hub = EngineHub::start(&tokio::runtime::Handle::current());
     let fs = MockFs::seeded();
     let factory: Arc<dyn BackendFactory> = Arc::new(MockFactory::new(fs.clone(), opts));
-    let engine = Arc::new(Engine::with_parts(
-        Arc::clone(&hub),
-        tokio::runtime::Handle::current(),
-        factory,
-        Arc::new(NoSecrets),
-        Arc::new(ServerStore::ephemeral()),
-    ));
+    let engine = Arc::new(
+        Engine::with_parts(
+            Arc::clone(&hub),
+            tokio::runtime::Handle::current(),
+            factory,
+            Arc::new(NoSecrets),
+            Arc::new(ServerStore::ephemeral()),
+            QueueStore::in_memory().await.expect("an in-memory queue"),
+        )
+        .await
+        .expect("the engine starts"),
+    );
     Harness { engine, hub, fs }
+}
+
+/// Queue one file, the way the shell does.
+async fn enqueue_one(
+    engine: &Engine,
+    session: relay_core::model::SessionId,
+    server_id: Uuid,
+    direction: Direction,
+    remote_path: &str,
+    local_path: std::path::PathBuf,
+) -> Uuid {
+    engine
+        .enqueue(
+            Uuid::new_v4(),
+            vec![TransferItem {
+                session,
+                server_id,
+                direction,
+                remote_path: remote_path.into(),
+                local_path,
+                is_dir: false,
+            }],
+        )
+        .await
+        .expect("accepted")[0]
 }
 
 /// Poll until a condition holds, rather than sleeping and hoping.
@@ -85,7 +116,8 @@ async fn a_session_connects_lists_and_transfers_through_the_real_command_surface
     let h = harness(MockOptions {
         prompt_host_key: true,
         ..MockOptions::default()
-    });
+    })
+    .await;
     let sub = h.hub.subscribe();
     let cfg = server();
     let server_id = cfg.id;
@@ -123,17 +155,15 @@ async fn a_session_connects_lists_and_transfers_through_the_real_command_surface
 
     let dir = tempfile::tempdir().expect("tempdir");
     let local = dir.path().join("notes.md");
-    let job = h
-        .engine
-        .enqueue(
-            session,
-            server_id,
-            Direction::Down,
-            "/home/deploy/notes.md".into(),
-            local.clone(),
-        )
-        .await
-        .expect("the transfer is accepted");
+    let job = enqueue_one(
+        &h.engine,
+        session,
+        server_id,
+        Direction::Down,
+        "/home/deploy/notes.md",
+        local.clone(),
+    )
+    .await;
 
     let state = until("the job to finish", || {
         snapshot(&h.hub, &sub)
@@ -171,7 +201,8 @@ async fn declining_the_host_key_is_a_decision_not_a_fault() {
     let h = harness(MockOptions {
         prompt_host_key: true,
         ..MockOptions::default()
-    });
+    })
+    .await;
     let sub = h.hub.subscribe();
     let session = h.engine.open_session(server()).expect("session opens");
 
@@ -209,7 +240,8 @@ async fn a_transfer_can_be_cancelled_and_leaves_the_destination_alone() {
         chunk: 4 * 1024,
         chunk_delay: Duration::from_millis(20),
         ..MockOptions::default()
-    });
+    })
+    .await;
     let sub = h.hub.subscribe();
     let cfg = server();
     let server_id = cfg.id;
@@ -217,17 +249,15 @@ async fn a_transfer_can_be_cancelled_and_leaves_the_destination_alone() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let local = dir.path().join("big.bin");
-    let job = h
-        .engine
-        .enqueue(
-            session,
-            server_id,
-            Direction::Down,
-            "/var/log/nginx/access.log".into(),
-            local.clone(),
-        )
-        .await
-        .expect("accepted");
+    let job = enqueue_one(
+        &h.engine,
+        session,
+        server_id,
+        Direction::Down,
+        "/var/log/nginx/access.log",
+        local.clone(),
+    )
+    .await;
 
     until("the transfer to start moving", || {
         snapshot(&h.hub, &sub)
@@ -265,7 +295,7 @@ async fn a_transfer_can_be_cancelled_and_leaves_the_destination_alone() {
 
 #[tokio::test]
 async fn an_existing_destination_opens_the_conflict_sheet_and_skip_leaves_it_untouched() {
-    let h = harness(MockOptions::default());
+    let h = harness(MockOptions::default()).await;
     let sub = h.hub.subscribe();
     let cfg = server();
     let server_id = cfg.id;
@@ -275,17 +305,15 @@ async fn an_existing_destination_opens_the_conflict_sheet_and_skip_leaves_it_unt
     let local = dir.path().join("notes.md");
     std::fs::write(&local, b"mine, not the server's").expect("seed the destination");
 
-    let job = h
-        .engine
-        .enqueue(
-            session,
-            server_id,
-            Direction::Down,
-            "/home/deploy/notes.md".into(),
-            local.clone(),
-        )
-        .await
-        .expect("accepted");
+    let job = enqueue_one(
+        &h.engine,
+        session,
+        server_id,
+        Direction::Down,
+        "/home/deploy/notes.md",
+        local.clone(),
+    )
+    .await;
 
     let prompt = until("the conflict sheet", || {
         snapshot(&h.hub, &sub)
@@ -342,7 +370,7 @@ async fn an_existing_destination_opens_the_conflict_sheet_and_skip_leaves_it_unt
 
 #[tokio::test]
 async fn closing_a_session_releases_a_transfer_parked_on_an_unanswered_prompt() {
-    let h = harness(MockOptions::default());
+    let h = harness(MockOptions::default()).await;
     let sub = h.hub.subscribe();
     let cfg = server();
     let server_id = cfg.id;
@@ -352,16 +380,15 @@ async fn closing_a_session_releases_a_transfer_parked_on_an_unanswered_prompt() 
     let local = dir.path().join("notes.md");
     std::fs::write(&local, b"in the way").expect("seed");
 
-    h.engine
-        .enqueue(
-            session,
-            server_id,
-            Direction::Down,
-            "/home/deploy/notes.md".into(),
-            local,
-        )
-        .await
-        .expect("accepted");
+    enqueue_one(
+        &h.engine,
+        session,
+        server_id,
+        Direction::Down,
+        "/home/deploy/notes.md",
+        local,
+    )
+    .await;
 
     until("the conflict sheet", || {
         snapshot(&h.hub, &sub)
@@ -390,7 +417,8 @@ async fn a_stalled_listing_does_not_stop_the_session_from_closing() {
         // when the session is asked to go away.
         op_latency: Duration::from_secs(60),
         ..MockOptions::default()
-    });
+    })
+    .await;
     let cfg = server();
     let session = h.engine.open_session(cfg).expect("session opens");
 
@@ -413,33 +441,121 @@ async fn a_stalled_listing_does_not_stop_the_session_from_closing() {
     );
 }
 
+/// Phase 1 answered these with `Unsupported`, honestly, because there was no
+/// scheduler behind them. There is one now, so every operation the drawer offers has
+/// to reach it and come back.
 #[tokio::test]
-async fn unsupported_queue_operations_say_so_instead_of_pretending() {
-    let h = harness(MockOptions::default());
-    let err = h
-        .engine
-        .queue_control(QueueOp::PauseAll)
-        .await
-        .expect_err("phase 1 has no scheduler");
-    assert!(matches!(err, EngineError::Unsupported { .. }));
+async fn every_queue_operation_reaches_the_scheduler() {
+    let h = harness(MockOptions {
+        chunk: 8 * 1024,
+        chunk_delay: Duration::from_millis(50),
+        ..MockOptions::default()
+    })
+    .await;
+    let cfg = server();
+    let server_id = cfg.id;
+    let session = h.engine.open_session(cfg).expect("session opens");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let job = enqueue_one(
+        &h.engine,
+        session,
+        server_id,
+        Direction::Down,
+        "/var/www/assets/app.js",
+        dir.path().join("app.js"),
+    )
+    .await;
+
+    for op in [
+        QueueOp::PauseAll,
+        QueueOp::ResumeAll,
+        QueueOp::Pause { job },
+        QueueOp::Resume { job },
+        QueueOp::Reorder { job, after: None },
+        QueueOp::Cancel { job },
+        QueueOp::Retry { job },
+        QueueOp::ClearCompleted,
+    ] {
+        h.engine
+            .queue_control(op)
+            .await
+            .unwrap_or_else(|err| panic!("{op:?} should be supported, got {err}"));
+    }
+}
+
+/// A tab closing is not a decision to throw its transfers away. Reopening the server
+/// should find them where they were left, paused.
+#[tokio::test]
+async fn closing_a_session_pauses_its_queue_rather_than_discarding_it() {
+    let h = harness(MockOptions {
+        chunk: 4 * 1024,
+        chunk_delay: Duration::from_millis(50),
+        ..MockOptions::default()
+    })
+    .await;
+    let cfg = server();
+    let server_id = cfg.id;
+    let session = h.engine.open_session(cfg).expect("session opens");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let job = enqueue_one(
+        &h.engine,
+        session,
+        server_id,
+        Direction::Down,
+        "/var/www/assets/app.js",
+        dir.path().join("app.js"),
+    )
+    .await;
+
+    h.engine.close_session(session).await;
+
+    // `until` polls a synchronous closure; the queue's snapshot is asynchronous, so
+    // this one waits on its own.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let state = loop {
+        let found = h
+            .engine
+            .queue()
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|j| j.id == job)
+            .map(|j| j.state);
+        match found {
+            Some(state) if !matches!(state, JobState::Preparing | JobState::Transferring) => {
+                break state;
+            }
+            _ if tokio::time::Instant::now() > deadline => panic!("the job never stopped"),
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    };
+    assert!(
+        matches!(state, JobState::Paused { .. }),
+        "the transfer is waiting for its server, not gone: {state:?}"
+    );
 }
 
 #[tokio::test]
 async fn a_command_for_a_session_that_does_not_exist_is_an_error_not_a_panic() {
-    let h = harness(MockOptions::default());
+    let h = harness(MockOptions::default()).await;
     let missing: SessionId = uuid::Uuid::new_v4();
     assert!(h.engine.list_dir(missing, "/").await.is_err());
     assert!(
         h.engine
             .enqueue(
-                missing,
-                uuid::Uuid::new_v4(),
-                Direction::Down,
-                "/home/deploy/notes.md".into(),
-                PathBuf::from("/tmp/x"),
+                Uuid::new_v4(),
+                vec![TransferItem {
+                    session: missing,
+                    server_id: Uuid::new_v4(),
+                    direction: Direction::Down,
+                    remote_path: "/home/deploy/notes.md".into(),
+                    local_path: PathBuf::from("/tmp/x"),
+                    is_dir: false,
+                }],
             )
             .await
-            .is_err()
+            .is_err(),
+        "a job aimed at nothing would wait in the queue for ever"
     );
 }
 
@@ -449,7 +565,8 @@ async fn browsing_stays_responsive_while_two_transfers_run() {
         chunk: 8 * 1024,
         chunk_delay: Duration::from_millis(10),
         ..MockOptions::default()
-    });
+    })
+    .await;
     let sub = h.hub.subscribe();
     let cfg = server();
     let server_id = cfg.id;
@@ -459,16 +576,15 @@ async fn browsing_stays_responsive_while_two_transfers_run() {
     let mut jobs = Vec::new();
     for name in ["one.bin", "two.bin"] {
         jobs.push(
-            h.engine
-                .enqueue(
-                    session,
-                    server_id,
-                    Direction::Down,
-                    "/var/www/assets/app.js".into(),
-                    dir.path().join(name),
-                )
-                .await
-                .expect("accepted"),
+            enqueue_one(
+                &h.engine,
+                session,
+                server_id,
+                Direction::Down,
+                "/var/www/assets/app.js",
+                dir.path().join(name),
+            )
+            .await,
         );
     }
 
@@ -508,7 +624,7 @@ async fn browsing_stays_responsive_while_two_transfers_run() {
 
 #[tokio::test]
 async fn events_carry_the_session_through_its_whole_life() {
-    let h = harness(MockOptions::default());
+    let h = harness(MockOptions::default()).await;
     let mut sub = h.hub.subscribe();
     let session = h.engine.open_session(server()).expect("session opens");
 

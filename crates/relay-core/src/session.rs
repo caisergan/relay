@@ -13,9 +13,9 @@
 //!   A transfer parked on an unanswered conflict sheet would otherwise never finish.
 //! - The join is awaited with a grace period; aborting is the fallback, not the plan.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -30,15 +30,14 @@ use crate::coordinator::log_line;
 use crate::error::{EngineError, Result};
 use crate::events::{ActivityEntry, EngineEvent, ListingSnapshot, LogKind};
 use crate::interact::{ConflictAction, Interact, Prompt, PromptReply};
-use crate::job::{JobKind, JobSnapshot, JobState};
+
 use crate::model::{
-    Direction, FileFacts, JobId, PromptId, RemoteEntry, ServerConfig, ServerId, Session, SessionId,
+    Direction, FileFacts, JobId, PromptId, RemoteEntry, ServerConfig, Session, SessionId,
     SessionState,
 };
-use crate::protocol::{
-    ProgressSink, Protocol, SecretSource, TransferLane, TransferOutcome, TransferReq,
-};
-use crate::wire::{Bytes, Order, Seq};
+use crate::protocol::{ProgressSink, Protocol, SecretSource, TransferLane, TransferReq};
+use crate::scheduler::{Report, RunRequest, Scheduler};
+use crate::wire::{Bytes, Seq};
 
 /// Keepalive interval. Doubles as the latency probe behind the session header's dot.
 pub const KEEPALIVE: Duration = Duration::from_secs(30);
@@ -50,11 +49,17 @@ pub const OP_DEADLINE: Duration = Duration::from_secs(60);
 pub const KEEPALIVE_DEADLINE: Duration = Duration::from_secs(15);
 /// How long `close` waits for the actor to finish before giving up on it.
 pub const CLOSE_GRACE: Duration = Duration::from_secs(5);
-/// Concurrent ad-hoc transfers per session in phase 1. The real scheduler is phase 2;
-/// until then this is a cap, not a queue policy.
-pub const MAX_ADHOC_LANES: u8 = 2;
+/// The most transfer lanes this build will run on one session, whatever the backend
+/// says it could take.
+///
+/// The scheduler's per-session cap is the smaller of this, the backend's own
+/// `max_lanes`, and the concurrency slider. It exists so a backend that advertises a
+/// generous limit cannot, on its own, turn one server into the whole queue.
+pub const MAX_SESSION_LANES: u8 = 4;
 /// Commands buffered before a caller has to wait for the actor.
 const CMD_BUFFER: usize = 64;
+/// Lane requests and completions buffered before a transfer task has to wait.
+const LANE_BUFFER: usize = 8;
 
 /// What the actor is asked to do. Every variant that produces a value carries its own
 /// reply channel, so callers await exactly their own answer.
@@ -89,8 +94,9 @@ pub enum SessionCmd {
         max: u64,
         reply: oneshot::Sender<Result<Vec<u8>>>,
     },
-    /// Fire and forget: the job's life is told entirely in `JobUpdate` events.
-    Transfer(Box<TransferOrder>),
+    /// Run one job the scheduler has already decided to start. Fire and forget: the
+    /// job's life is told through its `Reporter`.
+    Transfer(Box<RunRequest>),
     /// Stop one transfer. The actor owns its jobs' cancellation tokens, so nothing
     /// outside it has to keep a parallel map that could disagree.
     CancelJob {
@@ -100,24 +106,8 @@ pub enum SessionCmd {
     Disconnect,
 }
 
-/// A transfer as the session receives it. The queue that will eventually produce these
-/// is phase 2; phase 1 builds one per user gesture.
-#[derive(Debug, Clone)]
-pub struct TransferOrder {
-    pub job: JobId,
-    pub server_id: ServerId,
-    pub direction: Direction,
-    pub remote_path: String,
-    pub local_path: PathBuf,
-    /// Source size when it is already known, so the UI can draw a determinate bar.
-    pub size: Option<Bytes>,
-    pub order: Order,
-    /// The settings default, when there is one. `None` opens the conflict sheet.
-    pub conflict: Option<ConflictAction>,
-}
-
-/// Sent by a transfer task back to its actor. Keeps lane accounting in one place
-/// rather than behind a shared counter nobody owns.
+/// Sent by a transfer task back to its actor, so the cancellation map is cleaned up
+/// where it is owned rather than behind a shared counter nobody owns.
 enum Internal {
     LaneFinished(JobId),
 }
@@ -129,6 +119,9 @@ pub struct SessionContext {
     pub interact: Arc<dyn Interact>,
     pub secrets: Arc<dyn SecretSource>,
     pub rt: tokio::runtime::Handle,
+    /// Told when this session can take work and when it cannot. The session does not
+    /// decide what runs; it reports whether it is able to run anything.
+    pub queue: Scheduler,
 }
 
 /// The handle the engine keeps. Cloning is deliberately not offered: one owner, and
@@ -148,6 +141,7 @@ impl SessionHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(CMD_BUFFER);
         let cancel = CancellationToken::new();
 
+        let (lane_tx, lane_rx) = mpsc::channel(LANE_BUFFER);
         let actor = SessionActor {
             id: ctx.id,
             backend,
@@ -159,12 +153,11 @@ impl SessionHandle {
             interact: Arc::clone(&ctx.interact),
             cancel: cancel.clone(),
             rt: ctx.rt.clone(),
-            max_lanes: MAX_ADHOC_LANES,
-            in_flight: 0,
-            pending: VecDeque::new(),
+            queue: ctx.queue.clone(),
+            lane_tx,
             running: HashMap::new(),
         };
-        let join = ctx.rt.spawn(actor.run(cfg, ctx.secrets, cmd_rx));
+        let join = ctx.rt.spawn(actor.run(cfg, ctx.secrets, cmd_rx, lane_rx));
 
         Self {
             id: ctx.id,
@@ -250,9 +243,9 @@ impl SessionHandle {
             .await
     }
 
-    pub async fn transfer(&self, order: TransferOrder) -> Result<()> {
+    pub async fn transfer(&self, run: RunRequest) -> Result<()> {
         self.cmd
-            .send(SessionCmd::Transfer(Box::new(order)))
+            .send(SessionCmd::Transfer(Box::new(run)))
             .await
             .map_err(|_| closed())
     }
@@ -360,15 +353,6 @@ impl Emitter {
         .await;
     }
 
-    async fn job(&self, order: &TransferOrder, state: JobState, transferred: Bytes) {
-        self.emit(EngineEvent::JobUpdate {
-            job: Box::new(snapshot_for(self.id, order, state, transferred, None, None)),
-        })
-        .await;
-    }
-
-    /// Successful mutations belong in the activity feed. Failures already reach the
-    /// caller as an error, so they are logged rather than announced twice.
     async fn audit(&self, out: &Result<()>, text: String) {
         match out {
             Ok(()) => {
@@ -406,9 +390,10 @@ struct SessionActor {
     interact: Arc<dyn Interact>,
     cancel: CancellationToken,
     rt: tokio::runtime::Handle,
-    max_lanes: u8,
-    in_flight: u8,
-    pending: VecDeque<Box<TransferOrder>>,
+    queue: Scheduler,
+    /// Where transfer tasks ask for a lane. They cannot open one themselves: the actor
+    /// owns the backend, and this is the only way through it.
+    lane_tx: mpsc::Sender<LaneRequest>,
     /// Cancellation tokens for the transfers this session is running, so `CancelJob`
     /// reaches the right one without a second map living somewhere else.
     running: HashMap<JobId, CancellationToken>,
@@ -420,9 +405,9 @@ impl SessionActor {
         cfg: ServerConfig,
         secrets: Arc<dyn SecretSource>,
         mut cmd_rx: mpsc::Receiver<SessionCmd>,
+        mut lane_rx: mpsc::Receiver<LaneRequest>,
     ) {
-        let (internal_tx, mut internal_rx) =
-            mpsc::channel::<Internal>(MAX_ADHOC_LANES as usize + 1);
+        let (internal_tx, mut internal_rx) = mpsc::channel::<Internal>(LANE_BUFFER);
 
         self.out
             .emit(EngineEvent::SessionOpened {
@@ -473,7 +458,7 @@ impl SessionActor {
             .initial_remote_path
             .clone()
             .unwrap_or_else(|| info.home_path.clone());
-        self.max_lanes = MAX_ADHOC_LANES.min(self.backend.capabilities().max_lanes.max(1));
+        let max_lanes = MAX_SESSION_LANES.min(self.backend.capabilities().max_lanes.max(1));
         self.out.log(LogKind::Response, "Authenticated.").await;
         self.out
             .emit(EngineEvent::SessionState {
@@ -492,6 +477,9 @@ impl SessionActor {
             self.out.listing(&home, entries).await;
         }
 
+        // The queue may dispatch to this session from here on, and not before.
+        self.queue.session_up(self.id, max_lanes).await;
+
         let mut keepalive = tokio::time::interval(KEEPALIVE);
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         keepalive.tick().await; // The first tick is immediate, and we just connected.
@@ -502,10 +490,12 @@ impl SessionActor {
                 _ = self.cancel.cancelled() => break,
                 Some(Internal::LaneFinished(job)) = internal_rx.recv() => {
                     self.running.remove(&job);
-                    self.in_flight = self.in_flight.saturating_sub(1);
-                    if let Some(next) = self.pending.pop_front() {
-                        self.start_transfer(next, &internal_tx).await;
-                    }
+                }
+                // A transfer asking for its channel. Served here because the actor is
+                // the only thing that may touch the backend.
+                Some(request) = lane_rx.recv() => {
+                    let lane = self.backend.open_lane().await;
+                    let _ = request.reply.send(lane);
                 }
                 cmd = cmd_rx.recv() => {
                     let Some(cmd) = cmd else { break };
@@ -528,6 +518,9 @@ impl SessionActor {
         self.out.log(LogKind::Status, "Disconnecting.").await;
         self.backend.disconnect().await;
         self.out.disconnected("closed", false).await;
+        // Whatever the queue had running here stops being runnable. It pauses rather
+        // than fails: the jobs are fine, the connection is not.
+        self.queue.session_down(self.id).await;
     }
 
     /// Run one command. `Break` means the connection is gone and the actor is done.
@@ -616,13 +609,8 @@ impl SessionActor {
                 let _ = reply.send(out);
                 flow
             }
-            SessionCmd::Transfer(order) => {
-                if self.in_flight >= self.max_lanes {
-                    self.out.job(&order, JobState::Queued, Bytes::ZERO).await;
-                    self.pending.push_back(order);
-                } else {
-                    self.start_transfer(order, internal_tx).await;
-                }
+            SessionCmd::Transfer(run) => {
+                self.start_transfer(run, internal_tx).await;
                 ControlFlow::Continue(())
             }
             SessionCmd::CancelJob { job, reply } => {
@@ -634,26 +622,17 @@ impl SessionActor {
         }
     }
 
-    /// Cancel one job, whether it is moving bytes or still waiting for a lane.
+    /// Interrupt one running transfer.
     ///
-    /// A queued order has no task to interrupt, so it is dropped here and reported as
-    /// cancelled directly — otherwise it would start later and surprise the person who
-    /// already told it to stop.
+    /// A job this session is not running is not an error. The queue lives elsewhere
+    /// now, so by the time a cancellation arrives the transfer may have finished on
+    /// its own, or may never have started — both are races the caller already handles,
+    /// and neither is a failure to report.
     async fn cancel_job(&mut self, job: JobId) -> Result<()> {
         if let Some(token) = self.running.get(&job) {
             token.cancel();
-            return Ok(());
         }
-        if let Some(index) = self.pending.iter().position(|o| o.job == job) {
-            let order = self.pending.remove(index).expect("index from position");
-            self.out
-                .job(&order, JobState::Cancelled { at: Utc::now() }, Bytes::ZERO)
-                .await;
-            return Ok(());
-        }
-        Err(EngineError::NotFound {
-            path: job.to_string(),
-        })
+        Ok(())
     }
 
     /// A network failure means the connection is gone. Anything else is one operation
@@ -706,53 +685,60 @@ impl SessionActor {
     /// Everything needing the backend happens here — the destination stat, opening the
     /// lane — because the actor is the only thing allowed to touch it. The task gets
     /// facts and a lane, and never reaches back.
-    async fn start_transfer(
-        &mut self,
-        order: Box<TransferOrder>,
-        internal_tx: &mpsc::Sender<Internal>,
-    ) {
-        self.out.job(&order, JobState::Preparing, Bytes::ZERO).await;
-
+    ///
+    /// Whether this job should be running at all is not decided here. The scheduler
+    /// owns that, and it has already spent a slot to ask for this one.
+    async fn start_transfer(&mut self, run: Box<RunRequest>, internal_tx: &mpsc::Sender<Internal>) {
         let cancel = self.cancel.clone();
-        let destination = match order.direction {
-            Direction::Down => local_facts(&order.local_path).await,
+        let destination = match run.direction {
+            Direction::Down => local_facts(&run.local_path).await,
             Direction::Up => {
                 let stat = with_deadline(
-                    self.backend.stat(&order.remote_path),
+                    self.backend.stat(&run.remote_path),
                     "stat",
                     OP_DEADLINE,
                     &cancel,
                 )
                 .await;
                 match stat {
-                    Ok(entry) => entry.map(|e| remote_facts(&order.remote_path, &e)),
+                    Ok(entry) => entry.map(|e| remote_facts(&run.remote_path, &e)),
                     Err(err) => {
-                        self.out.job(&order, failed(err), Bytes::ZERO).await;
+                        run.report.send(finished(run.job, Err(err))).await;
                         return;
                     }
                 }
             }
         };
 
-        let lane = match self.backend.open_lane().await {
-            Ok(lane) => lane,
-            Err(err) => {
-                self.out.job(&order, failed(err), Bytes::ZERO).await;
-                return;
-            }
+        // Source size for the progress bar. Best effort: its absence is a state the
+        // drawer already draws, and not worth failing a transfer over.
+        let size = match run.direction {
+            Direction::Down => with_deadline(
+                self.backend.stat(&run.remote_path),
+                "stat",
+                OP_DEADLINE,
+                &cancel,
+            )
+            .await
+            .ok()
+            .flatten()
+            .map(|entry| entry.size),
+            Direction::Up => tokio::fs::metadata(&run.local_path)
+                .await
+                .ok()
+                .map(|meta| Bytes(meta.len())),
         };
 
         // A child of the session token, so closing the tab stops every transfer on it
         // without the engine having to enumerate them.
         let cancel = self.cancel.child_token();
-        self.running.insert(order.job, cancel.clone());
-        self.in_flight += 1;
+        self.running.insert(run.job, cancel.clone());
         self.rt.spawn(run_transfer(TransferTask {
             session: self.id,
-            order,
+            run,
+            size,
             destination,
-            lane,
-            events: self.out.events.clone(),
+            backend: LaneSource::Actor(self.lane_tx.clone()),
             interact: Arc::clone(&self.interact),
             cancel,
             done: internal_tx.clone(),
@@ -760,100 +746,118 @@ impl SessionActor {
     }
 }
 
-fn failed(error: EngineError) -> JobState {
-    JobState::Failed { error, attempts: 1 }
-}
-
 /// Everything one transfer owns, once the actor has let go of it.
 struct TransferTask {
     session: SessionId,
-    order: Box<TransferOrder>,
+    run: Box<RunRequest>,
+    size: Option<Bytes>,
     /// Facts about what is already at the destination, when anything is.
     destination: Option<FileFacts>,
-    lane: Box<dyn TransferLane>,
-    events: mpsc::Sender<EngineEvent>,
+    backend: LaneSource,
     interact: Arc<dyn Interact>,
     cancel: CancellationToken,
     done: mpsc::Sender<Internal>,
 }
 
+/// How a transfer task gets its lane.
+///
+/// It cannot open one itself — the actor owns the backend exclusively — so it asks,
+/// and it asks *after* the conflict is settled. Opening a channel for a file that is
+/// about to be skipped costs a round trip and a lane the queue could have given to
+/// something that is actually going to move.
+enum LaneSource {
+    Actor(mpsc::Sender<LaneRequest>),
+}
+
+struct LaneRequest {
+    reply: oneshot::Sender<Result<Box<dyn TransferLane>>>,
+}
+
 async fn run_transfer(task: TransferTask) {
     let TransferTask {
         session,
-        order,
+        run,
+        size,
         destination,
-        mut lane,
-        events,
+        backend,
         interact,
         cancel,
         done,
     } = task;
+    let job = run.job;
+    let report = run.report.clone();
 
     let decision = resolve_conflict(&Conflict {
         session,
-        order: &order,
+        run: &run,
+        size,
         destination: destination.as_ref(),
         interact: interact.as_ref(),
-        events: &events,
     })
     .await;
 
-    if let Err(state) = decision {
-        publish(
-            &events,
-            snapshot_for(session, &order, state, Bytes::ZERO, None, None),
-        )
+    let action = match decision {
+        Ok(action) => action,
+        Err(outcome) => {
+            report.send(finished(job, outcome)).await;
+            let _ = done.send(Internal::LaneFinished(job)).await;
+            return;
+        }
+    };
+    report
+        .send(Report::Decided {
+            job,
+            action: action.action,
+            apply_to_remaining: action.apply_to_remaining,
+        })
         .await;
-        lane.close().await;
-        let _ = done.send(Internal::LaneFinished(order.job)).await;
+    if action.action == ConflictAction::Skip {
+        // The scheduler finishes the job on the decision alone; there is nothing to
+        // transfer and no lane to open.
+        let _ = done.send(Internal::LaneFinished(job)).await;
         return;
     }
 
-    let started_at = Utc::now();
-    publish(
-        &events,
-        snapshot_for(
-            session,
-            &order,
-            JobState::Transferring,
-            Bytes::ZERO,
-            None,
-            Some(started_at),
-        ),
-    )
-    .await;
+    let LaneSource::Actor(lanes) = backend;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let lane = match lanes.send(LaneRequest { reply: reply_tx }).await {
+        Ok(()) => reply_rx.await.unwrap_or_else(|_| Err(closed())),
+        Err(_) => Err(closed()),
+    };
+    let mut lane = match lane {
+        Ok(lane) => lane,
+        Err(err) => {
+            report.send(finished(job, Err(err))).await;
+            let _ = done.send(Internal::LaneFinished(job)).await;
+            return;
+        }
+    };
+
+    report
+        .send(Report::Started {
+            job,
+            size,
+            resume_from: run.offset,
+        })
+        .await;
 
     let progress = {
-        let events = events.clone();
-        let order = order.clone();
-        let rate = Rate::new();
-        ProgressSink::new(move |bytes| {
-            let job = snapshot_for(
-                session,
-                &order,
-                JobState::Transferring,
-                Bytes(bytes),
-                rate.observe(bytes),
-                Some(started_at),
-            );
-            // Dropping a tick under backpressure is safe: the hub coalesces progress
-            // anyway, and every terminal state is sent with `send`, not `try_send`.
-            let _ = events.try_send(EngineEvent::JobUpdate { job: Box::new(job) });
-        })
+        let report = report.clone();
+        ProgressSink::new(move |bytes| report.progress(job, Bytes(bytes)))
     };
 
     let req = TransferReq {
-        job: order.job,
-        remote_path: order.remote_path.clone(),
-        local_path: order.local_path.clone(),
-        // Phase 1 never resumes. An offset is only legitimate once phase 2 has verified
-        // the source facts *and* the partial file's content prefix (ADR 005).
-        offset: 0,
+        job,
+        remote_path: run.remote_path.clone(),
+        local_path: run.local_path.clone(),
+        // A verified offset or zero. The scheduler is the only thing that can make it
+        // non-zero, and only after the resume checks in ADR 005 have passed.
+        offset: run.offset.get(),
         progress,
         cancel,
     };
 
-    let outcome: Result<TransferOutcome> = match order.direction {
+    let outcome = match run.direction {
         Direction::Down => lane.download(req).await,
         Direction::Up => lane.upload(req).await,
     };
@@ -861,160 +865,109 @@ async fn run_transfer(task: TransferTask) {
     // it is discarded rather than handed back to anything.
     lane.close().await;
 
-    let (state, transferred) = match outcome {
-        Ok(out) => (
-            JobState::Done {
-                at: Utc::now(),
-                skipped: false,
-            },
-            Bytes(out.final_size),
-        ),
-        Err(EngineError::Cancelled) => (JobState::Cancelled { at: Utc::now() }, Bytes::ZERO),
-        Err(error) => (failed(error), Bytes::ZERO),
-    };
-    publish(
-        &events,
-        snapshot_for(session, &order, state, transferred, None, Some(started_at)),
-    )
-    .await;
-    let _ = done.send(Internal::LaneFinished(order.job)).await;
+    report
+        .send(finished(job, outcome.map(|out| Bytes(out.final_size))))
+        .await;
+    let _ = done.send(Internal::LaneFinished(job)).await;
+}
+
+fn finished(job: JobId, result: Result<Bytes>) -> Report {
+    Report::Finished { job, result }
 }
 
 struct Conflict<'a> {
     session: SessionId,
-    order: &'a TransferOrder,
+    run: &'a RunRequest,
+    size: Option<Bytes>,
     destination: Option<&'a FileFacts>,
     interact: &'a dyn Interact,
-    events: &'a mpsc::Sender<EngineEvent>,
+}
+
+/// What a person, or a policy, decided about an existing destination.
+struct Decision {
+    action: ConflictAction,
+    apply_to_remaining: bool,
 }
 
 /// Decide what happens to a destination that already exists.
 ///
-/// `Ok(())` is the only way through; every other answer is a terminal state for the
-/// job, which is what the `Err` carries.
-async fn resolve_conflict(ctx: &Conflict<'_>) -> std::result::Result<(), JobState> {
+/// `Err` is a terminal outcome for the job, which is what it carries.
+async fn resolve_conflict(ctx: &Conflict<'_>) -> std::result::Result<Decision, Result<Bytes>> {
     let Some(existing) = ctx.destination else {
         // Nothing is in the way, so there is nothing to ask about.
-        return Ok(());
+        return Ok(Decision {
+            action: ConflictAction::Overwrite,
+            apply_to_remaining: false,
+        });
     };
 
-    let action = match ctx.order.conflict {
-        Some(policy) => policy,
-        None => {
-            // The id is chosen here so the drawer can say what the job is waiting for
-            // *before* an answer exists.
-            let prompt_id: PromptId = Uuid::new_v4();
-            publish(
-                ctx.events,
-                snapshot_for(
-                    ctx.session,
-                    ctx.order,
-                    JobState::AwaitingPrompt { prompt: prompt_id },
-                    Bytes::ZERO,
-                    None,
-                    None,
-                ),
-            )
-            .await;
-
-            let (local, remote) = match ctx.order.direction {
-                Direction::Down => (existing.clone(), source_facts(ctx.order)),
-                Direction::Up => (source_facts(ctx.order), existing.clone()),
-            };
-            let reply = ctx
-                .interact
-                .ask_with_id(
-                    prompt_id,
-                    ctx.session,
-                    Prompt::Conflict {
-                        local,
-                        remote,
-                        direction: ctx.order.direction,
-                        remaining: 0,
-                        // Phase 2 owns verified resume. Offering it here would be
-                        // offering a guarantee nothing has established yet.
-                        resume_allowed: false,
-                    },
-                )
-                .await;
-            match reply {
-                PromptReply::Conflict { action, .. } => action,
-                // Dismissing the sheet is a decision to leave the file alone.
-                _ => ConflictAction::Skip,
-            }
-        }
-    };
-
-    match action {
-        ConflictAction::Overwrite => Ok(()),
-        // Skipping is finishing: the destination is in the state the user asked for.
-        // `Cancelled` was the phase 1 stand-in and said the wrong thing — the job did
-        // what it was told, so it is `Done`, with `skipped` recording that no bytes
-        // moved.
-        ConflictAction::Skip => Err(JobState::Done {
-            at: Utc::now(),
-            skipped: true,
-        }),
-        ConflictAction::KeepBoth | ConflictAction::Resume => {
-            Err(failed(EngineError::Unsupported {
-                operation: "keep-both and resume arrive with the phase 2 queue".into(),
-            }))
-        }
+    if let Some(action) = ctx.run.conflict {
+        return Ok(Decision {
+            action,
+            apply_to_remaining: false,
+        });
     }
-}
 
-async fn publish(events: &mpsc::Sender<EngineEvent>, job: JobSnapshot) {
-    let _ = events
-        .send(EngineEvent::JobUpdate { job: Box::new(job) })
+    // The id is chosen here so the drawer can say what the job is waiting for
+    // *before* an answer exists.
+    let prompt_id: PromptId = Uuid::new_v4();
+    ctx.run
+        .report
+        .send(Report::Asking {
+            job: ctx.run.job,
+            prompt: prompt_id,
+        })
         .await;
-}
 
-fn snapshot_for(
-    session: SessionId,
-    order: &TransferOrder,
-    state: JobState,
-    transferred: Bytes,
-    speed_bps: Option<Bytes>,
-    started_at: Option<DateTime<Utc>>,
-) -> JobSnapshot {
-    let eta_secs = match (order.size, speed_bps) {
-        (Some(size), Some(speed)) if speed.get() > 0 && size.get() > transferred.get() => {
-            Some(((size.get() - transferred.get()) / speed.get()).min(u64::from(u32::MAX)) as u32)
-        }
-        _ => None,
+    let source = source_facts(ctx.run, ctx.size);
+    let (local, remote) = match ctx.run.direction {
+        Direction::Down => (existing.clone(), source),
+        Direction::Up => (source, existing.clone()),
     };
-    JobSnapshot {
-        id: order.job,
-        session,
-        server_id: order.server_id,
-        kind: JobKind::File,
-        direction: order.direction,
-        remote_path: order.remote_path.clone(),
-        local_path: order.local_path.clone(),
-        size: order.size,
-        transferred,
-        state,
-        order: order.order,
-        speed_bps,
-        eta_secs,
-        attempts: 1,
-        retry_at: None,
-        conflict_policy: order.conflict,
-        parent: None,
-        started_at,
+    let reply = ctx
+        .interact
+        .ask_with_id(
+            prompt_id,
+            ctx.session,
+            Prompt::Conflict {
+                local,
+                remote,
+                direction: ctx.run.direction,
+                remaining: ctx.run.remaining,
+                // Phase 2 §2.4 owns verified resume. Offering it before the source
+                // facts and the partial's prefix have been checked would be offering
+                // a guarantee nothing has established.
+                resume_allowed: false,
+            },
+        )
+        .await;
+
+    match reply {
+        PromptReply::Conflict {
+            action,
+            apply_to_remaining,
+        } => Ok(Decision {
+            action,
+            apply_to_remaining,
+        }),
+        // Dismissing the sheet is a decision to leave the file alone.
+        _ => Ok(Decision {
+            action: ConflictAction::Skip,
+            apply_to_remaining: false,
+        }),
     }
 }
 
-/// What we know about the file the transfer reads from. Phase 1 computes no digest —
-/// nothing here authorises a resume, and a `None` digest says so out loud.
-fn source_facts(order: &TransferOrder) -> FileFacts {
-    let path = match order.direction {
-        Direction::Down => order.remote_path.clone(),
-        Direction::Up => order.local_path.display().to_string(),
+/// What we know about the file the transfer reads from. No digest is computed here —
+/// nothing in this function authorises a resume, and a `None` says so out loud.
+fn source_facts(run: &RunRequest, size: Option<Bytes>) -> FileFacts {
+    let path = match run.direction {
+        Direction::Down => run.remote_path.clone(),
+        Direction::Up => run.local_path.display().to_string(),
     };
     FileFacts {
         path,
-        size: order.size.unwrap_or(Bytes::ZERO),
+        size: size.unwrap_or(Bytes::ZERO),
         modified: None,
         digest: None,
     }
@@ -1036,103 +989,5 @@ fn remote_facts(path: &str, entry: &RemoteEntry) -> FileFacts {
         size: entry.size,
         modified: entry.modified,
         digest: None,
-    }
-}
-
-/// Bytes per second over a short trailing window.
-///
-/// A cumulative average is the wrong number for a progress row: after the first few
-/// seconds it barely moves, so a stalled transfer goes on reporting a healthy rate.
-/// This reports the slope across recent samples instead, which does fall to zero.
-struct Rate {
-    samples: StdMutex<VecDeque<(Instant, u64)>>,
-}
-
-const RATE_WINDOW: Duration = Duration::from_secs(3);
-/// Below this the sample span is too short to divide by without inventing precision.
-const RATE_MIN_SPAN: Duration = Duration::from_millis(400);
-
-impl Rate {
-    fn new() -> Self {
-        Self {
-            samples: StdMutex::new(VecDeque::new()),
-        }
-    }
-
-    fn observe(&self, bytes: u64) -> Option<Bytes> {
-        let now = Instant::now();
-        let mut samples = self.samples.lock().expect("rate window poisoned");
-        samples.push_back((now, bytes));
-        while samples.len() > 2 {
-            match samples.front() {
-                Some(&(at, _)) if now.duration_since(at) > RATE_WINDOW => {
-                    samples.pop_front();
-                }
-                _ => break,
-            }
-        }
-        let &(first_at, first_bytes) = samples.front()?;
-        let span = now.duration_since(first_at);
-        if span < RATE_MIN_SPAN {
-            return None;
-        }
-        let moved = bytes.saturating_sub(first_bytes) as f64;
-        Some(Bytes((moved / span.as_secs_f64()) as u64))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn order() -> TransferOrder {
-        TransferOrder {
-            job: Uuid::new_v4(),
-            server_id: Uuid::nil(),
-            direction: Direction::Down,
-            remote_path: "/x".into(),
-            local_path: PathBuf::from("/tmp/x"),
-            size: None,
-            order: Order(0),
-            conflict: None,
-        }
-    }
-
-    #[test]
-    fn a_rate_needs_a_real_span_before_it_reports() {
-        let rate = Rate::new();
-        assert_eq!(rate.observe(0), None, "one sample is not a rate");
-        assert_eq!(rate.observe(1024), None, "nor is a span of microseconds");
-    }
-
-    #[test]
-    fn eta_needs_both_a_size_and_a_speed() {
-        let job = snapshot_for(
-            Uuid::new_v4(),
-            &order(),
-            JobState::Transferring,
-            Bytes(10),
-            Some(Bytes(100)),
-            None,
-        );
-        assert_eq!(job.eta_secs, None, "no size means no honest estimate");
-
-        let sized = TransferOrder {
-            size: Some(Bytes(1000)),
-            ..order()
-        };
-        let job = snapshot_for(
-            Uuid::new_v4(),
-            &sized,
-            JobState::Transferring,
-            Bytes(200),
-            Some(Bytes(100)),
-            None,
-        );
-        assert_eq!(
-            job.eta_secs,
-            Some(8),
-            "800 bytes left at 100 bytes a second"
-        );
     }
 }

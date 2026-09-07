@@ -6,7 +6,6 @@
 
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type {
-  Direction,
   EngineEnvelope,
   EngineSnapshot,
   JobSnapshot,
@@ -21,6 +20,7 @@ import type {
   ServerConfig,
   ServerInfo,
   Settings,
+  TransferItem,
 } from './gen'
 
 /** Rust's `()` arrives as JSON `null`. */
@@ -61,13 +61,10 @@ export const commands = {
   localDefaultDir: () => invoke<string>('local_default_dir'),
   localRoots: () => invoke<string[]>('local_roots'),
 
-  queueEnqueue: (
-    session: string,
-    serverId: string,
-    direction: Direction,
-    remotePath: string,
-    localPath: string,
-  ) => invoke<string>('queue_enqueue', { session, serverId, direction, remotePath, localPath }),
+  /** One gesture, one batch. The id comes from here so a re-sent command is
+   *  recognised as the same request rather than queueing everything twice. */
+  queueEnqueue: (batch: string, items: TransferItem[]) =>
+    invoke<string[]>('queue_enqueue', { batch, items }),
   queueControl: (op: QueueOp) => invoke<Unit>('queue_control', { op }),
 
   resolvePrompt: (promptId: string, reply: PromptReply) =>
