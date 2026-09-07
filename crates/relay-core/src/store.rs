@@ -272,6 +272,21 @@ impl QueueStore {
         .await
     }
 
+    /// Make every subsequent write fail, the way a full disk or a read-only file
+    /// would, until it is turned off again.
+    ///
+    /// For tests that need to watch what the queue does when the disk refuses — a
+    /// property worth checking and impossible to arrange from outside this module.
+    /// Nothing in the shipped application calls it.
+    #[doc(hidden)]
+    pub async fn refuse_writes(&self, refuse: bool) -> Result<()> {
+        self.call(move |conn| {
+            conn.pragma_update(None, "query_only", if refuse { "ON" } else { "OFF" })
+                .map_err(db)
+        })
+        .await
+    }
+
     /// Everything in the queue, in queue order.
     pub async fn load_all(&self) -> Result<Vec<Job>> {
         self.call(|conn| read_all(conn)).await
@@ -381,6 +396,15 @@ fn prepare(path: &Path) -> Result<Connection> {
 
 /// Bring the schema to [`SCHEMA_VERSION`], or explain why it cannot.
 fn migrate(conn: &Connection) -> Result<()> {
+    apply(conn, MIGRATIONS, SCHEMA_VERSION)
+}
+
+/// The migration mechanism, with the list it applies passed in.
+///
+/// A parameter rather than a constant so the behaviour can be tested with more than
+/// one migration in it. There is only one today, and a mechanism that has never run
+/// twice is a mechanism nobody has checked.
+fn apply(conn: &Connection, migrations: &[(i64, &str)], latest: i64) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
            version INTEGER PRIMARY KEY,
@@ -398,16 +422,19 @@ fn migrate(conn: &Connection) -> Result<()> {
         )
         .map_err(db)?;
 
-    if current > SCHEMA_VERSION {
+    if current > latest {
         return Err(EngineError::Unsupported {
             operation: format!(
                 "the transfer queue was written by a newer version of Relay \
-                 (schema {current}, this build understands {SCHEMA_VERSION})"
+                 (schema {current}, this build understands {latest})"
             ),
         });
     }
 
-    for (version, sql) in MIGRATIONS.iter().filter(|(v, _)| *v > current) {
+    // In order, and only the ones this database has not seen. Each is recorded as it
+    // succeeds, so a failure part-way leaves the versions before it applied and the
+    // rest to be retried on the next open.
+    for (version, sql) in migrations.iter().filter(|(v, _)| *v > current) {
         conn.execute_batch(&format!("BEGIN; {sql} COMMIT;"))
             .map_err(db)?;
         conn.execute(
@@ -1082,6 +1109,104 @@ mod tests {
         assert!(
             matches!(err, EngineError::Unsupported { .. }),
             "expected a refusal, got {err:?}"
+        );
+    }
+
+    /// The mechanism with more than one migration in it, which the shipped list does
+    /// not yet have. A migration system that has only ever run once is one nobody has
+    /// checked.
+    #[test]
+    fn migrations_apply_in_order_and_only_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        let first: &[(i64, &str)] = &[(1, "CREATE TABLE a (x INTEGER) STRICT;")];
+        let both: &[(i64, &str)] = &[
+            (1, "CREATE TABLE a (x INTEGER) STRICT;"),
+            (2, "CREATE TABLE b (y TEXT) STRICT;"),
+        ];
+
+        apply(&conn, first, 1).unwrap();
+        conn.execute("INSERT INTO a (x) VALUES (1)", []).unwrap();
+
+        // The second open of an older database applies only what it has not seen. If
+        // it re-ran the first, the `CREATE TABLE` would fail and the row would be gone.
+        apply(&conn, both, 2).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM a", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "an already-applied migration must not run again");
+        assert!(conn.execute("INSERT INTO b (y) VALUES ('x')", []).is_ok());
+
+        let applied: Vec<i64> = conn
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|v| v.unwrap())
+            .collect();
+        assert_eq!(applied, [1, 2]);
+
+        // And running the same list again is a no-op rather than an error.
+        apply(&conn, both, 2).unwrap();
+    }
+
+    /// A migration that cannot be applied must not be recorded as applied, or the next
+    /// open would skip it and run against a schema that was never created.
+    #[test]
+    fn a_failing_migration_is_not_recorded() {
+        let conn = Connection::open_in_memory().unwrap();
+        let broken: &[(i64, &str)] = &[
+            (1, "CREATE TABLE a (x INTEGER) STRICT;"),
+            (2, "THIS IS NOT SQL;"),
+        ];
+
+        assert!(apply(&conn, broken, 2).is_err());
+        let applied: Vec<i64> = conn
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|v| v.unwrap())
+            .collect();
+        assert_eq!(applied, [1], "only the one that worked");
+    }
+
+    /// The disk fills, or the file becomes read-only. A store that reported success
+    /// there would be telling the queue its state is safe when it is not.
+    #[tokio::test]
+    async fn a_write_that_fails_is_reported_rather_than_swallowed() {
+        let store = QueueStore::in_memory().await.unwrap();
+        let batch = Uuid::new_v4();
+        store.save(job(batch, "before", 1)).await.unwrap();
+
+        // SQLite's own way of refusing every write, which is what a read-only file
+        // or a full disk looks like from here.
+        store.refuse_writes(true).await.unwrap();
+
+        let err = store.save(job(batch, "after", 2)).await.unwrap_err();
+        assert!(matches!(err, EngineError::LocalIo { .. }), "got {err:?}");
+
+        let err = store
+            .checkpoint(
+                Uuid::new_v4(),
+                ResumeRecord::new(
+                    FileFacts {
+                        path: "/remote/x".into(),
+                        size: Bytes(1),
+                        modified: None,
+                        digest: None,
+                    },
+                    "/local/.x.relaypart",
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::LocalIo { .. }), "got {err:?}");
+
+        store.refuse_writes(false).await.unwrap();
+        assert_eq!(
+            store.load_all().await.unwrap().len(),
+            1,
+            "the refused write left nothing behind"
         );
     }
 

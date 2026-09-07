@@ -780,3 +780,153 @@ async fn a_partial_that_does_not_match_the_source_is_refused() {
         "the refusal should name the side that disagreed: {reason}"
     );
 }
+
+/// Phase 2 exit criterion 2, against a real server: pull the cable mid-transfer and
+/// the queue finishes anyway, with the bytes the server has.
+///
+/// The container is restarted rather than the process killed, so this is a genuine
+/// TCP reset arriving inside a running SSH session — the case a mock cannot produce.
+#[tokio::test]
+async fn a_restarted_server_reconnects_and_the_queue_finishes() {
+    use relay_core::engine::{Engine, SftpFactory, TransferItem};
+    use relay_core::model::SessionState;
+
+    let trust = Arc::new(TrustStore::ephemeral());
+    let hub = relay_core::EngineHub::start(&tokio::runtime::Handle::current());
+    let cfg = config(AuthMethod::Password);
+    let secrets = MemorySecrets::new();
+    secrets.set(cfg.id, SecretKind::Password, env("RELAY_SFTP_PASSWORD"));
+
+    // The host key is pinned before the engine runs, so the reconnect is about the
+    // connection rather than about a sheet nobody is there to answer.
+    {
+        let (interact, _) = Answering::accepting();
+        let mut probe =
+            relay_core::sftp::SftpBackend::new(uuid::Uuid::new_v4(), Arc::clone(&trust));
+        probe
+            .connect(&cfg, &secrets, interact as Arc<dyn Interact>)
+            .await
+            .expect("pinning the host key");
+        probe.disconnect().await;
+    }
+
+    let engine = Engine::with_parts(
+        Arc::clone(&hub),
+        tokio::runtime::Handle::current(),
+        Arc::new(SftpFactory::new(Arc::clone(&trust))),
+        Arc::new(secrets),
+        Arc::new(relay_core::servers::ServerStore::ephemeral()),
+        relay_core::store::QueueStore::in_memory()
+            .await
+            .expect("queue"),
+        Arc::new(relay_core::settings::SettingsStore::ephemeral()),
+    )
+    .await
+    .expect("the engine starts");
+
+    let sub = hub.subscribe();
+    let session = engine.open_session(cfg.clone()).expect("session opens");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let local = dir.path().join("thirty-two-mib.bin");
+    let job = engine
+        .enqueue(
+            uuid::Uuid::new_v4(),
+            vec![TransferItem {
+                session,
+                server_id: cfg.id,
+                direction: Direction::Down,
+                remote_path: remote("assets/thirty-two-mib.bin"),
+                local_path: local.clone(),
+                is_dir: false,
+            }],
+        )
+        .await
+        .expect("accepted")[0];
+
+    // Wait for real bytes before pulling the cable; restarting before the transfer
+    // starts would test the connect path instead.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let moved = engine
+            .queue()
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|j| j.id == job)
+            .map(|j| j.transferred.get())
+            .unwrap_or(0);
+        if moved > 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the transfer never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let restarted = std::process::Command::new("docker")
+        .args(["restart", "relay-sftp-fixture"])
+        .output()
+        .expect("docker restart");
+    assert!(
+        restarted.status.success(),
+        "could not restart the fixture: {}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+
+    // The queue finishes, whether by resuming or by starting over.
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let state = loop {
+        let found = engine
+            .queue()
+            .snapshot()
+            .await
+            .into_iter()
+            .find(|j| j.id == job)
+            .map(|j| j.state);
+        match found {
+            Some(state) if state.is_terminal() => break state,
+            _ => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the queue never recovered from the restart"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+
+    assert!(
+        matches!(
+            state,
+            relay_core::job::JobState::Done { skipped: false, .. }
+        ),
+        "the transfer finished after the server came back: {state:?}"
+    );
+    assert_eq!(
+        sha256(&std::fs::read(&local).expect("read back")),
+        sha256(&std::fs::read(host_file("assets/thirty-two-mib.bin")).expect("source")),
+        "the recovered file is the server's file"
+    );
+
+    // And the outage was real: without a reported drop this test proves nothing.
+    let saw_outage = hub
+        .snapshot(sub.id)
+        .map(|snap| {
+            snap.sessions.iter().any(|s| {
+                matches!(
+                    s.state,
+                    SessionState::Reconnecting { .. } | SessionState::Disconnected { .. }
+                )
+            })
+        })
+        .unwrap_or(false);
+    let logged = hub
+        .snapshot(sub.id)
+        .map(|snap| snap.jobs.iter().any(|j| j.attempts > 1))
+        .unwrap_or(false);
+    assert!(
+        saw_outage || logged,
+        "the connection never visibly dropped; the restart did not interrupt anything"
+    );
+
+    engine.shutdown().await;
+}

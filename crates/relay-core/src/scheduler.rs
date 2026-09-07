@@ -2082,6 +2082,139 @@ mod tests {
         assert!(matches!(left[0].1, JobState::Failed { .. }));
     }
 
+    /// A checkpoint is what a resume is allowed to trust, so it may only move once the
+    /// database says the new one is there. A crash between the two must leave the
+    /// checkpoint *behind* the bytes — costing a re-send — and never ahead of them.
+    #[tokio::test]
+    async fn a_checkpoint_the_disk_refused_does_not_advance() {
+        let bench = Arc::new(Bench::default());
+        let (tx, _events) = mpsc::channel(1024);
+        let (prompt_events, _unread) = mpsc::channel(64);
+        let store = QueueStore::in_memory().await.unwrap();
+        let scheduler = Scheduler::spawn(SchedulerContext {
+            store: store.clone(),
+            events: tx,
+            dispatcher: Arc::clone(&bench) as Arc<dyn Dispatcher>,
+            prompts: Arc::new(PromptBroker::new(prompt_events)),
+            rt: tokio::runtime::Handle::current(),
+            concurrency: 1,
+            default_conflict: None,
+        })
+        .await
+        .unwrap();
+        let session = Uuid::new_v4();
+        let server = Uuid::new_v4();
+        scheduler.session_up(session, server, 4).await;
+
+        let ids = scheduler
+            .enqueue(Uuid::new_v4(), vec![spec(session, server, "big")])
+            .await
+            .unwrap();
+        let reporter = scheduler.reporter();
+        reporter
+            .send(Report::Started {
+                job: ids[0],
+                size: Some(Bytes(1_000_000)),
+                resume_from: Bytes::ZERO,
+                record: fresh_record(),
+            })
+            .await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+            let _ = scheduler.snapshot().await;
+        }
+
+        store.refuse_writes(true).await.unwrap();
+        reporter
+            .send(Report::Checkpoint {
+                job: ids[0],
+                offset: Bytes(512_000),
+                digest: "abc".repeat(16),
+            })
+            .await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+            let _ = scheduler.snapshot().await;
+        }
+        store.refuse_writes(false).await.unwrap();
+
+        // Finishing writes the scheduler's *in-memory* record back to the database, so
+        // what lands there now is what the scheduler believed all along. Reading the
+        // database during the outage would only prove the write failed, which is the
+        // premise rather than the property.
+        reporter
+            .send(Report::Finished {
+                job: ids[0],
+                result: Ok(Bytes(1_000_000)),
+            })
+            .await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+            let _ = scheduler.snapshot().await;
+        }
+
+        let stored = store.load_all().await.unwrap();
+        let record = stored[0].resume.clone().expect("the ownership record");
+        assert_eq!(
+            record.checkpoint,
+            Bytes::ZERO,
+            "the checkpoint the disk refused must not be believed"
+        );
+    }
+
+    /// A conflict sheet can live for ten minutes. If the job holding it also held a
+    /// transfer slot, one unanswered question would stop every other server's work.
+    #[tokio::test]
+    async fn a_session_waiting_for_an_answer_does_not_stall_another() {
+        let h = harness(1, 8).await;
+        let asking = h
+            .scheduler
+            .enqueue(Uuid::new_v4(), vec![spec(h.session, h.server, "asking")])
+            .await
+            .unwrap()[0];
+        settle(&h).await;
+        assert_eq!(h.bench.running(), vec![asking], "the only slot is spent");
+
+        // A second server, with work of its own that cannot start yet.
+        let other_session = Uuid::new_v4();
+        let other_server = Uuid::new_v4();
+        h.scheduler.session_up(other_session, other_server, 8).await;
+        let waiting = h
+            .scheduler
+            .enqueue(
+                Uuid::new_v4(),
+                vec![spec(other_session, other_server, "waiting")],
+            )
+            .await
+            .unwrap()[0];
+        settle(&h).await;
+        let _ = h.bench.take();
+
+        // The first job opens a sheet, and nobody answers it.
+        h.scheduler
+            .reporter()
+            .send(Report::Asking {
+                job: asking,
+                prompt: Uuid::new_v4(),
+            })
+            .await;
+        settle(&h).await;
+
+        assert_eq!(
+            h.bench.running(),
+            vec![waiting],
+            "the other server's work started while the question is unanswered"
+        );
+        assert!(matches!(
+            states(&h)
+                .await
+                .iter()
+                .find(|(name, _)| name == "asking")
+                .map(|(_, s)| s),
+            Some(JobState::AwaitingPrompt { .. })
+        ));
+    }
+
     /// The race this guards: pausing stops a transfer by cancelling it, and the
     /// transfer's final report can arrive after the job has been resumed and
     /// dispatched again. Applying it then would cancel the new attempt on behalf of
