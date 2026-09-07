@@ -662,3 +662,30 @@ impl SecretSource for NoSecrets {
         None
     }
 }
+
+/// Hands the engine a [`MockBackend`] wherever it would build a real one.
+///
+/// This is the seam that lets `tests/engine_session.rs` drive the same code path the
+/// shell calls — commands, actor, coordinator, prompts, events — with no network. A
+/// test that stopped short of the engine would be testing everything except the part
+/// that ships.
+pub struct MockFactory {
+    fs: MockFs,
+    opts: MockOptions,
+}
+
+impl MockFactory {
+    pub fn new(fs: MockFs, opts: MockOptions) -> Self {
+        Self { fs, opts }
+    }
+}
+
+impl crate::engine::BackendFactory for MockFactory {
+    fn build(&self, session: SessionId, _cfg: &ServerConfig) -> Result<Box<dyn Protocol>> {
+        Ok(Box::new(MockBackend::with_options(
+            self.fs.clone(),
+            session,
+            self.opts.clone(),
+        )))
+    }
+}

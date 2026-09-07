@@ -13,8 +13,9 @@ use relay_core::events::LogLine;
 use relay_core::interact::{PromptReply, ResolveError};
 use relay_core::job::QueueOp;
 use relay_core::model::{
-    Direction, JobId, LocalEntry, RemoteEntry, ServerConfig, ServerId, SessionId,
+    Direction, JobId, LocalEntry, RemoteEntry, ServerConfig, ServerId, ServerInfo, SessionId,
 };
+use relay_core::secrets::{KeyringSecrets, SecretKind};
 use relay_core::settings::Settings;
 use tauri::State;
 use tauri::ipc::Channel;
@@ -27,7 +28,7 @@ type Result<T> = std::result::Result<T, EngineError>;
 
 #[tauri::command]
 pub async fn servers_list(state: State<'_, AppState>) -> Result<Vec<ServerConfig>> {
-    Ok(state.servers.read().await.clone())
+    Ok(state.engine.servers().list())
 }
 
 #[tauri::command]
@@ -40,18 +41,17 @@ pub async fn servers_save(
             operation: format!("{} is not available in this release", config.proto.label()),
         });
     }
-    let mut servers = state.servers.write().await;
-    match servers.iter_mut().find(|s| s.id == config.id) {
-        Some(existing) => *existing = config.clone(),
-        None => servers.push(config.clone()),
-    }
-    Ok(config)
+    state.engine.servers().save(config)
 }
 
 #[tauri::command]
 pub async fn servers_delete(state: State<'_, AppState>, id: ServerId) -> Result<()> {
-    state.servers.write().await.retain(|s| s.id != id);
-    Ok(())
+    // The credentials go with the server. Best effort, and deliberately not fatal:
+    // a keychain that will not open is not a reason to keep a server nobody wants.
+    for kind in [SecretKind::Password, SecretKind::Passphrase] {
+        KeyringSecrets::forget(id, kind).await;
+    }
+    state.engine.servers().delete(id)
 }
 
 // ---------------------------------------------------------------- sessions
@@ -59,12 +59,20 @@ pub async fn servers_delete(state: State<'_, AppState>, id: ServerId) -> Result<
 #[tauri::command]
 pub async fn session_open(state: State<'_, AppState>, server_id: ServerId) -> Result<SessionId> {
     let config = state
-        .server(server_id)
-        .await
+        .engine
+        .servers()
+        .get(server_id)
         .ok_or_else(|| EngineError::NotFound {
             path: server_id.to_string(),
         })?;
-    Ok(state.engine.open_session(config))
+    state.engine.open_session(config)
+}
+
+/// The server editor's "Test connection": connect, report what the peer said, hang up.
+/// Uses the real prompt path, so a first-contact fingerprint still reaches the sheet.
+#[tauri::command]
+pub async fn session_test(state: State<'_, AppState>, config: ServerConfig) -> Result<ServerInfo> {
+    state.engine.test_connection(config).await
 }
 
 #[tauri::command]
@@ -80,6 +88,31 @@ pub async fn session_list_dir(
     path: String,
 ) -> Result<Vec<RemoteEntry>> {
     state.engine.list_dir(id, &path).await
+}
+
+#[tauri::command]
+pub async fn session_mkdir(state: State<'_, AppState>, id: SessionId, path: String) -> Result<()> {
+    state.engine.mkdir(id, &path).await
+}
+
+#[tauri::command]
+pub async fn session_rename(
+    state: State<'_, AppState>,
+    id: SessionId,
+    from: String,
+    to: String,
+) -> Result<()> {
+    state.engine.rename(id, &from, &to).await
+}
+
+#[tauri::command]
+pub async fn session_remove(
+    state: State<'_, AppState>,
+    id: SessionId,
+    path: String,
+    is_dir: bool,
+) -> Result<()> {
+    state.engine.remove(id, &path, is_dir).await
 }
 
 #[tauri::command]
@@ -117,19 +150,20 @@ pub fn local_roots() -> Vec<PathBuf> {
 pub async fn queue_enqueue(
     state: State<'_, AppState>,
     session: SessionId,
+    server_id: ServerId,
     direction: Direction,
     remote_path: String,
     local_path: PathBuf,
 ) -> Result<JobId> {
     state
         .engine
-        .enqueue(session, direction, remote_path, local_path)
+        .enqueue(session, server_id, direction, remote_path, local_path)
         .await
 }
 
 #[tauri::command]
 pub async fn queue_control(state: State<'_, AppState>, op: QueueOp) -> Result<()> {
-    state.engine.queue_control(op)
+    state.engine.queue_control(op).await
 }
 
 // ---------------------------------------------------------------- prompts
@@ -147,14 +181,12 @@ pub async fn resolve_prompt(
 
 #[tauri::command]
 pub async fn settings_get(state: State<'_, AppState>) -> Result<Settings> {
-    Ok(state.settings.read().await.clone())
+    Ok(state.engine.settings())
 }
 
 #[tauri::command]
 pub async fn settings_set(state: State<'_, AppState>, settings: Settings) -> Result<Settings> {
-    let settings = settings.normalised();
-    *state.settings.write().await = settings.clone();
-    Ok(settings)
+    Ok(state.engine.set_settings(settings))
 }
 
 // ---------------------------------------------------------------- engine stream

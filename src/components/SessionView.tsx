@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { commands } from '@/ipc/commands'
-import type { LocalEntry, RemoteEntry } from '@/ipc/gen'
+import type { LocalEntry, LogLine, RemoteEntry } from '@/ipc/gen'
 import { crumbs, joinPath, parentPath } from '@/lib/format'
 import { useOrderedJobs } from '@/state/queueStore'
 import { emptyPane, useSessionsStore } from '@/state/sessionsStore'
@@ -21,6 +21,10 @@ export function SessionView({ sessionId }: Props) {
   const patchPane = useSessionsStore((s) => s.patchPane)
   const jobs = useOrderedJobs()
   const toast = useUiStore((s) => s.toast)
+  // Deleting is the one remote action with no undo, so it gets a real confirmation
+  // rather than a `window.confirm` the user can dismiss by muscle memory.
+  const [pendingDelete, setPendingDelete] = useState<FileRow | null>(null)
+  const [logOpen, setLogOpen] = useState(false)
 
   const sessionJobs = useMemo(
     () => jobs.filter((job) => job.session === sessionId),
@@ -71,7 +75,7 @@ export function SessionView({ sessionId }: Props) {
     })
   }
 
-  const download = (row: FileRow) => {
+  const transfer = (direction: 'up' | 'down') => (row: FileRow) => {
     if (row.isDir) {
       toast('info', 'Folder transfers arrive with the phase 2 queue.')
       return
@@ -79,31 +83,57 @@ export function SessionView({ sessionId }: Props) {
     void commands
       .queueEnqueue(
         sessionId,
-        'down',
+        session.serverId,
+        direction,
         joinPath(remotePath, row.name),
         joinPath(pane.localPath, row.name),
       )
       .catch((error: unknown) => toast('error', String(error)))
   }
+  const download = transfer('down')
+  const upload = transfer('up')
 
-  const upload = (row: FileRow) => {
-    if (row.isDir) {
-      toast('info', 'Folder transfers arrive with the phase 2 queue.')
-      return
-    }
+  /// Refresh after a change, because SFTP has no directory notifications: what the
+  /// pane shows is whatever the last listing said.
+  const refreshRemote = () => navigateRemote(remotePath)
+
+  const newFolder = () => {
+    const name = window.prompt('Name for the new folder')
+    if (name === null || name.trim() === '') return
     void commands
-      .queueEnqueue(
-        sessionId,
-        'up',
-        joinPath(remotePath, row.name),
-        joinPath(pane.localPath, row.name),
+      .sessionMkdir(sessionId, joinPath(remotePath, name.trim()))
+      .then(refreshRemote)
+      .catch((error: unknown) =>
+        toast('error', `Could not create the folder: ${String(error)}`),
       )
-      .catch((error: unknown) => toast('error', String(error)))
+  }
+
+  const renameRemote = (row: FileRow) => {
+    const name = window.prompt(`Rename ${row.name} to`, row.name)
+    if (name === null || name.trim() === '' || name === row.name) return
+    void commands
+      .sessionRename(
+        sessionId,
+        joinPath(remotePath, row.name),
+        joinPath(remotePath, name.trim()),
+      )
+      .then(refreshRemote)
+      .catch((error: unknown) => toast('error', `Could not rename: ${String(error)}`))
+  }
+
+  const confirmDelete = (row: FileRow) => setPendingDelete(row)
+
+  const doDelete = (row: FileRow) => {
+    setPendingDelete(null)
+    void commands
+      .sessionRemove(sessionId, joinPath(remotePath, row.name), row.isDir)
+      .then(refreshRemote)
+      .catch((error: unknown) => toast('error', `Could not delete: ${String(error)}`))
   }
 
   return (
     <>
-      <SessionHeader sessionId={sessionId} />
+      <SessionHeader sessionId={sessionId} onToggleLog={() => setLogOpen((v) => !v)} />
       <div className="panes">
         <div className="pane">
           <PaneHeader
@@ -134,12 +164,16 @@ export function SessionView({ sessionId }: Props) {
         <FlowGutter jobs={sessionJobs} />
 
         <div className="pane">
+          {/* Spread rather than `onNewFolder={connected ? fn : undefined}`:
+              `exactOptionalPropertyTypes` forbids an explicit undefined for an
+              optional prop, so the prop is either present or absent. */}
           <PaneHeader
             path={remotePath}
             filter={pane.remoteFilter}
             onFilter={(remoteFilter) => patchPane(sessionId, { remoteFilter })}
             onNavigate={navigateRemote}
             label={session.name}
+            {...(connected ? { onNewFolder: newFolder } : {})}
           />
           {!connected ? (
             <div className="empty">
@@ -161,16 +195,45 @@ export function SessionView({ sessionId }: Props) {
               actionLabel="↓ Download"
               onOpen={(row) => row.isDir && navigateRemote(joinPath(remotePath, row.name))}
               onAction={download}
+              onRename={renameRemote}
+              onDelete={confirmDelete}
               showPerms
             />
           )}
         </div>
       </div>
+      {logOpen && <LogPanel sessionId={sessionId} onClose={() => setLogOpen(false)} />}
+      {pendingDelete && (
+        <div className="scrim" role="dialog" aria-modal="true">
+          <div className="sheet sheet--danger">
+            <h2 className="sheet__title">Delete {pendingDelete.name}?</h2>
+            <p className="sheet__body">
+              {pendingDelete.isDir
+                ? 'The folder must be empty. This cannot be undone.'
+                : 'This cannot be undone — there is no trash on the server.'}
+            </p>
+            <div className="sheet__actions">
+              <button className="btn" onClick={() => setPendingDelete(null)}>
+                Cancel
+              </button>
+              <button className="btn btn--danger" onClick={() => doDelete(pendingDelete)}>
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   )
 }
 
-function SessionHeader({ sessionId }: { sessionId: string }) {
+function SessionHeader({
+  sessionId,
+  onToggleLog,
+}: {
+  sessionId: string
+  onToggleLog: () => void
+}) {
   const session = useSessionsStore((s) => s.sessions[sessionId])
   if (!session) return null
 
@@ -200,6 +263,69 @@ function SessionHeader({ sessionId }: { sessionId: string }) {
       {session.latencyMs !== null && (
         <span className="sidebar__meta">{session.latencyMs} ms</span>
       )}
+      <span style={{ flex: 1 }} />
+      <button className="iconbtn" title="Session log" onClick={onToggleLog}>
+        Log
+      </button>
+    </div>
+  )
+}
+
+/** The per-session protocol log, fetched on demand.
+ *
+ * The engine keeps a bounded backlog and redacts secrets as lines are built, not on
+ * the way out — so what is copied from here is what the audit in phase 5 greps. */
+function LogPanel({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
+  const [lines, setLines] = useState<LogLine[]>([])
+  const toast = useUiStore((s) => s.toast)
+
+  useEffect(() => {
+    let live = true
+    const load = () => {
+      commands
+        .sessionLogs(sessionId)
+        .then((next) => {
+          if (live) setLines(next)
+        })
+        .catch(() => undefined)
+    }
+    load()
+    const timer = setInterval(load, 1000)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [sessionId])
+
+  const copy = () => {
+    const text = lines.map((l) => `${l.at} ${l.kind} ${l.line}`).join('\n')
+    navigator.clipboard
+      .writeText(text)
+      .then(() => toast('ok', 'Log copied.'))
+      .catch(() => toast('error', 'Could not copy the log.'))
+  }
+
+  return (
+    <div className="logpanel">
+      <div className="logpanel__bar">
+        <strong>Session log</strong>
+        <span style={{ flex: 1 }} />
+        <button className="iconbtn" onClick={copy}>
+          Copy
+        </button>
+        <button className="iconbtn" onClick={onClose} aria-label="Close the log">
+          ×
+        </button>
+      </div>
+      <div className="logpanel__body">
+        {lines.length === 0 && <span className="sidebar__meta">Nothing logged yet.</span>}
+        {lines.map((line, index) => (
+          <div key={`${line.at}-${index}`} className={`logline logline--${line.kind}`}>
+            <span className="logline__at">{line.at.slice(11, 19)}</span>
+            {line.line}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -210,12 +336,14 @@ function PaneHeader({
   onFilter,
   onNavigate,
   label,
+  onNewFolder,
 }: {
   path: string
   filter: string
   onFilter: (value: string) => void
   onNavigate: (path: string) => void
   label: string
+  onNewFolder?: () => void
 }) {
   return (
     <div className="pane-header">
@@ -245,6 +373,16 @@ function PaneHeader({
         aria-label={`Filter ${label}`}
         onChange={(e) => onFilter(e.currentTarget.value)}
       />
+      {onNewFolder && (
+        <button
+          className="iconbtn"
+          title="New folder"
+          aria-label="New folder"
+          onClick={onNewFolder}
+        >
+          ＋
+        </button>
+      )}
     </div>
   )
 }

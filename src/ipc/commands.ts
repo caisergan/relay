@@ -17,6 +17,7 @@ import type {
   QueueOp,
   RemoteEntry,
   ServerConfig,
+  ServerInfo,
   Settings,
 } from './gen'
 
@@ -29,9 +30,16 @@ export const commands = {
   serversDelete: (id: string) => invoke<Unit>('servers_delete', { id }),
 
   sessionOpen: (serverId: string) => invoke<string>('session_open', { serverId }),
+  /** Connect, report what the peer said, hang up. Uses the real host-key sheet. */
+  sessionTest: (config: ServerConfig) => invoke<ServerInfo>('session_test', { config }),
   sessionClose: (id: string) => invoke<Unit>('session_close', { id }),
   sessionListDir: (id: string, path: string) =>
     invoke<RemoteEntry[]>('session_list_dir', { id, path }),
+  sessionMkdir: (id: string, path: string) => invoke<Unit>('session_mkdir', { id, path }),
+  sessionRename: (id: string, from: string, to: string) =>
+    invoke<Unit>('session_rename', { id, from, to }),
+  sessionRemove: (id: string, path: string, isDir: boolean) =>
+    invoke<Unit>('session_remove', { id, path, isDir }),
   sessionLogs: (id: string, limit = 200) => invoke<LogLine[]>('session_logs', { id, limit }),
 
   localListDir: (path: string) => invoke<LocalEntry[]>('local_list_dir', { path }),
@@ -40,10 +48,11 @@ export const commands = {
 
   queueEnqueue: (
     session: string,
+    serverId: string,
     direction: Direction,
     remotePath: string,
     localPath: string,
-  ) => invoke<string>('queue_enqueue', { session, direction, remotePath, localPath }),
+  ) => invoke<string>('queue_enqueue', { session, serverId, direction, remotePath, localPath }),
   queueControl: (op: QueueOp) => invoke<Unit>('queue_control', { op }),
 
   resolvePrompt: (promptId: string, reply: PromptReply) =>

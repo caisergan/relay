@@ -4,14 +4,15 @@ A lightweight, cross-platform file-transfer client for macOS and Windows, with a
 engine behind a custom-designed interface. The first release focuses on dependable
 SFTP; FTP/FTPS and richer editing tools follow after that release.
 
-> **Status: Phase 0 in progress.** The workspace, the engine contract, typed IPC with
-> snapshot recovery, and the design foundation are in and green. **The SFTP
-> compatibility prototypes now pass against real OpenSSH** — password, key, encrypted
-> key and agent auth; host-key rejection and rotation; two channels transferring while
-> a third browses; bounded cancellation; and a resumed download that hashes identically
-> to its source. Still unrun: FTPS, the OS keychains, and the Windows named-pipe agent.
-> [ADR 004](docs/adr/004-protocol-compatibility.md) has the numbers and the open gates;
-> believe it over this paragraph.
+> **Status: Phase 1 in progress.** Phase 0 is done and the mock engine is gone.
+> Relay now opens **real SFTP sessions**: a session actor per connection, host keys
+> checked inside the handshake against a pinned trust store, an auth ladder over
+> agent / key file / password, browsing, file operations, and transfers on their own
+> channels with bounded cancellation. Fourteen integration tests run the backend
+> against a real OpenSSH server on every push. Still unrun: the OS keychains on the
+> machines that ship, FTPS, and the Windows named-pipe agent.
+> [ADR 004](docs/adr/004-protocol-compatibility.md) has the numbers and the open
+> gates; believe it over this paragraph.
 
 ## Shape of the thing
 
@@ -68,10 +69,11 @@ pnpm test                    # frontend unit tests
 pnpm gen:ipc                 # regenerate src/ipc/gen.ts from the Rust types
 pnpm tauri dev               # the app — needs a macOS or Windows machine
 
-# The phase 0 SFTP prototypes, against a real OpenSSH server in Docker:
+# Against a real OpenSSH server in Docker. `sftp_prototype` tests the library
+# (phase 0); `sftp_integration` tests Relay's own backend (phase 1).
 ./scripts/sftp-fixture.sh up > target/sftp-fixture/env.sh
 set -a; . target/sftp-fixture/env.sh; set +a
-cargo test -p relay-core --features integration --test sftp_prototype -- --test-threads=1
+cargo test -p relay-core --features integration -- --test-threads=1
 ./scripts/sftp-fixture.sh down
 ```
 

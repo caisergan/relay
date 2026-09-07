@@ -13,11 +13,13 @@
 //! - [`events`] / [`coordinator`] — the ordered update stream and the authoritative
 //!   projection behind snapshot recovery.
 //! - [`hub`] — the front door: takes a `tokio::runtime::Handle`, owns the pump.
+//! - [`engine`] — the command surface the shell calls.
+//! - [`session`] — one actor per connection; [`sftp`] is the backend behind it.
 //! - [`mock`] — an in-memory backend for tests and frontend development.
 
 pub mod bindings;
 pub mod coordinator;
-pub mod demo;
+pub mod engine;
 pub mod error;
 pub mod events;
 pub mod hub;
@@ -28,6 +30,7 @@ pub mod mock;
 pub mod model;
 pub mod protocol;
 pub mod secrets;
+pub mod servers;
 pub mod session;
 pub mod settings;
 pub mod sftp;
@@ -35,6 +38,7 @@ pub mod trust;
 pub mod wire;
 
 pub use coordinator::{Coordinator, EngineEnvelope, EngineSnapshot, Subscription};
+pub use engine::{Engine, EnginePaths};
 pub use error::{EngineError, Result};
 pub use events::EngineEvent;
 pub use hub::EngineHub;

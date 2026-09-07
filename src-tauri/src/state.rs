@@ -4,23 +4,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use relay_core::demo::DemoEngine;
+use relay_core::engine::{Engine, EnginePaths};
 use relay_core::hub::EngineHub;
-use relay_core::model::{ServerConfig, ServerId};
-use relay_core::settings::Settings;
+use tauri::Manager;
 use tauri::async_runtime::JoinHandle;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 pub struct AppState {
     pub hub: Arc<EngineHub>,
-    /// Phase 0's engine. Phase 1 swaps this for the session manager; the command
-    /// surface above it stays the same, which is the point of the exercise.
-    pub engine: Arc<DemoEngine>,
-    /// Saved servers. Phase 1 persists these to `servers.json` alongside the trust
-    /// store — never with secrets, which live in the OS keychain.
-    pub servers: RwLock<Vec<ServerConfig>>,
-    pub settings: RwLock<Settings>,
+    /// The engine. Phase 0's mock-backed stand-in is gone: this opens real sessions.
+    pub engine: Arc<Engine>,
     /// Forwarder task per subscription, so unsubscribing actually stops the work.
     /// Tauri's `JoinHandle`, not tokio's: they are distinct types and the shell spawns
     /// through Tauri's runtime.
@@ -31,29 +25,19 @@ impl AppState {
     /// Starts the engine. Named `start` rather than `new` because it spawns the pump
     /// and needs a live Tauri async runtime — a `Default` that panics off-runtime
     /// would be worse than an honest name.
-    pub fn start() -> Self {
+    pub fn start(app: &tauri::AppHandle) -> Self {
         let rt = tauri::async_runtime::handle().inner().clone();
         let hub = EngineHub::start(&rt);
-        let engine = Arc::new(DemoEngine::new(Arc::clone(&hub), rt));
+        let engine = Arc::new(Engine::new(Arc::clone(&hub), rt, paths(app)));
         Self {
             hub,
             engine,
-            servers: RwLock::new(demo_servers()),
-            settings: RwLock::new(Settings::default()),
             forwarders: RwLock::new(HashMap::new()),
         }
     }
 
-    pub async fn server(&self, id: ServerId) -> Option<ServerConfig> {
-        self.servers
-            .read()
-            .await
-            .iter()
-            .find(|s| s.id == id)
-            .cloned()
-    }
-
-    /// Stop every forwarder and let the engine drain. Called on window close.
+    /// Stop every forwarder, close every session, and let the engine drain. Called on
+    /// window close, before the process goes away.
     pub async fn shutdown(&self) {
         let handles: Vec<JoinHandle<()>> = self
             .forwarders
@@ -65,45 +49,22 @@ impl AppState {
         for handle in handles {
             handle.abort();
         }
-        self.hub.shutdown().await;
+        self.engine.shutdown().await;
     }
 }
 
-/// Two servers so the sidebar, the tabs, and the connect flow all have something to
-/// render before any real credentials exist.
-fn demo_servers() -> Vec<ServerConfig> {
-    use relay_core::model::{AuthMethod, Proto};
-    vec![
-        ServerConfig {
-            id: Uuid::new_v4(),
-            name: "staging".into(),
-            host: "staging.example".into(),
-            port: 22,
-            proto: Proto::Sftp,
-            username: "deploy".into(),
-            auth: AuthMethod::Agent,
-            color: Some("#2456E6".into()),
-            group: Some("Work".into()),
-            bookmarks: vec![relay_core::model::Bookmark {
-                label: "Web root".into(),
-                remote_path: "/var/www".into(),
-            }],
-            initial_remote_path: Some("/var/www".into()),
-        },
-        ServerConfig {
-            id: Uuid::new_v4(),
-            name: "backups".into(),
-            host: "backups.example".into(),
-            port: 2222,
-            proto: Proto::Sftp,
-            username: "root".into(),
-            auth: AuthMethod::KeyFile {
-                path: "~/.ssh/id_ed25519".into(),
-            },
-            color: Some("#2E9E5B".into()),
-            group: Some("Work".into()),
-            bookmarks: Vec::new(),
-            initial_remote_path: Some("/home/deploy".into()),
-        },
-    ]
+/// Where the server list and the trust store live.
+///
+/// Falling back to the current directory is deliberate over refusing to start: a
+/// missing app-data directory is an unusual environment, not a reason to make the app
+/// unusable. Both stores tolerate a path they cannot write, and say so in the log.
+fn paths(app: &tauri::AppHandle) -> EnginePaths {
+    let dir = app.path().app_data_dir().unwrap_or_else(|err| {
+        tracing::warn!(%err, "no app data directory; falling back to the working directory");
+        std::path::PathBuf::from(".")
+    });
+    EnginePaths {
+        servers: dir.join("servers.json"),
+        trust: dir.join("trust.json"),
+    }
 }

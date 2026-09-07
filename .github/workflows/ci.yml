@@ -55,10 +55,12 @@ jobs:
       - name: Fail if `pnpm gen:ipc` was not run
         run: git diff --exit-code -- src/ipc/gen.ts
 
-  # The §0.6 prototypes: russh against real OpenSSH. They test the library, not our
-  # engine, and they are the reason phase 1 is allowed to start.
+  # Two suites against the same real OpenSSH server. The §0.6 prototypes test the
+  # library — they are the reason phase 1 was allowed to start — and the phase 1
+  # suite tests Relay's own backend: the auth ladder, trust decisions inside the
+  # handshake, the transfer lanes, and finalisation.
   sftp-prototypes:
-    name: SFTP compatibility prototypes
+    name: SFTP against real OpenSSH
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -67,11 +69,21 @@ jobs:
         with:
           workspaces: . -> target
 
-      - name: Run the prototypes against real OpenSSH
+      - name: Start the fixture
+        run: ./scripts/sftp-fixture.sh up > /dev/null
+
+      # Serial on purpose: one test rotates the server's host key, which every other
+      # connection would see.
+      - name: Phase 0 prototypes (the library)
         run: |
-          ./scripts/sftp-fixture.sh up > /dev/null
           eval "$(./scripts/sftp-fixture.sh env)"
           cargo test -p relay-core --features integration --test sftp_prototype \
+            -- --test-threads=1 --nocapture
+
+      - name: Phase 1 backend (our code)
+        run: |
+          eval "$(./scripts/sftp-fixture.sh env)"
+          cargo test -p relay-core --features integration --test sftp_integration \
             -- --test-threads=1 --nocapture
 
       - name: Stop the fixture

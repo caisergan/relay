@@ -25,7 +25,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
-            app.manage(AppState::start());
+            app.manage(AppState::start(app.handle()));
 
             // The window is created hidden so the first paint is themed rather than a
             // white flash; the frontend reveals it once tokens are applied.
@@ -39,8 +39,12 @@ pub fn run() {
             commands::servers_save,
             commands::servers_delete,
             commands::session_open,
+            commands::session_test,
             commands::session_close,
             commands::session_list_dir,
+            commands::session_mkdir,
+            commands::session_rename,
+            commands::session_remove,
             commands::session_logs,
             commands::local_list_dir,
             commands::local_default_dir,

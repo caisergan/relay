@@ -13,7 +13,7 @@
 //!   A transfer parked on an unanswered conflict sheet would otherwise never finish.
 //! - The join is awaited with a grace period; aborting is the fallback, not the plan.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -91,6 +91,12 @@ pub enum SessionCmd {
     },
     /// Fire and forget: the job's life is told entirely in `JobUpdate` events.
     Transfer(Box<TransferOrder>),
+    /// Stop one transfer. The actor owns its jobs' cancellation tokens, so nothing
+    /// outside it has to keep a parallel map that could disagree.
+    CancelJob {
+        job: JobId,
+        reply: oneshot::Sender<Result<()>>,
+    },
     Disconnect,
 }
 
@@ -113,7 +119,7 @@ pub struct TransferOrder {
 /// Sent by a transfer task back to its actor. Keeps lane accounting in one place
 /// rather than behind a shared counter nobody owns.
 enum Internal {
-    LaneFinished,
+    LaneFinished(JobId),
 }
 
 /// Everything the actor needs that is not the connection itself.
@@ -156,6 +162,7 @@ impl SessionHandle {
             max_lanes: MAX_ADHOC_LANES,
             in_flight: 0,
             pending: VecDeque::new(),
+            running: HashMap::new(),
         };
         let join = ctx.rt.spawn(actor.run(cfg, ctx.secrets, cmd_rx));
 
@@ -238,6 +245,11 @@ impl SessionHandle {
         .await
     }
 
+    pub async fn cancel_job(&self, job: JobId) -> Result<()> {
+        self.call(|reply| SessionCmd::CancelJob { job, reply })
+            .await
+    }
+
     pub async fn transfer(&self, order: TransferOrder) -> Result<()> {
         self.cmd
             .send(SessionCmd::Transfer(Box::new(order)))
@@ -257,8 +269,12 @@ impl SessionHandle {
 
         let handle = self.join.lock().expect("session join poisoned").take();
         let Some(handle) = handle else { return };
+        // Abort is the fallback, not the plan: cancellation reaches into in-flight
+        // operations, so a session that still has not stopped is one that cannot.
+        let aborter = handle.abort_handle();
         if tokio::time::timeout(CLOSE_GRACE, handle).await.is_err() {
-            tracing::warn!(session = %self.id, "session did not stop within the grace period");
+            tracing::warn!(session = %self.id, "session did not stop in time; aborting it");
+            aborter.abort();
         }
     }
 
@@ -272,21 +288,32 @@ fn closed() -> EngineError {
     EngineError::protocol("the session is closed")
 }
 
-/// The deadline every remote operation gets.
+/// The deadline and the cancellation every remote operation gets.
 ///
 /// A free function, not a method: the actor owns the backend exclusively, so
-/// `self.op(self.backend.list(..))` would borrow `self` twice.
+/// `self.op(self.backend.list(..))` would borrow `self` twice — hence the token
+/// arriving as a separate argument rather than through `&self`.
+///
+/// Cancellation matters as much as the deadline here. Without it a listing that a
+/// server accepted and never answered would hold the actor's loop for the whole
+/// deadline, so closing the tab would wait too, and the caller would sit on a reply
+/// channel belonging to a session that is already gone.
 async fn with_deadline<T>(
     fut: impl std::future::Future<Output = Result<T>>,
     name: &str,
     deadline: Duration,
+    cancel: &CancellationToken,
 ) -> Result<T> {
-    match tokio::time::timeout(deadline, fut).await {
-        Ok(result) => result,
-        Err(_) => Err(EngineError::Timeout {
-            operation: name.to_string(),
-            after_secs: deadline.as_secs() as u32,
-        }),
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(EngineError::Cancelled),
+        result = tokio::time::timeout(deadline, fut) => match result {
+            Ok(result) => result,
+            Err(_) => Err(EngineError::Timeout {
+                operation: name.to_string(),
+                after_secs: deadline.as_secs() as u32,
+            }),
+        },
     }
 }
 
@@ -382,6 +409,9 @@ struct SessionActor {
     max_lanes: u8,
     in_flight: u8,
     pending: VecDeque<Box<TransferOrder>>,
+    /// Cancellation tokens for the transfers this session is running, so `CancelJob`
+    /// reaches the right one without a second map living somewhere else.
+    running: HashMap<JobId, CancellationToken>,
 }
 
 impl SessionActor {
@@ -455,7 +485,10 @@ impl SessionActor {
             .await;
 
         // The landing directory, so a fresh tab is not empty while the user waits.
-        if let Ok(entries) = with_deadline(self.backend.list(&home), "list", OP_DEADLINE).await {
+        let cancel = self.cancel.clone();
+        if let Ok(entries) =
+            with_deadline(self.backend.list(&home), "list", OP_DEADLINE, &cancel).await
+        {
             self.out.listing(&home, entries).await;
         }
 
@@ -467,7 +500,8 @@ impl SessionActor {
             tokio::select! {
                 biased;
                 _ = self.cancel.cancelled() => break,
-                Some(Internal::LaneFinished) = internal_rx.recv() => {
+                Some(Internal::LaneFinished(job)) = internal_rx.recv() => {
+                    self.running.remove(&job);
                     self.in_flight = self.in_flight.saturating_sub(1);
                     if let Some(next) = self.pending.pop_front() {
                         self.start_transfer(next, &internal_tx).await;
@@ -502,9 +536,11 @@ impl SessionActor {
         cmd: SessionCmd,
         internal_tx: &mpsc::Sender<Internal>,
     ) -> ControlFlow<()> {
+        let cancel = self.cancel.clone();
         match cmd {
             SessionCmd::List { path, reply } => {
-                let out = with_deadline(self.backend.list(&path), "list", OP_DEADLINE).await;
+                let out =
+                    with_deadline(self.backend.list(&path), "list", OP_DEADLINE, &cancel).await;
                 if let Ok(entries) = &out {
                     self.out.listing(&path, entries.clone()).await;
                 }
@@ -513,21 +549,28 @@ impl SessionActor {
                 flow
             }
             SessionCmd::Stat { path, reply } => {
-                let out = with_deadline(self.backend.stat(&path), "stat", OP_DEADLINE).await;
+                let out =
+                    with_deadline(self.backend.stat(&path), "stat", OP_DEADLINE, &cancel).await;
                 let flow = self.check_fatal(&out).await;
                 let _ = reply.send(out);
                 flow
             }
             SessionCmd::Mkdir { path, reply } => {
-                let out = with_deadline(self.backend.mkdir(&path), "mkdir", OP_DEADLINE).await;
+                let out =
+                    with_deadline(self.backend.mkdir(&path), "mkdir", OP_DEADLINE, &cancel).await;
                 self.out.audit(&out, format!("Created {path}")).await;
                 let flow = self.check_fatal(&out).await;
                 let _ = reply.send(out);
                 flow
             }
             SessionCmd::Rename { from, to, reply } => {
-                let out =
-                    with_deadline(self.backend.rename(&from, &to), "rename", OP_DEADLINE).await;
+                let out = with_deadline(
+                    self.backend.rename(&from, &to),
+                    "rename",
+                    OP_DEADLINE,
+                    &cancel,
+                )
+                .await;
                 self.out
                     .audit(&out, format!("Renamed {from} to {to}"))
                     .await;
@@ -536,24 +579,39 @@ impl SessionActor {
                 flow
             }
             SessionCmd::RemoveFile { path, reply } => {
-                let out =
-                    with_deadline(self.backend.remove_file(&path), "delete", OP_DEADLINE).await;
+                let out = with_deadline(
+                    self.backend.remove_file(&path),
+                    "delete",
+                    OP_DEADLINE,
+                    &cancel,
+                )
+                .await;
                 self.out.audit(&out, format!("Deleted {path}")).await;
                 let flow = self.check_fatal(&out).await;
                 let _ = reply.send(out);
                 flow
             }
             SessionCmd::RemoveDir { path, reply } => {
-                let out =
-                    with_deadline(self.backend.remove_dir(&path), "delete", OP_DEADLINE).await;
+                let out = with_deadline(
+                    self.backend.remove_dir(&path),
+                    "delete",
+                    OP_DEADLINE,
+                    &cancel,
+                )
+                .await;
                 self.out.audit(&out, format!("Deleted {path}")).await;
                 let flow = self.check_fatal(&out).await;
                 let _ = reply.send(out);
                 flow
             }
             SessionCmd::ReadFile { path, max, reply } => {
-                let out =
-                    with_deadline(self.backend.read_file(&path, max), "read", OP_DEADLINE).await;
+                let out = with_deadline(
+                    self.backend.read_file(&path, max),
+                    "read",
+                    OP_DEADLINE,
+                    &cancel,
+                )
+                .await;
                 let flow = self.check_fatal(&out).await;
                 let _ = reply.send(out);
                 flow
@@ -567,9 +625,33 @@ impl SessionActor {
                 }
                 ControlFlow::Continue(())
             }
+            SessionCmd::CancelJob { job, reply } => {
+                let _ = reply.send(self.cancel_job(job).await);
+                ControlFlow::Continue(())
+            }
             // The run loop takes this one before it reaches here.
             SessionCmd::Disconnect => ControlFlow::Break(()),
         }
+    }
+
+    /// Cancel one job, whether it is moving bytes or still waiting for a lane.
+    ///
+    /// A queued order has no task to interrupt, so it is dropped here and reported as
+    /// cancelled directly — otherwise it would start later and surprise the person who
+    /// already told it to stop.
+    async fn cancel_job(&mut self, job: JobId) -> Result<()> {
+        if let Some(token) = self.running.get(&job) {
+            token.cancel();
+            return Ok(());
+        }
+        if let Some(index) = self.pending.iter().position(|o| o.job == job) {
+            let order = self.pending.remove(index).expect("index from position");
+            self.out.job(&order, JobState::Cancelled, Bytes::ZERO).await;
+            return Ok(());
+        }
+        Err(EngineError::NotFound {
+            path: job.to_string(),
+        })
     }
 
     /// A network failure means the connection is gone. Anything else is one operation
@@ -588,7 +670,15 @@ impl SessionActor {
 
     async fn keepalive(&mut self) -> ControlFlow<()> {
         let started = Instant::now();
-        match with_deadline(self.backend.noop(), "keepalive", KEEPALIVE_DEADLINE).await {
+        let cancel = self.cancel.clone();
+        match with_deadline(
+            self.backend.noop(),
+            "keepalive",
+            KEEPALIVE_DEADLINE,
+            &cancel,
+        )
+        .await
+        {
             Ok(()) => {
                 let ms = started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
                 self.out
@@ -621,11 +711,17 @@ impl SessionActor {
     ) {
         self.out.job(&order, JobState::Preparing, Bytes::ZERO).await;
 
+        let cancel = self.cancel.clone();
         let destination = match order.direction {
             Direction::Down => local_facts(&order.local_path).await,
             Direction::Up => {
-                let stat =
-                    with_deadline(self.backend.stat(&order.remote_path), "stat", OP_DEADLINE).await;
+                let stat = with_deadline(
+                    self.backend.stat(&order.remote_path),
+                    "stat",
+                    OP_DEADLINE,
+                    &cancel,
+                )
+                .await;
                 match stat {
                     Ok(entry) => entry.map(|e| remote_facts(&order.remote_path, &e)),
                     Err(err) => {
@@ -644,6 +740,10 @@ impl SessionActor {
             }
         };
 
+        // A child of the session token, so closing the tab stops every transfer on it
+        // without the engine having to enumerate them.
+        let cancel = self.cancel.child_token();
+        self.running.insert(order.job, cancel.clone());
         self.in_flight += 1;
         self.rt.spawn(run_transfer(TransferTask {
             session: self.id,
@@ -652,7 +752,7 @@ impl SessionActor {
             lane,
             events: self.out.events.clone(),
             interact: Arc::clone(&self.interact),
-            cancel: self.cancel.child_token(),
+            cancel,
             done: internal_tx.clone(),
         }));
     }
@@ -703,7 +803,7 @@ async fn run_transfer(task: TransferTask) {
         )
         .await;
         lane.close().await;
-        let _ = done.send(Internal::LaneFinished).await;
+        let _ = done.send(Internal::LaneFinished(order.job)).await;
         return;
     }
 
@@ -769,7 +869,7 @@ async fn run_transfer(task: TransferTask) {
         snapshot_for(session, &order, state, transferred, None, Some(started_at)),
     )
     .await;
-    let _ = done.send(Internal::LaneFinished).await;
+    let _ = done.send(Internal::LaneFinished(order.job)).await;
 }
 
 struct Conflict<'a> {

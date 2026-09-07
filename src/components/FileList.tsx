@@ -22,6 +22,11 @@ interface Props {
   actionLabel: string
   onOpen: (row: FileRow) => void
   onAction: (row: FileRow) => void
+  /** Remote pane only. F2 and the row's rename affordance. */
+  onRename?: (row: FileRow) => void
+  /** Remote pane only. Delete and Backspace both reach it, because both keys mean
+   * "remove this" depending on which keyboard someone learned. */
+  onDelete?: (row: FileRow) => void
   showPerms?: boolean
 }
 
@@ -36,6 +41,8 @@ export function FileList({
   actionLabel,
   onOpen,
   onAction,
+  onRename,
+  onDelete,
   showPerms = false,
 }: Props) {
   const parentRef = useRef<HTMLDivElement>(null)
@@ -92,6 +99,14 @@ export function FileList({
               role="row"
               onKeyDown={(e) => {
                 if (e.key === 'Enter') onOpen(row)
+                if (e.key === 'F2' && onRename) {
+                  e.preventDefault()
+                  onRename(row)
+                }
+                if ((e.key === 'Delete' || e.key === 'Backspace') && onDelete) {
+                  e.preventDefault()
+                  onDelete(row)
+                }
               }}
             >
               <span aria-hidden style={{ width: 14 }}>
@@ -112,6 +127,32 @@ export function FileList({
               </span>
               <span className="row__meta row__when">{formatWhen(row.modified)}</span>
               {showPerms && <span className="row__meta row__perms">{row.perms ?? '—'}</span>}
+              {onRename && (
+                <button
+                  className="row__action"
+                  title={`Rename ${row.name} (F2)`}
+                  aria-label={`Rename ${row.name}`}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onRename(row)
+                  }}
+                >
+                  ✎
+                </button>
+              )}
+              {onDelete && (
+                <button
+                  className="row__action row__action--danger"
+                  title={`Delete ${row.name}`}
+                  aria-label={`Delete ${row.name}`}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onDelete(row)
+                  }}
+                >
+                  ␡
+                </button>
+              )}
             </div>
           )
         })}

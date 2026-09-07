@@ -1,6 +1,7 @@
 # ADR 004 — Protocol stack, and what the compatibility gates actually showed
 
-**Status:** SFTP gates **passed** on Linux against real OpenSSH (2026-09-07).
+**Status:** SFTP gates **passed** on Linux against real OpenSSH (2026-09-07), and
+phase 1's backend now passes its own suite against the same fixture.
 FTP/FTPS, OS keychains, and the Windows agent remain **unrun**. Read the two halves of
 this document separately: the first is measured, the second is not.
 
@@ -122,6 +123,31 @@ says nothing about behaviour at 50 ms RTT. Re-measure with injected latency
 (`--cap-add=NET_ADMIN` plus `tc netem` in the fixture container) before choosing a
 default or deciding whether request pipelining is needed.
 
+## Phase 1: the same fixture, our own backend
+
+The prototypes above answer *can `russh` do this*. `tests/sftp_integration.rs` answers
+*does Relay's backend do it*, against the same container, and runs in CI beside them.
+Fourteen tests, all passing (2026-09-07):
+
+| What it establishes | How |
+|---|---|
+| Password, key-file and encrypted-key auth work through the configured ladder | Connect with each `AuthMethod`; the encrypted key asserts the passphrase came from the secret source and opened **no** second sheet |
+| A wrong password fails as `Auth` and never echoes the credential | Asserts the error string does not contain the password that was tried |
+| Declining a host key is `TrustRejected`, not a network fault | Counts prompts (exactly one) and matches the variant |
+| Pinning works, and a pinned key is silent | First connect asks once and stores a `SHA256:…` fingerprint; the second asks **zero** times |
+| Listings carry what the pane renders | Real size, real mtime, a nine-character `rw-…` string; `.` and `..` filtered; directories sorted first |
+| A missing path is `NotFound`, and `stat` reports absence as `None` | Both, separately — the pane needs to distinguish "gone" from "broken" |
+| `read_file` refuses to pull a large file into memory | 1 MiB under a 2 MiB cap succeeds; the same file under a 64 KiB cap is refused |
+| A download is byte-identical, with monotonic progress and no leftovers | SHA-256 against the host's copy; a progress recorder counts regressions (zero) and the directory is checked for `.relaypart` files |
+| Cancellation is bounded and touches only its own partial | **4.9 ms**, with the pre-existing destination file unchanged and no partial left |
+| An upload finalises atomically and can replace an existing file | Uploads to a fresh path, then over it; the second needs `posix-rename@openssh.com`, and the digest proves the replacement |
+| Two lanes transfer while the browse channel keeps listing | 2 × 32 MiB downloading; **worst listing 90 ms** across ten listings |
+| mkdir / rename / delete round-trip | Each step asserted through `stat` rather than assumed |
+
+Cancellation at 4.9 ms is much faster than the prototype's 1.28 ms measurement was
+generous about, and the 90 ms worst listing is in line with phase 0's 94.7 ms — both
+on loopback, so both are lower bounds, not promises.
+
 ## Still open
 
 | Gate | Why it is not answered |
@@ -130,7 +156,7 @@ default or deciding whether request pipelining is needed.
 | Anything else Windows | The Windows CI leg is currently disabled. `src-tauri` compiled and passed clippy there once (run 34123068160); nothing re-checks it now |
 | OS secrets — Keychain and Credential Manager | `keyring` compiles and nothing more. Write/read/delete and denied-store behaviour on both platforms are untested |
 | Throughput under realistic latency | Loopback only |
-| Keyboard-interactive success path | Needs a server configured to require it |
+| Keyboard-interactive success path | Needs a server configured to require it. The fallback is implemented and reached after a password rejection, but the fixture's sshd never completes it |
 | FTPS session reuse | Not run |
 | FTPS certificate interaction | Not run |
 

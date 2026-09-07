@@ -109,16 +109,27 @@ function PromptSheet({ request }: { request: PromptRequest }) {
               {prompt.remote.path} — {formatBytes(prompt.remote.size)} ·{' '}
               {formatWhen(prompt.remote.modified)}
             </p>
+            {/* Overwrite and Skip only. Keep-both and resume arrive with the phase 2
+                queue, and a button that always returns "unsupported" is worse than a
+                button that is not there. `resumeAllowed` is the engine's signal for
+                when that changes. */}
             <div className="sheet__actions">
-              {(['skip', 'keepBoth', 'overwrite'] as const).map((action) => (
-                <button
-                  key={action}
-                  className={`btn${action === 'overwrite' ? ' btn--primary' : ''}`}
-                  onClick={() => answer({ kind: 'conflict', action, applyToRemaining: false })}
-                >
-                  {action === 'keepBoth' ? 'Keep both' : action}
-                </button>
-              ))}
+              <button
+                className="btn"
+                onClick={() =>
+                  answer({ kind: 'conflict', action: 'skip', applyToRemaining: false })
+                }
+              >
+                Skip
+              </button>
+              <button
+                className="btn btn--primary"
+                onClick={() =>
+                  answer({ kind: 'conflict', action: 'overwrite', applyToRemaining: false })
+                }
+              >
+                Overwrite
+              </button>
               {prompt.resumeAllowed && (
                 <button
                   className="btn"
