@@ -17,6 +17,7 @@ use relay_core::job::{JobState, QueueOp};
 use relay_core::mock::{MockFactory, MockFs, MockOptions, NoSecrets};
 use relay_core::model::{AuthMethod, Direction, Proto, ServerConfig, SessionId, SessionState};
 use relay_core::servers::ServerStore;
+use relay_core::settings::SettingsStore;
 use relay_core::store::QueueStore;
 use relay_core::{EngineSnapshot, Subscription};
 use uuid::Uuid;
@@ -57,6 +58,7 @@ async fn harness(opts: MockOptions) -> Harness {
             Arc::new(NoSecrets),
             Arc::new(ServerStore::ephemeral()),
             QueueStore::in_memory().await.expect("an in-memory queue"),
+            Arc::new(SettingsStore::ephemeral()),
         )
         .await
         .expect("the engine starts"),

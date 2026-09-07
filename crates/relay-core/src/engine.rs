@@ -28,7 +28,7 @@ use crate::scheduler::{Dispatcher, RunRequest, Scheduler, SchedulerContext};
 use crate::secrets::{Credentials, KeyringSecrets, Overlay};
 use crate::servers::ServerStore;
 use crate::session::{SessionContext, SessionHandle};
-use crate::settings::Settings;
+use crate::settings::{Settings, SettingsStore};
 use crate::sftp::SftpBackend;
 use crate::store::QueueStore;
 use crate::trust::TrustStore;
@@ -85,6 +85,7 @@ pub struct EnginePaths {
     pub servers: PathBuf,
     pub trust: PathBuf,
     pub queue: PathBuf,
+    pub settings: PathBuf,
 }
 
 /// The sessions, shared by the engine that opens them and the scheduler that
@@ -145,7 +146,7 @@ pub struct Engine {
     servers: Arc<ServerStore>,
     sessions: SessionRegistry,
     queue: Scheduler,
-    settings: Mutex<Settings>,
+    settings: Arc<SettingsStore>,
 }
 
 impl Engine {
@@ -164,6 +165,7 @@ impl Engine {
             Arc::new(KeyringSecrets::new()),
             Arc::new(ServerStore::load(paths.servers)),
             QueueStore::open(paths.queue).await?,
+            Arc::new(SettingsStore::load(paths.settings)),
         )
         .await
     }
@@ -175,8 +177,9 @@ impl Engine {
         secrets: Arc<dyn SecretSource>,
         servers: Arc<ServerStore>,
         store: QueueStore,
+        settings: Arc<SettingsStore>,
     ) -> Result<Self> {
-        let settings = Settings::default();
+        let concurrency = settings.get().concurrency;
         let sessions = SessionRegistry::default();
         // The scheduler starts before any session, because a session announces itself
         // ready as soon as it connects and has to have somewhere to announce it to.
@@ -185,7 +188,7 @@ impl Engine {
             events: hub.events(),
             dispatcher: Arc::new(sessions.clone()) as Arc<dyn Dispatcher>,
             rt: rt.clone(),
-            concurrency: settings.concurrency,
+            concurrency,
         })
         .await?;
         Ok(Self {
@@ -196,7 +199,7 @@ impl Engine {
             servers,
             sessions,
             queue,
-            settings: Mutex::new(settings),
+            settings,
         })
     }
 
@@ -210,15 +213,15 @@ impl Engine {
     }
 
     pub fn settings(&self) -> Settings {
-        self.settings.lock().expect("settings poisoned").clone()
+        self.settings.get()
     }
 
-    pub async fn set_settings(&self, settings: Settings) -> Settings {
-        let normalised = settings.normalised();
-        *self.settings.lock().expect("settings poisoned") = normalised.clone();
+    /// Store, persist, and apply. Returns what was actually stored after clamping.
+    pub async fn set_settings(&self, settings: Settings) -> Result<Settings> {
+        let stored = self.settings.set(settings)?;
         // The slider is only a setting if it reaches work already running.
-        self.queue.set_concurrency(normalised.concurrency).await;
-        normalised
+        self.queue.set_concurrency(stored.concurrency).await;
+        Ok(stored)
     }
 
     // ------------------------------------------------------------ sessions

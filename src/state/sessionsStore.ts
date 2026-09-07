@@ -57,6 +57,19 @@ const emptyPane: PaneState = {
   remoteSelected: null,
 }
 
+/** A pane as a new session gets one, with the saved dotfile preference applied.
+ *
+ * Takes the state it reads from rather than closing over a module variable: the value
+ * lives in the store so a test resets it the way it resets everything else, and so two
+ * tests in one file cannot leave it set for each other. */
+function freshPane(state: Pick<SessionsState, 'showHiddenDefault'>): PaneState {
+  return {
+    ...emptyPane,
+    localShowHidden: state.showHiddenDefault,
+    remoteShowHidden: state.showHiddenDefault,
+  }
+}
+
 interface SessionsState {
   sessions: Record<string, Session>
   /** Tab order, which the engine does not care about. */
@@ -64,6 +77,9 @@ interface SessionsState {
   activeId: string | null
   listings: Record<string, ListingSnapshot>
   panes: Record<string, PaneState>
+  /** The dotfile setting, applied to panes opened from now on. A pane already on
+   * screen keeps its own toggle: that is the person's more recent word about it. */
+  showHiddenDefault: boolean
 
   replaceAll: (sessions: Session[], listings: ListingSnapshot[]) => void
   upsert: (session: Session) => void
@@ -72,6 +88,7 @@ interface SessionsState {
   setListing: (listing: ListingSnapshot) => void
   remove: (id: string) => void
   activate: (id: string | null) => void
+  setShowHiddenDefault: (show: boolean) => void
   patchPane: (id: string, patch: Partial<PaneState>) => void
 }
 
@@ -81,6 +98,9 @@ export const useSessionsStore = create<SessionsState>((set) => ({
   activeId: null,
   listings: {},
   panes: {},
+  showHiddenDefault: true,
+
+  setShowHiddenDefault: (showHiddenDefault) => set({ showHiddenDefault }),
 
   replaceAll: (sessions, listings) =>
     set((s) => {
@@ -94,7 +114,7 @@ export const useSessionsStore = create<SessionsState>((set) => ({
         order,
         activeId: s.activeId && order.includes(s.activeId) ? s.activeId : (order[0] ?? null),
         listings: Object.fromEntries(listings.map((l) => [l.session, l])),
-        panes: Object.fromEntries(order.map((id) => [id, s.panes[id] ?? emptyPane])),
+        panes: Object.fromEntries(order.map((id) => [id, s.panes[id] ?? freshPane(s)])),
       }
     }),
 
@@ -103,7 +123,7 @@ export const useSessionsStore = create<SessionsState>((set) => ({
       sessions: { ...s.sessions, [session.id]: session },
       order: s.order.includes(session.id) ? s.order : [...s.order, session.id],
       activeId: s.activeId ?? session.id,
-      panes: { ...s.panes, [session.id]: s.panes[session.id] ?? emptyPane },
+      panes: { ...s.panes, [session.id]: s.panes[session.id] ?? freshPane(s) },
     })),
 
   setState: (id, state) =>

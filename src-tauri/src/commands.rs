@@ -235,7 +235,7 @@ pub async fn settings_get(state: State<'_, AppState>) -> Result<Settings> {
 
 #[tauri::command]
 pub async fn settings_set(state: State<'_, AppState>, settings: Settings) -> Result<Settings> {
-    Ok(state.engine.set_settings(settings).await)
+    state.engine.set_settings(settings).await
 }
 
 // ---------------------------------------------------------------- engine stream

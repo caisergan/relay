@@ -5,6 +5,7 @@ import { faultText } from '@/lib/errors'
 import { PromptSheets } from '@/components/PromptSheets'
 import { QueueDrawer } from '@/components/QueueDrawer'
 import { SessionView } from '@/components/SessionView'
+import { SettingsSheet } from '@/components/SettingsSheet'
 import { Sidebar } from '@/components/Sidebar'
 import { TitleBar } from '@/components/TitleBar'
 import { Toasts } from '@/components/Toasts'
@@ -29,13 +30,31 @@ export function App() {
   const toggleDrawer = useUiStore((s) => s.toggleDrawer)
   const toast = useUiStore((s) => s.toast)
 
+  const setTheme = useUiStore((s) => s.setTheme)
+  const setDensity = useUiStore((s) => s.setDensity)
+  const setShowHiddenDefault = useSessionsStore((s) => s.setShowHiddenDefault)
+
   useEffect(() => {
     void engineBridge.start()
     void loadServers()
+    // Rust holds the saved settings; the UI store is a projection of them. Without
+    // this the window would open in whatever the store's defaults are and only pick up
+    // the person's theme when they opened the settings sheet.
+    commands
+      .settingsGet()
+      .then((settings) => {
+        setTheme(settings.theme)
+        setDensity(settings.density)
+        setShowHiddenDefault(settings.showHidden)
+      })
+      .catch(() => {
+        // Defaults are already showing, and a toast about a preference nobody has set
+        // yet would be the first thing a new install said.
+      })
     return () => {
       void engineBridge.stop()
     }
-  }, [loadServers])
+  }, [loadServers, setTheme, setDensity, setShowHiddenDefault])
 
   /** Open the saved server on launch instead of the connect form.
    *
@@ -94,6 +113,7 @@ export function App() {
           <QueueDrawer />
         </div>
       </div>
+      <SettingsSheet />
       <PromptSheets />
       <Toasts />
     </div>

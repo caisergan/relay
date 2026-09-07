@@ -4,7 +4,7 @@ import { useServersStore } from '@/state/serversStore'
 import { useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
 
-import { IconClose, IconMoon, IconPlus, IconSearch, IconSun } from './Icons'
+import { IconClose, IconGear, IconMoon, IconPlus, IconSearch, IconSun } from './Icons'
 import { ServerAvatar } from './ServerAvatar'
 
 export function TitleBar() {
@@ -16,6 +16,7 @@ export function TitleBar() {
   const resolved = useUiStore((s) => s.resolved)
   const setTheme = useUiStore((s) => s.setTheme)
   const toast = useUiStore((s) => s.toast)
+  const toggleSettings = useUiStore((s) => s.toggleSettings)
 
   // The tab avatar has to be the colour chosen in the editor, not a hash of the name:
   // picking a tint and then seeing a different one on the tab makes the setting look
@@ -90,6 +91,14 @@ export function TitleBar() {
           onClick={() => setTheme(dark ? 'light' : 'dark')}
         >
           {dark ? <IconSun size={16} /> : <IconMoon size={16} />}
+        </button>
+        <button
+          className="iconbtn"
+          title="Settings"
+          aria-label="Settings"
+          onClick={() => toggleSettings()}
+        >
+          <IconGear size={16} />
         </button>
       </div>
     </div>

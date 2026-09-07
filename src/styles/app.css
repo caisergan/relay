@@ -1654,11 +1654,133 @@
   padding: 20px;
   animation: rl-sheet 0.18s ease-out;
 }
+/* Settings has more in it than a question, so it gets more room. Still capped
+   against the viewport: a sheet that runs off a laptop screen has no way back. */
+.sheet--wide {
+  width: min(640px, calc(100vw - 48px));
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+}
+.sheet__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.sheet__head .sheet__title {
+  flex: 1;
+  margin: 0;
+}
 .sheet__title {
   font-family: var(--font-display);
   font-size: 15px;
   font-weight: 600;
   margin: 0 0 6px;
+}
+
+/* ---------------------------------------------------------------- settings */
+
+.settings {
+  display: flex;
+  flex-direction: column;
+}
+/* Label and hint on the left, the control on the right, with a rule between rows.
+   A settings sheet is a list of decisions, and a list reads down one edge. */
+.settings__row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line-2);
+}
+.settings__row:last-child {
+  border-bottom: none;
+}
+.settings__label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.settings__name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.settings__hint {
+  font-size: 11px;
+  color: var(--ink-faint);
+  line-height: 1.4;
+}
+.settings__control {
+  flex: none;
+}
+.settings__slider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.settings__slider input {
+  width: 150px;
+  accent-color: var(--signal);
+}
+.settings__value {
+  width: 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink);
+  text-align: right;
+}
+.settings__path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+}
+.settings__pathtext {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* The path grows from the right, so the interesting end is the one kept. */
+  direction: rtl;
+  text-align: left;
+}
+.settings__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+
+/* A segmented control with words rather than icons: three options side by side beat a
+   dropdown that hides two of them behind a click. */
+.segmented {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+.segmented__opt {
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  color: var(--ink-dim);
+}
+.segmented__opt:hover {
+  color: var(--ink);
+}
+.segmented__opt--on {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--elev);
 }
 .sheet__body {
   color: var(--ink-soft);

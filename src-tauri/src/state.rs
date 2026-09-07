@@ -56,7 +56,7 @@ impl AppState {
     }
 }
 
-/// Where the server list, the trust store and the transfer queue live.
+/// Where the server list, the trust store, the settings and the transfer queue live.
 ///
 /// Falling back to the current directory is deliberate over refusing to start: a
 /// missing app-data directory is an unusual environment, not a reason to make the app
@@ -70,5 +70,6 @@ fn paths(app: &tauri::AppHandle) -> EnginePaths {
         servers: dir.join("servers.json"),
         trust: dir.join("trust.json"),
         queue: dir.join("relay.sqlite"),
+        settings: dir.join("settings.json"),
     }
 }

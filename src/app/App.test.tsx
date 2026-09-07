@@ -22,6 +22,14 @@ const ANSWERS: Record<string, unknown> = {
   servers_list: [],
   session_logs: [],
   secrets_status: { password: false, passphrase: false },
+  settings_get: {
+    theme: 'system',
+    density: 'comfortable',
+    concurrency: 3,
+    defaultConflict: null,
+    downloadDir: null,
+    showHidden: true,
+  },
 }
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -712,5 +720,38 @@ describe('the column headers', () => {
     act(() => modified?.click())
     expect(headers()[2]?.className).toContain('cols__label--on')
     expect(headers()[1]?.className).not.toContain('cols__label--on')
+  })
+})
+
+/// A setting that changes nothing is not a setting. The dotfile preference has to
+/// reach the panes that open after it, and leave alone the ones already on screen.
+describe('the saved settings', () => {
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: {},
+      order: [],
+      activeId: null,
+      listings: {},
+      panes: {},
+      showHiddenDefault: true,
+    })
+  })
+
+  it('applies the dotfile preference to a pane opened after it', () => {
+    useSessionsStore.getState().setShowHiddenDefault(false)
+    useSessionsStore.getState().upsert(session)
+
+    const pane = useSessionsStore.getState().panes['session-1']
+    expect(pane?.localShowHidden).toBe(false)
+    expect(pane?.remoteShowHidden).toBe(false)
+  })
+
+  it('leaves a pane already on screen with the toggle its owner set', () => {
+    useSessionsStore.getState().upsert(session)
+    useSessionsStore.getState().patchPane('session-1', { localShowHidden: true })
+
+    useSessionsStore.getState().setShowHiddenDefault(false)
+
+    expect(useSessionsStore.getState().panes['session-1']?.localShowHidden).toBe(true)
   })
 })

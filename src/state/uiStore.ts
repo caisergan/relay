@@ -19,6 +19,7 @@ interface UiState {
   drawerOpen: boolean
   drawerTab: DrawerTab
   activityOpen: boolean
+  settingsOpen: boolean
   /** Keyed by prompt id so a remount re-renders the same sheet rather than a new one. */
   prompts: Record<string, PromptRequest>
   toasts: Toast[]
@@ -38,6 +39,7 @@ interface UiState {
   toggleDrawer: (open?: boolean) => void
   setDrawerTab: (tab: DrawerTab) => void
   toggleActivity: (open?: boolean) => void
+  toggleSettings: (open?: boolean) => void
   setPrompts: (prompts: PromptRequest[]) => void
   openPrompt: (prompt: PromptRequest) => void
   closePrompt: (id: string) => void
@@ -62,6 +64,7 @@ export const useUiStore = create<UiState>((set) => ({
   drawerOpen: true,
   drawerTab: 'active',
   activityOpen: false,
+  settingsOpen: false,
   prompts: {},
   toasts: [],
   connected: false,
@@ -75,6 +78,7 @@ export const useUiStore = create<UiState>((set) => ({
   toggleDrawer: (open) => set((s) => ({ drawerOpen: open ?? !s.drawerOpen })),
   setDrawerTab: (drawerTab) => set({ drawerTab }),
   toggleActivity: (open) => set((s) => ({ activityOpen: open ?? !s.activityOpen })),
+  toggleSettings: (open) => set((s) => ({ settingsOpen: open ?? !s.settingsOpen })),
 
   setPrompts: (prompts) => set({ prompts: Object.fromEntries(prompts.map((p) => [p.id, p])) }),
   openPrompt: (prompt) => set((s) => ({ prompts: { ...s.prompts, [prompt.id]: prompt } })),
