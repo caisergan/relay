@@ -1577,7 +1577,9 @@
   grid-template-columns: 1fr auto 1fr;
   align-items: stretch;
   gap: 10px;
-  margin: 14px 0 4px;
+  /* No bottom margin: what follows is either the checkbox or the buttons, and both
+     state their own distance from the cards. */
+  margin: 14px 0 0;
 }
 .conflict__flow {
   display: flex;
@@ -1694,7 +1696,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 10px;
+  /* Clear of the cards above, because it belongs to the buttons below. */
+  margin-top: 16px;
   font-size: 12px;
   color: var(--ink-soft);
   cursor: pointer;
@@ -1869,10 +1872,29 @@
   color: var(--ink-soft);
   margin: 0 0 16px;
 }
+/* The row of buttons that ends every sheet.
+
+   The space above it is set here rather than left to whatever element happens to come
+   before, which is how it went wrong: the conflict sheet's cards ended in a 4px margin
+   and the buttons ended up tucked under the right-hand card, reading as part of it,
+   while 20px of sheet padding sat below them. With the "do this for the other N files"
+   checkbox present the gap was zero and the two shared a line.
+
+   A `margin-top` here collapses with the bottom margin of the preceding sibling rather
+   than adding to it, so this is a floor and not a tax: sheets that already leave more
+   room — the password field, the host-key fingerprint — are untouched, and the ones
+   that left too little are lifted to the same 20px that insets the sheet itself. */
 .sheet__actions {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   justify-content: flex-end;
+  margin-top: 20px;
+}
+/* "Do this for the other N files" is not content the buttons follow — it changes what
+   every one of them does. So it travels with them, closer than the 20px that separates
+   the pair from the comparison above. */
+.sheet__check + .sheet__actions {
+  margin-top: 12px;
 }
 .sheet--danger {
   border-color: var(--danger);

@@ -91,7 +91,7 @@ function PromptSheet({ request }: { request: PromptRequest }) {
                 if (e.key === 'Enter') answer({ kind: 'password', value: password })
               }}
             />
-            <div className="sheet__actions" style={{ marginTop: 16 }}>
+            <div className="sheet__actions">
               <button className="btn" onClick={() => answer({ kind: 'deny' })}>
                 Cancel
               </button>
