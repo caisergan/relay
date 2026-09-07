@@ -39,6 +39,12 @@ jobs:
       - name: Clippy
         run: cargo clippy -p relay-core --all-targets -- -D warnings
 
+      # The gated tests are not run here — they need a server — but they must still
+      # compile. Without this a change to a shared type breaks them, and the only job
+      # that notices is the one that has to start docker first, twelve minutes later.
+      - name: Feature-gated tests still compile
+        run: cargo clippy -p relay-core --all-features --all-targets -- -D warnings
+
       - name: Tests
         run: cargo test -p relay-core
 

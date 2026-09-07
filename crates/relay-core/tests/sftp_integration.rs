@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use relay_core::error::EngineError;
 use relay_core::interact::{Interact, Prompt, PromptReply};
 use relay_core::model::{AuthMethod, FileKind, ServerConfig, SessionId};
-use relay_core::protocol::{ProgressSink, Protocol, TransferReq};
+use relay_core::protocol::{CheckpointSink, ProgressSink, Protocol, TransferReq};
 use relay_core::secrets::{MemorySecrets, SecretKind};
 use relay_core::sftp::SftpBackend;
 use relay_core::trust::{TrustDecision, TrustStore};
@@ -151,8 +151,11 @@ fn req(
             remote_path: remote_path.to_string(),
             local_path: local.to_path_buf(),
             offset: 0,
+            prefix: None,
             progress: sink,
+            checkpoint: CheckpointSink::noop(),
             cancel,
+            keep_partial: Default::default(),
         },
         progress,
     )
