@@ -70,13 +70,6 @@
   --sidebar-w: 244px;
   --session-h: 52px;
 
-  /* File-type tints for the row icons. The design hard-codes hexes; these route
-     through the palette so the dark theme is not stuck with light-theme values. */
-  --type-code: var(--signal);
-  --type-data: var(--transit);
-  --type-plain: var(--ink-faint);
-  --type-php: #8892bf;
-
   color-scheme: light;
 }
 

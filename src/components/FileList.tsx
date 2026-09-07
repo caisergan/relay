@@ -1,18 +1,31 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useRef, useState } from 'react'
 
+import { FileIcon } from '@react-symbols/icons/utils'
+
+import { EXTENSIONS, NAMES } from '@/lib/fileIcon'
 import { formatBytes, formatWhen } from '@/lib/format'
 
-import {
-  IconArrowLeft,
-  IconArrowRight,
-  IconFile,
-  IconFolder,
-  IconPencil,
-  IconTrash,
-  tintForFile,
-} from './Icons'
+import { IconArrowLeft, IconArrowRight, IconFolder, IconPencil, IconTrash } from './Icons'
 import { PaneMessage } from './PaneMessage'
+
+/** File icons are 20px in a 20px slot, filling it exactly.
+ *
+ * These are Miguel Solorio's Symbols icons, drawn on the same 24-unit grid as the rest
+ * of Relay's own marks, so they were built to be read at this size rather than shrunk
+ * down to it. They carry no `theme` prop and no `currentColor`: each is a fixed,
+ * saturated brand colour chosen to hold up on a light or a dark editor background,
+ * which is why nothing here has to be told which theme is showing. */
+const ICON = 20
+
+/** Folders keep the design's own stroked mark, and do not come from the icon library.
+ *
+ * The library has a `folder`, but it is a page with a small folder stamped inside it —
+ * at row size that reads as a document, which is the one thing a directory must never
+ * look like. Ours is a folder at any size, and the blue is what says "you can go in
+ * here". Smaller than `ICON` because a stroked outline carries less internal padding
+ * than a filled page and would otherwise tower over its neighbours. */
+const FOLDER_ICON = 16
 
 export interface FileRow {
   key: string
@@ -248,9 +261,16 @@ export function FileList({
               >
                 <span className="row__icon">
                   {row.isDir ? (
-                    <IconFolder size={16} stroke="var(--signal)" />
+                    <IconFolder size={FOLDER_ICON} stroke="var(--signal)" />
                   ) : (
-                    <IconFile size={16} stroke={tintForFile(row.name)} />
+                    <FileIcon
+                      fileName={row.name}
+                      autoAssign
+                      editFileExtensionData={EXTENSIONS}
+                      editFileNameData={NAMES}
+                      width={ICON}
+                      height={ICON}
+                    />
                   )}
                 </span>
                 <span className={`row__name${row.isDir ? ' row__name--dir' : ''}`}>

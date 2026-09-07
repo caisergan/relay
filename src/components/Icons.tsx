@@ -361,29 +361,3 @@ export function IconGear(props: IconProps) {
     </Svg>
   )
 }
-
-/** File-type tint, from the design's `fileIcon` extension map.
- *
- * The design hard-codes hexes here; these are tokens instead, so the tints stay
- * legible in the dark theme rather than staying pinned to light-theme values. */
-const TYPE_TINTS: Record<string, string> = {
-  md: 'var(--type-code)',
-  ts: 'var(--type-code)',
-  tsx: 'var(--type-code)',
-  css: 'var(--type-code)',
-  html: 'var(--type-code)',
-  rs: 'var(--type-code)',
-  json: 'var(--type-data)',
-  js: 'var(--type-data)',
-  jsx: 'var(--type-data)',
-  yml: 'var(--type-data)',
-  yaml: 'var(--type-data)',
-  toml: 'var(--type-data)',
-  php: 'var(--type-php)',
-}
-
-export function tintForFile(name: string): string {
-  const dot = name.lastIndexOf('.')
-  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
-  return TYPE_TINTS[ext] ?? 'var(--type-plain)'
-}
