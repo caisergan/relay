@@ -685,6 +685,7 @@ async fn a_paused_download_resumes_from_a_verified_checkpoint() {
             source_now: Some(&facts),
             local_path: &local,
             remote_path: &source,
+            trust_mtime: true,
         },
         lane.as_mut(),
     )
@@ -768,6 +769,7 @@ async fn a_partial_that_does_not_match_the_source_is_refused() {
             source_now: Some(&facts),
             local_path: &local,
             remote_path: &source,
+            trust_mtime: true,
         },
         lane.as_mut(),
     )

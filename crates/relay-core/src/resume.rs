@@ -43,6 +43,13 @@ pub struct Verify<'a> {
     pub local_path: &'a Path,
     /// This job's remote side, likewise.
     pub remote_path: &'a str,
+    /// Whether the backend's modification times are precise enough to compare.
+    ///
+    /// FTP's `MDTM` is optional and often a whole minute, and a timestamp that is
+    /// wrong by less than its own resolution would refuse every resume on a busy
+    /// server. When it cannot be trusted the digest check is the only judge — which it
+    /// nearly is anyway.
+    pub trust_mtime: bool,
 }
 
 /// The outcome of a check. `Ok` carries the running hash positioned at the checkpoint,
@@ -57,7 +64,12 @@ pub async fn check(v: Verify<'_>, lane: &mut dyn TransferLane) -> Verdict {
         return Err("nothing has been transferred yet".into());
     }
 
-    source_unchanged(&v.record.source, v.source_now, v.record.checkpoint)?;
+    source_unchanged_with(
+        &v.record.source,
+        v.source_now,
+        v.record.checkpoint,
+        v.trust_mtime,
+    )?;
 
     // The local side is the partial for a download and the source for an upload. Either
     // way its first `checkpoint` bytes are the ones under discussion, and either way it
@@ -102,6 +114,16 @@ pub fn source_unchanged(
     now: Option<&FileFacts>,
     checkpoint: Bytes,
 ) -> std::result::Result<(), String> {
+    source_unchanged_with(recorded, now, checkpoint, true)
+}
+
+/// The same, with the backend's word on whether its timestamps mean anything.
+pub fn source_unchanged_with(
+    recorded: &FileFacts,
+    now: Option<&FileFacts>,
+    checkpoint: Bytes,
+    trust_mtime: bool,
+) -> std::result::Result<(), String> {
     let Some(now) = now else {
         return Err("the source could not be read to compare it".into());
     };
@@ -125,7 +147,8 @@ pub fn source_unchanged(
     // Only when both sides have one. A server that withholds mtimes must not make
     // every resume unverifiable — the digest check is what actually decides, and this
     // is the cheap filter in front of it.
-    if let (Some(before), Some(after)) = (recorded.modified, now.modified)
+    if trust_mtime
+        && let (Some(before), Some(after)) = (recorded.modified, now.modified)
         && before != after
     {
         return Err("the source has been modified since the transfer started".into());
@@ -219,6 +242,19 @@ mod tests {
         assert!(source_unchanged(&before, Some(&now), Bytes(400)).is_ok());
     }
 
+    /// A backend that says its timestamps are imprecise must not have every resume
+    /// refused by a one-minute rounding difference. The digest is what decides.
+    #[test]
+    fn an_untrusted_timestamp_is_not_compared() {
+        let before = facts(1000);
+        let after = FileFacts {
+            modified: before.modified.map(|at| at + TimeDelta::seconds(30)),
+            ..before.clone()
+        };
+        assert!(source_unchanged_with(&before, Some(&after), Bytes(400), true).is_err());
+        assert!(source_unchanged_with(&before, Some(&after), Bytes(400), false).is_ok());
+    }
+
     #[tokio::test]
     async fn a_checkpoint_of_zero_has_nothing_to_resume() {
         let record = ResumeRecord::new(facts(1000), "/tmp/.big.iso.relaypart");
@@ -230,6 +266,7 @@ mod tests {
                 source_now: Some(&facts(1000)),
                 local_path: Path::new("/tmp/big.iso"),
                 remote_path: "/remote/big.iso",
+                trust_mtime: true,
             },
             &mut lane,
         )

@@ -36,7 +36,8 @@ use crate::model::{
     SessionState,
 };
 use crate::protocol::{
-    CheckpointSink, ProgressSink, Protocol, SecretSource, TransferLane, TransferReq, Transferred,
+    BackendCapabilities, CheckpointSink, ProgressSink, Protocol, SecretSource, TransferLane,
+    TransferReq, Transferred,
 };
 use crate::queue::ResumeRecord;
 use crate::resume;
@@ -1026,11 +1027,13 @@ impl SessionActor {
                 keep_partial: Arc::clone(&keep_partial),
             },
         );
+        let can = self.backend.capabilities();
         self.rt.spawn(run_transfer(TransferTask {
             session: self.id,
             run,
             size,
             source,
+            can,
             destination,
             actor: self.lane_tx.clone(),
             interact: Arc::clone(&self.interact),
@@ -1048,6 +1051,9 @@ struct TransferTask {
     size: Option<Bytes>,
     /// The source as it was when this transfer was dispatched.
     source: Option<FileFacts>,
+    /// What the backend can promise. Resume needs offset-addressed reads and writes,
+    /// and the facts check needs to know whether the timestamps mean anything.
+    can: BackendCapabilities,
     /// Facts about what is already at the destination, when anything is.
     destination: Option<FileFacts>,
     actor: mpsc::Sender<ActorRequest>,
@@ -1097,6 +1103,7 @@ async fn run_transfer(task: TransferTask) {
         run,
         size,
         source,
+        can,
         destination,
         actor,
         interact,
@@ -1113,12 +1120,14 @@ async fn run_transfer(task: TransferTask) {
 
     // A job with a resume record needs its lane before the sheet opens, because
     // whether "Resume" is even offered depends on reading the remote prefix back.
+    // A backend without offset-addressed reads and writes cannot continue a partial at
+    // all, so there is nothing to check and no lane to open early.
     let mut lane = match &run.resume {
-        Some(_) => match open_lane(&actor).await {
+        Some(_) if can.random_access => match open_lane(&actor).await {
             Ok(lane) => Some(lane),
             Err(err) => return finish(Err(err)).await,
         },
-        None => None,
+        _ => None,
     };
 
     // Nothing here decides to resume. It decides whether resuming is *offerable*, and
@@ -1132,6 +1141,7 @@ async fn run_transfer(task: TransferTask) {
                     source_now: source.as_ref(),
                     local_path: &run.local_path,
                     remote_path: &run.remote_path,
+                    trust_mtime: can.reliable_mtime,
                 },
                 lane,
             )
@@ -1271,6 +1281,7 @@ async fn run_transfer(task: TransferTask) {
         req: &req,
         moved,
         resumed: offset.get() > 0,
+        trust_mtime: can.reliable_mtime,
         lane: lane.as_mut(),
         report: &report,
     })
@@ -1301,6 +1312,7 @@ struct Publishing<'a> {
     /// Only a resumed transfer is a splice of two attempts, and only a splice needs
     /// the source it was spliced from to have held still.
     resumed: bool,
+    trust_mtime: bool,
     lane: &'a mut dyn TransferLane,
     report: &'a Reporter,
 }
@@ -1319,6 +1331,7 @@ async fn publish(ctx: Publishing<'_>) -> Result<Bytes> {
         req,
         moved,
         resumed,
+        trust_mtime,
         lane,
         report,
     } = ctx;
@@ -1326,10 +1339,11 @@ async fn publish(ctx: Publishing<'_>) -> Result<Bytes> {
     if resumed {
         report.send(Report::Verifying { job }).await;
         if let Some(record) = &run.resume
-            && let Err(reason) = resume::source_unchanged(
+            && let Err(reason) = resume::source_unchanged_with(
                 &record.source,
                 moved.source_now.as_ref(),
                 Bytes(moved.final_size),
+                trust_mtime,
             )
         {
             lane.discard(&moved.temporary_path).await;
