@@ -229,23 +229,31 @@ export function IconWarning(props: IconProps) {
   )
 }
 
-/** Hidden files are showing. The design's Quick Look glyph, reused: it is the same
- * idea — this is the "you can see it" mark. */
-export function IconEye(props: IconProps) {
+/** Dotfiles are listed.
+ *
+ * An eye was the first attempt and it says the wrong thing: it means visibility in
+ * general, which is every row in the pane. What separates these files from the rest is
+ * the leading dot, so the dot is the icon — the design's own file glyph carrying the
+ * mark that makes it hidden in the first place. */
+export function IconDotfile(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
-      <circle cx="12" cy="12" r="2.5" />
+    <Svg strokeWidth={1.7} {...props}>
+      <path d="M6 2h8l4 4v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" />
+      <path d="M14 2v4h4" />
+      <circle cx="8.5" cy="16" r="1.8" fill="currentColor" stroke="none" />
+      <path d="M12 16h4.5" />
     </Svg>
   )
 }
 
-/** Hidden files are hidden: the same eye, struck through. */
-export function IconEyeOff(props: IconProps) {
+/** Dotfiles are being held back: the same file, struck through. */
+export function IconDotfileOff(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
-      <circle cx="12" cy="12" r="2.5" />
+    <Svg strokeWidth={1.7} {...props}>
+      <path d="M6 2h8l4 4v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" />
+      <path d="M14 2v4h4" />
+      <circle cx="8.5" cy="16" r="1.8" fill="currentColor" stroke="none" />
+      <path d="M12 16h4.5" />
       <path d="M3 3l18 18" />
     </Svg>
   )

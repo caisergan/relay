@@ -16,8 +16,8 @@ import {
   IconActivity,
   IconChevronLeft,
   IconChevronRight,
-  IconEye,
-  IconEyeOff,
+  IconDotfile,
+  IconDotfileOff,
   IconFolderPlus,
   IconMonitor,
   IconRefresh,
@@ -644,7 +644,7 @@ function PaneHeader({
           aria-pressed={!showHidden}
           onClick={onToggleHidden}
         >
-          {showHidden ? <IconEye size={17} /> : <IconEyeOff size={17} />}
+          {showHidden ? <IconDotfile size={17} /> : <IconDotfileOff size={17} />}
         </button>
         {/* No parent button: the breadcrumb above already names every ancestor and
             navigates to it in one click, so a chevron that walks up one level at a
@@ -702,7 +702,7 @@ function PaneHeader({
             disabled={!canGoBack(history)}
             onClick={() => onStep(-1)}
           >
-            <IconChevronLeft size={14} />
+            <IconChevronLeft size={17} strokeWidth={2.6} />
           </button>
           <button
             className="segbtn"
@@ -711,7 +711,7 @@ function PaneHeader({
             disabled={!canGoForward(history)}
             onClick={() => onStep(1)}
           >
-            <IconChevronRight size={14} />
+            <IconChevronRight size={17} strokeWidth={2.6} />
           </button>
         </div>
       </div>

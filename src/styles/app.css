@@ -275,14 +275,17 @@
   background: var(--surface);
   border: 1px solid var(--line);
 }
+/* Full-strength ink, not the faint the design gives its view toggle: these two move
+   you somewhere, where that toggle only changes how the same rows are drawn. They are
+   the only navigation on the row and have to be findable at a glance. */
 .segbtn {
-  width: 26px;
-  height: 22px;
+  width: 28px;
+  height: 24px;
   border-radius: 5px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--ink-faint);
+  color: var(--ink);
 }
 .segbtn:hover:not(:disabled) {
   background: var(--panel);
