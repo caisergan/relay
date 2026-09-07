@@ -179,7 +179,7 @@ impl Engine {
         store: QueueStore,
         settings: Arc<SettingsStore>,
     ) -> Result<Self> {
-        let concurrency = settings.get().concurrency;
+        let current = settings.get();
         let sessions = SessionRegistry::default();
         // The scheduler starts before any session, because a session announces itself
         // ready as soon as it connects and has to have somewhere to announce it to.
@@ -187,8 +187,10 @@ impl Engine {
             store,
             events: hub.events(),
             dispatcher: Arc::new(sessions.clone()) as Arc<dyn Dispatcher>,
+            prompts: Arc::clone(hub.prompts()),
             rt: rt.clone(),
-            concurrency,
+            concurrency: current.concurrency,
+            default_conflict: current.default_conflict,
         })
         .await?;
         Ok(Self {
@@ -219,8 +221,11 @@ impl Engine {
     /// Store, persist, and apply. Returns what was actually stored after clamping.
     pub async fn set_settings(&self, settings: Settings) -> Result<Settings> {
         let stored = self.settings.set(settings)?;
-        // The slider is only a setting if it reaches work already running.
-        self.queue.set_concurrency(stored.concurrency).await;
+        // The slider is only a setting if it reaches work already running, and the
+        // conflict default is only a setting if the next transfer reads it.
+        self.queue
+            .set_settings(stored.concurrency, stored.default_conflict)
+            .await;
         Ok(stored)
     }
 

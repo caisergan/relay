@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use relay_core::error::{EngineError, Result};
+use relay_core::interact::PromptBroker;
 use relay_core::job::{JobKind, JobState, PauseReason};
 use relay_core::model::{Direction, FileFacts, JobId, SessionId};
 use relay_core::queue::{Job, JobSpec, ResumeRecord};
@@ -121,14 +122,17 @@ const SERVER: Uuid = Uuid::from_u128(0x5E5_0001);
 async fn start(store: QueueStore) -> Running {
     let held = Arc::new(Held::default());
     let (events, mut drain) = mpsc::channel(1024);
+    let (prompts, _unread) = mpsc::channel(64);
     tokio::spawn(async move { while drain.recv().await.is_some() {} });
 
     let scheduler = Scheduler::spawn(SchedulerContext {
         store,
         events,
         dispatcher: Arc::clone(&held) as Arc<dyn Dispatcher>,
+        prompts: Arc::new(PromptBroker::new(prompts)),
         rt: tokio::runtime::Handle::current(),
         concurrency: 3,
+        default_conflict: None,
     })
     .await
     .unwrap();

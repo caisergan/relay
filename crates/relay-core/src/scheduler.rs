@@ -37,7 +37,7 @@ use uuid::Uuid;
 
 use crate::error::{EngineError, Result};
 use crate::events::EngineEvent;
-use crate::interact::ConflictAction;
+use crate::interact::{ConflictAction, PromptBroker, PromptReply};
 use crate::job::{JobKind, JobSnapshot, JobState, PauseReason, QueueOp, QueueStats};
 use crate::model::{Direction, JobId, PromptId, ServerId, SessionId};
 use crate::queue::{
@@ -88,8 +88,9 @@ enum Msg {
     SessionClosed {
         session: SessionId,
     },
-    Concurrency {
-        limit: u8,
+    Settings {
+        concurrency: u8,
+        default_conflict: Option<ConflictAction>,
     },
     Report {
         from: Option<(JobId, u64)>,
@@ -282,8 +283,13 @@ pub struct SchedulerContext {
     pub store: QueueStore,
     pub events: mpsc::Sender<EngineEvent>,
     pub dispatcher: Arc<dyn Dispatcher>,
+    /// So "apply to remaining" can answer sheets that are already open. See
+    /// [`Inner::propagate`].
+    pub prompts: Arc<PromptBroker>,
     pub rt: tokio::runtime::Handle,
     pub concurrency: u8,
+    /// What the settings say to do about an existing destination. `None` asks.
+    pub default_conflict: Option<ConflictAction>,
 }
 
 /// The handle the engine keeps.
@@ -308,7 +314,9 @@ impl Scheduler {
             store: ctx.store,
             events: ctx.events,
             dispatcher: ctx.dispatcher,
+            prompts: ctx.prompts,
             concurrency: ctx.concurrency.max(1),
+            default_conflict: ctx.default_conflict,
             runs: HashMap::new(),
             next_run: 0,
             me: Reporter {
@@ -369,8 +377,15 @@ impl Scheduler {
         let _ = self.tx.send(Msg::SessionClosed { session }).await;
     }
 
-    pub async fn set_concurrency(&self, limit: u8) {
-        let _ = self.tx.send(Msg::Concurrency { limit }).await;
+    /// Apply the settings the queue cares about.
+    pub async fn set_settings(&self, concurrency: u8, default_conflict: Option<ConflictAction>) {
+        let _ = self
+            .tx
+            .send(Msg::Settings {
+                concurrency,
+                default_conflict,
+            })
+            .await;
     }
 
     /// Every job, in queue order — what a remounting UI reconciles against.
@@ -420,7 +435,9 @@ struct Inner {
     store: QueueStore,
     events: mpsc::Sender<EngineEvent>,
     dispatcher: Arc<dyn Dispatcher>,
+    prompts: Arc<PromptBroker>,
     concurrency: u8,
+    default_conflict: Option<ConflictAction>,
     /// Which run of each job is the live one. See [`Reporter`].
     runs: HashMap<JobId, u64>,
     next_run: u64,
@@ -548,8 +565,12 @@ impl Inner {
                 self.sessions.remove(&session);
                 self.pause_session(session, PauseReason::SessionDown).await;
             }
-            Msg::Concurrency { limit } => {
-                self.concurrency = limit.max(1);
+            Msg::Settings {
+                concurrency,
+                default_conflict,
+            } => {
+                self.default_conflict = default_conflict;
+                self.concurrency = concurrency.max(1);
                 // Lowering the slider must take effect on work already running, or the
                 // control would only apply to a queue that has not started yet.
                 self.throttle().await;
@@ -905,15 +926,36 @@ impl Inner {
         let Some(batch) = self.jobs.get(&from).map(|job| job.batch) else {
             return;
         };
-        let siblings: Vec<JobId> = self
+        let siblings: Vec<(JobId, Option<PromptId>)> = self
             .jobs
             .values()
             .filter(|job| job.batch == batch && job.id != from && !job.state.is_terminal())
-            .map(|job| job.id)
+            .map(|job| {
+                let waiting = match job.state {
+                    JobState::AwaitingPrompt { prompt } => Some(prompt),
+                    _ => None,
+                };
+                (job.id, waiting)
+            })
             .collect();
-        for id in siblings {
+        for (id, waiting) in siblings {
             self.apply_quietly(id, JobEvent::AdoptPolicy { action })
                 .await;
+            // A sibling that is *already* asking has a sheet of its own open, and
+            // recording a policy on it changes nothing: it is parked on an answer.
+            // Two jobs can reach a conflict at the same moment, so this is not a rare
+            // case — without it, "apply to remaining" leaves them waiting for ever.
+            if let Some(prompt) = waiting {
+                let _ = self.prompts.resolve(
+                    prompt,
+                    PromptReply::Conflict {
+                        action,
+                        // Already propagated by this call; saying it again would
+                        // re-propagate from every sibling in turn.
+                        apply_to_remaining: false,
+                    },
+                );
+            }
         }
     }
 
@@ -1025,7 +1067,10 @@ impl Inner {
                 direction: job.direction,
                 remote_path: job.remote_path.clone(),
                 local_path: job.local_path.clone(),
-                conflict: job.chosen.or(job.conflict_policy),
+                // In order: what was decided for this job, then what a sibling's
+                // "apply to remaining" decided for the batch, then the saved default.
+                // Only when all three are absent does anyone get asked.
+                conflict: job.chosen.or(job.conflict_policy).or(self.default_conflict),
                 remaining: self.remaining_in_batch(job.batch, id),
                 report: Reporter {
                     tx: self.me.tx.clone(),
@@ -1338,12 +1383,15 @@ mod tests {
     async fn harness(concurrency: u8, max_lanes: u8) -> Harness {
         let bench = Arc::new(Bench::default());
         let (tx, events) = mpsc::channel(1024);
+        let (prompt_events, _unread) = mpsc::channel(64);
         let scheduler = Scheduler::spawn(SchedulerContext {
             store: QueueStore::in_memory().await.unwrap(),
             events: tx,
             dispatcher: Arc::clone(&bench) as Arc<dyn Dispatcher>,
+            prompts: Arc::new(PromptBroker::new(prompt_events)),
             rt: tokio::runtime::Handle::current(),
             concurrency,
+            default_conflict: None,
         })
         .await
         .unwrap();
@@ -1688,7 +1736,7 @@ mod tests {
         settle(&h).await;
         assert_eq!(h.bench.running().len(), 4);
 
-        h.scheduler.set_concurrency(2).await;
+        h.scheduler.set_settings(2, None).await;
         settle(&h).await;
 
         let running = states(&h)
@@ -1714,10 +1762,10 @@ mod tests {
         h.scheduler.enqueue(batch, specs).await.unwrap();
         settle(&h).await;
 
-        h.scheduler.set_concurrency(1).await;
+        h.scheduler.set_settings(1, None).await;
         settle(&h).await;
         let _ = h.bench.take();
-        h.scheduler.set_concurrency(4).await;
+        h.scheduler.set_settings(4, None).await;
         settle(&h).await;
 
         let running = states(&h)

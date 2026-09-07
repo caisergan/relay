@@ -387,7 +387,10 @@ pub fn advance(job: &mut Job, event: JobEvent) -> bool {
             job.state = S::AwaitingPrompt { prompt };
             true
         }
-        (S::AwaitingPrompt { .. }, JobEvent::Answered { action }) => {
+        // From `Preparing` as well as from a sheet: a settings default decides without
+        // ever opening one, and a job that could only be answered by a sheet would sit
+        // in `Preparing` for ever when nobody was asked.
+        (S::Preparing | S::AwaitingPrompt { .. }, JobEvent::Answered { action }) => {
             job.chosen = Some(action);
             job.state = match action {
                 ConflictAction::Skip => S::Done {
@@ -395,14 +398,6 @@ pub fn advance(job: &mut Job, event: JobEvent) -> bool {
                     skipped: true,
                 },
                 _ => S::Preparing,
-            };
-            true
-        }
-        (S::Preparing, JobEvent::Skip) => {
-            job.chosen = Some(ConflictAction::Skip);
-            job.state = S::Done {
-                at: Utc::now(),
-                skipped: true,
             };
             true
         }
@@ -656,7 +651,6 @@ mod tests {
             JobEvent::Answered {
                 action: ConflictAction::Overwrite,
             },
-            JobEvent::Skip,
             JobEvent::Start {
                 resume_from: Bytes::ZERO,
             },

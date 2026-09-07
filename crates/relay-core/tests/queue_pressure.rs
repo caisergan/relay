@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use relay_core::error::{EngineError, Result};
+use relay_core::interact::PromptBroker;
 use relay_core::job::{JobKind, JobState, PauseReason, QueueOp};
 use relay_core::model::{Direction, JobId, SessionId};
 use relay_core::queue::{JobSpec, ResumeRecord};
@@ -177,6 +178,7 @@ async fn settle(scheduler: &Scheduler) {
 async fn five_hundred_jobs_finish_without_breaking_a_cap_or_stranding_one() {
     let bench = Arc::new(Bench::default());
     let (events, mut drain) = mpsc::channel(4096);
+    let (prompts, _unread) = mpsc::channel(64);
     // The event stream is not what this test is about, but an unread channel would
     // apply backpressure to the scheduler and change the thing being measured.
     tokio::spawn(async move { while drain.recv().await.is_some() {} });
@@ -185,8 +187,10 @@ async fn five_hundred_jobs_finish_without_breaking_a_cap_or_stranding_one() {
         store: QueueStore::in_memory().await.unwrap(),
         events,
         dispatcher: Arc::clone(&bench) as Arc<dyn Dispatcher>,
+        prompts: Arc::new(PromptBroker::new(prompts)),
         rt: tokio::runtime::Handle::current(),
         concurrency: CONCURRENCY,
+        default_conflict: None,
     })
     .await
     .unwrap();
@@ -304,7 +308,7 @@ async fn five_hundred_jobs_finish_without_breaking_a_cap_or_stranding_one() {
             }
             3 => {
                 scheduler
-                    .set_concurrency(1 + rng.below(HIGHEST as usize) as u8)
+                    .set_settings(1 + rng.below(HIGHEST as usize) as u8, None)
                     .await
             }
             // A session drops and comes back. Its jobs must pause and resume, not fail.
