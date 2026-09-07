@@ -80,6 +80,30 @@ cargo test -p relay-core --features integration -- --test-threads=1
 `relay-core` builds and tests anywhere Rust does. `src-tauri` needs a platform with a
 webview, so on Linux use the engine and frontend targets and let CI cover the shell.
 
+### Running a CI build on macOS
+
+Unzipping `relay-macos-aarch64-debug` and double-clicking the result will usually just
+bounce the icon and stop — no dialog, no crash report, nothing in the log. Install it
+with the script instead:
+
+```sh
+scripts/install-macos-build.sh                    # newest zip in ~/Downloads
+scripts/install-macos-build.sh path/to/Relay-app.zip
+```
+
+It copies the bundle to `~/Applications`, ad-hoc signs it, launches it, and checks that
+it reached a webview rather than reporting success because `open` returned 0.
+
+The reason the plain double-click fails: the download is quarantined and Relay is only
+ad-hoc signed until phase 5, so the security assessment rejects it — and that verdict is
+cached against the bundle's *file identity*. LaunchServices keys the app by inode
+(`application.app.relay.desktop.<inode>.<n>` in the log), and a rejected bundle stalls at
+`_dyld_start` at about 32 KB resident, where a healthy one settles above 100 MB. Running
+`xattr -dr com.apple.quarantine` on it or re-signing it in place does not lift the block;
+the bundle needs a new inode. Copying it elsewhere is what actually fixes it, which is
+all the script is doing. The directory does not matter — a fresh copy runs even from
+`~/Downloads`; the reused inode is the problem.
+
 ## Contributing
 
 One hard rule: **`reference/` is read-only.** Never copy code from it — not verbatim, not
