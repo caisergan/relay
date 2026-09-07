@@ -55,6 +55,29 @@ jobs:
       - name: Fail if `pnpm gen:ipc` was not run
         run: git diff --exit-code -- src/ipc/gen.ts
 
+  # The §0.6 prototypes: russh against real OpenSSH. They test the library, not our
+  # engine, and they are the reason phase 1 is allowed to start.
+  sftp-prototypes:
+    name: SFTP compatibility prototypes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Run the prototypes against real OpenSSH
+        run: |
+          ./scripts/sftp-fixture.sh up > /dev/null
+          eval "$(./scripts/sftp-fixture.sh env)"
+          cargo test -p relay-core --features integration --test sftp_prototype \
+            -- --test-threads=1 --nocapture
+
+      - name: Stop the fixture
+        if: always()
+        run: ./scripts/sftp-fixture.sh down
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest

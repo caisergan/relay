@@ -7,6 +7,11 @@ This starts the SFTP 1.0 path: **P0 → P1 → P2 → P5**; P3/P4 follow after r
 Timebox each prototype initially to 1–2 engineering days, then record results and
 re-estimate unresolved work. A timebox ending is not a passed acceptance gate.
 
+> **Progress.** §0.1–§0.5 are implemented and green; the §0.6 SFTP prototypes pass
+> against real OpenSSH. FTPS, the OS keychains, and the Windows agent are still unrun.
+> This file stays the plan — the record of what was actually measured, and of the two
+> places the plan was wrong, lives in [`docs/adr/`](../adr/).
+
 ## 0.1 Repository & workspace layout
 
 ```

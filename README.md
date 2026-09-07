@@ -5,12 +5,13 @@ engine behind a custom-designed interface. The first release focuses on dependab
 SFTP; FTP/FTPS and richer editing tools follow after that release.
 
 > **Status: Phase 0 in progress.** The workspace, the engine contract, typed IPC with
-> snapshot recovery, and the design foundation are in and green. The compatibility
-> prototypes in [Phase 0 §0.6](docs/phases/phase-0-foundation.md) — real SFTP auth,
-> concurrency, interrupted transfers, FTPS, OS keychains — have **not been run yet**,
-> and no protocol library is validated until they are. See
-> [ADR 004](docs/adr/004-protocol-compatibility.md) for exactly what is proven and what
-> is not. Delivery follows acceptance gates; estimates come after the prototypes.
+> snapshot recovery, and the design foundation are in and green. **The SFTP
+> compatibility prototypes now pass against real OpenSSH** — password, key, encrypted
+> key and agent auth; host-key rejection and rotation; two channels transferring while
+> a third browses; bounded cancellation; and a resumed download that hashes identically
+> to its source. Still unrun: FTPS, the OS keychains, and the Windows named-pipe agent.
+> [ADR 004](docs/adr/004-protocol-compatibility.md) has the numbers and the open gates;
+> believe it over this paragraph.
 
 ## Shape of the thing
 
@@ -66,6 +67,12 @@ cargo test -p relay-core     # the engine, headless, no webview needed
 pnpm test                    # frontend unit tests
 pnpm gen:ipc                 # regenerate src/ipc/gen.ts from the Rust types
 pnpm tauri dev               # the app — needs a macOS or Windows machine
+
+# The phase 0 SFTP prototypes, against a real OpenSSH server in Docker:
+./scripts/sftp-fixture.sh up > target/sftp-fixture/env.sh
+set -a; . target/sftp-fixture/env.sh; set +a
+cargo test -p relay-core --features integration --test sftp_prototype -- --test-threads=1
+./scripts/sftp-fixture.sh down
 ```
 
 `relay-core` builds and tests anywhere Rust does. `src-tauri` needs a platform with a
