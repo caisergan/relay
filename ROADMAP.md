@@ -3,6 +3,11 @@
 A lightweight, cross-platform (macOS + Windows) FTP/FTPS/SFTP client built with Tauri v2,
 re-imagining FileZilla with the Relay design (Claude Design project `Relay.dc.html`).
 
+**Delivery decision (2026-09-07):** keep Tauri + Rust + React, ship dependable SFTP
+as 1.0, and add FTP/FTPS and richer editing workflows afterward. The previous
+14-week schedule is superseded by acceptance gates. The protocol choices remain
+subject to executable compatibility checks in Phase 0; no prototypes have run yet.
+
 ---
 
 ## 1. The core decision: do NOT reuse the FileZilla C++ engine
@@ -39,11 +44,12 @@ What the FileZilla source is genuinely valuable for:
 
 | Concern | Choice | Notes |
 |---|---|---|
-| SFTP/SSH | **`russh` + `russh-sftp`** (both Apache-2.0; russh now maintained under warp-tech, v0.62.x; russh-sftp v2.3.x) | Pure Rust, Tokio-async, password/key/agent/keyboard-interactive auth, OpenSSH certs. Parallel transfers = multiple SFTP channels; resume + chunked parallelism built on `RawSftpSession::read/write(handle, offset, …)` — true pread/pwrite. |
-| FTP/FTPS | **`suppaftp`** (async + `rustls`) | MLSD/MLST/LIST/NLST, REST/APPE for resume. Fall back to `native-tls` only if old-server interop demands it. |
-| TLS | **rustls** | Pure Rust; avoids OpenSSL cross-compile pain on Windows. |
+| SFTP/SSH | **`russh` + `russh-sftp`** | Preferred Tokio-based backend, gated on Windows OpenSSH-agent auth, channel concurrency, cancellation, and recovery prototypes. Pin tested versions/features in Phase 0. Offset reads/writes enable resume mechanics; source and partial-file verification establish correctness. |
+| FTP/FTPS | **`suppaftp`** (Tokio + `rustls`) | Post-1.0 backend; test FTPS control/data TLS session reuse in Phase 0. Consider `native-tls` only after a reproducible interoperability failure and a documented decision. |
+| TLS | **rustls** | Preferred TLS stack; select and verify its crypto provider and native build requirements on both platforms during the prototype. |
 | LIST parsing | MLSD-first; hand-rolled fallback parser | No crate matches FileZilla's hardening. Evaluate `ftp-cmd-list-parse`, but budget for our own Unix/DOS/IIS parser with a golden-sample test corpus. |
 | Credentials | **`keyring`** crate | macOS Keychain / Windows Credential Manager — matches the design's "credentials live in macOS Keychain" promise. |
+| Queue persistence | **SQLite via `rusqlite` (bundled)** | Required for durable jobs, resume records, and transactional state changes; no JSON queue alternative. |
 | Avoid | `ssh2` (blocking, C deps), `openssh` (ControlMaster broken on Windows) | Documented fallbacks only. |
 
 ### Prior art — adopt-vs-build survey (verified July 2026)
@@ -67,7 +73,7 @@ engine**; nothing is fork-worthy:
 
 ```
 relay/
-├── filezilla/                  # GPL reference source — READ ONLY, never copy code
+├── reference/filezilla/        # optional untracked reference — READ ONLY, never copy code
 ├── docs/
 │   └── design-notes.md         # tokens & specs transcribed from Relay.dc.html
 ├── src/                        # Frontend: React + TypeScript + Vite
@@ -75,7 +81,7 @@ relay/
 │   ├── components/             # panes, queue drawer, flow gutter, palette, sheets
 │   ├── views/                  # SessionView, ConnectView, EditorView
 │   ├── state/                  # Zustand stores: servers, sessions, transfers, ui
-│   ├── ipc/                    # typed wrappers over invoke() + event listeners
+│   ├── ipc/                    # typed commands, channel bridge, snapshot recovery
 │   └── styles/tokens.css       # CSS variables lifted from the design (light+dark)
 ├── src-tauri/
 │   ├── src/
@@ -102,19 +108,28 @@ Design rule carried over from FileZilla: **`relay-core` is a library with a
 command-in / event-out API**; the Tauri layer is a thin adapter. This keeps the engine
 unit-testable without a GUI and portable if the shell ever changes.
 
-### IPC contract (from the design's implied backend)
+### Runtime and IPC contract
 
-Events streamed to the frontend (`emit` per session):
-`session:state` (connecting/connected/reconnecting/disconnected + latency),
-`listing:updated`, `transfer:progress` (id, bytes, total, speed, eta, status),
-`transfer:done|failed`, `prompt:hostkey`, `prompt:conflict` (with resume/rename options),
-`log:entry` (human event + raw protocol line — feeds the Activity slide-over).
-Prompts follow FileZilla's async-request pattern: engine pauses that operation,
-frontend answers via a command (`resolve_prompt`).
+`relay-core` accepts a `tokio::runtime::Handle` and uses it to spawn engine tasks;
+it imports no Tauri types. The shell supplies the handle and owns application
+lifecycle integration. Tests create their own Tokio runtime. Session and transfer
+tasks use cancellation tokens and tracked join handles: shutdown requests cooperative
+checkpoint/cleanup, waits for a bounded grace period, and aborts only as a last resort.
 
-Frontend concurrency pitfalls to respect (Tauri v2): use `tauri::async_runtime::spawn`
-(not bare `tokio::spawn`); tasks do NOT auto-cancel on window close — every transfer
-holds an abort handle tied to its queue entry.
+Rust owns sessions, jobs, prompts, and durable state. Zustand holds their frontend
+projection plus local UI state; it never independently decides transfer transitions.
+One generated, typed IPC bridge translates commands and consumes ordered Tauri
+channels for engine updates (session/listing/job/prompt state, throttled progress,
+and bounded logs). File-transfer bytes stay in Rust. Small optional UI notifications
+may use events. Tauri recommends channels for ordered streaming rather than its
+global event mechanism. [Tauri IPC documentation](https://v2.tauri.app/develop/calling-frontend/)
+
+Provide `engine_subscribe` and `engine_snapshot` with an engine epoch and sequence
+watermark. Subscribe and buffer before requesting a consistent snapshot, then apply
+only newer updates. A gap, overflow, remount, or engine restart triggers resnapshot
+and reconciliation; pending prompts are included. Bounded queues coalesce progress
+before sequencing and retain terminal states through the authoritative snapshot.
+Prompts pause only the affected operation and resolve by id via `resolve_prompt`.
 
 ## 4. Frontend plan
 
@@ -122,7 +137,7 @@ holds an abort handle tied to its queue entry.
 **not lift-and-shift code** — it must be re-implemented as real React components, but its
 token system, layout metrics, states, and copy transcribe directly.
 
-What the design specifies (build to this):
+What the design specifies (target experience; release scope is in §5):
 - **Shell**: title bar with browser-style session tabs (⌘T/⌘W), collapsible server
   sidebar with groups/color avatars/bookmarks, ⌘K command palette, light/dark themes
   (Space Grotesk / Inter / JetBrains Mono; full CSS-variable token set).
@@ -137,25 +152,39 @@ What the design specifies (build to this):
   slide-over with raw-log toggle.
 - Designed empty/loading/denied/connection-lost states; `prefers-reduced-motion` respected.
 
-Stack: React 18 + TypeScript + Vite + Zustand. No heavy UI framework — the design is
-fully custom-tokened. Virtualized file lists (large directories) from day one.
+Stack: React 19 + TypeScript strict + current stable Vite + Zustand. At the September
+2026 review, React's current line is 19.2 and Vite's regularly patched line is 8.2;
+Vite 6.4 receives security fixes only. Resolve compatible stable patch versions at
+scaffolding time and commit lockfiles. [React versions](https://react.dev/versions),
+[Vite release policy](https://vite.dev/releases)
+
+No heavy UI framework — the design is fully custom-tokened. Virtualized file lists
+from day one, narrow store subscriptions, and batched progress updates. Validate the
+custom title bar, keyboard navigation, focus, and OS file drops on both macOS and
+Windows in Phase 0/1; platform webviews need platform testing. Essential accessibility
+and error states ship with SFTP 1.0. Editors, previews, and the full palette can wait.
 
 ## 5. Feature scope (FileZilla parity, filtered)
 
-**In (MVP–v1.0):** quick connect (URL bar), server store w/ groups + bookmarks, SFTP +
-FTP + FTPS, auth password/key/agent/ask, host-key & cert trust with pinning, dual-pane
-browse w/ perms column, hidden-file handling, transfer queue (priorities via reorder,
-retry, pause, persistence across restart), resume + full conflict action set, concurrent
-transfers (1–8), remote edit (built-in editor + external-editor watch → re-upload),
-Quick Look, activity/raw log, import/export of servers, keychain storage.
+**SFTP 1.0:** quick connect, saved-server CRUD and Test connection, password/key/agent/
+ask authentication, host-key trust with pinning, OS keychain storage, dual-pane browse,
+permissions display, hidden files, rename/delete/mkdir, recursive transfers, concurrent
+transfers (1–8), persistent queue with reorder/retry/pause/cancel, verified resume,
+Overwrite/Skip/KeepBoth conflicts, reconnect, essential settings and status/error logs,
+keyboard/focus accessibility, signed installers, and updater. Resume is offered only
+when source/partial verification succeeds. FTP/FTPS selections are unavailable in 1.0.
 
-**v1.x (post-1.0, FileZilla features the design omits but users expect):** chmod dialog
+**Post-1.0 product expansion:** FTP/FTPS with certificate trust and LIST parsing
+(Phase 3); built-in/external editors, Quick Look, command palette, richer activity UI,
+server groups/bookmarks, and import/export (Phase 4). These do not block SFTP release.
+
+**Later parity work:** chmod dialog
 (perms are display-only in the design), speed limits, remote file search, directory
 comparison, synchronized browsing, filename filter sets, per-site charset override,
 timezone-offset handling, queue-completion actions.
 
 **Out (legacy):** FTP proxy format strings, active-mode network wizard (default to
-passive; active mode config only in advanced settings), icon theme packs, VMS/MVS/OS-9
+passive; active mode deferred), icon theme packs, VMS/MVS/OS-9
 server hints (parser keeps Unix/DOS/IIS/MLSD only unless demand appears), update
 checker (replaced by Tauri updater), shell-extension drag & drop.
 
@@ -166,14 +195,26 @@ checker (replaced by Tauri updater), shell-extension drag & drop.
 > [Phase 2](docs/phases/phase-2-transfer-queue.md) · [Phase 3](docs/phases/phase-3-ftp-ftps.md) ·
 > [Phase 4](docs/phases/phase-4-relay-experience.md) · [Phase 5](docs/phases/phase-5-ship.md)
 
-### Phase 0 — Foundation (week 1)
+Execution order: **0 → 1 → 2 → 5 → 3 → 4**. Existing phase numbers and filenames
+remain stable. Phase 5 is a reusable release gate, first applied to SFTP 1.0 and
+repeated for later protocol/experience releases. Re-estimate after Phase 0 evidence
+and again after the Phase 1 slice; record effort ranges and unresolved dependencies
+then. Do not turn the previous week numbers into deadlines or skip beta to meet them.
+
+### Phase 0 — Foundation and compatibility gates
 - Scaffold: Tauri v2 app + Cargo workspace with `relay-core`, React/Vite/TS frontend, CI
   (GitHub Actions matrix: macOS + Windows, `tauri-action` builds).
-- Transcribe design tokens → `tokens.css`; static app shell (tabs, sidebar, panes,
-  drawer) with mock data — pixel-match the design early.
-- Define the full IPC contract as shared types (Rust structs ↔ TS types; consider `specta`/`tauri-specta` for codegen).
+- Prove SFTP auth (including Windows OpenSSH agent), concurrent browse/transfer,
+  cancellation, and interrupted-transfer verification with a small engine harness.
+- Probe FTPS session reuse with actual control/data connections before declaring that
+  backend settled. A failed FTPS prototype records a deferred decision, without
+  blocking SFTP work; a failed SFTP requirement must be resolved before Phase 1.
+- Establish design tokens and a representative static shell; prioritize compatibility
+  evidence over complete visual polish. Validate keychain and platform interactions.
+- Generate shared IPC types; prove channel subscription, snapshot recovery, and an
+  engine test run with no Tauri dependency. Record exact tested dependency versions.
 
-### Phase 1 — SFTP vertical slice (weeks 2–4)
+### Phase 1 — SFTP vertical slice
 - `relay-core`: Session + Protocol trait; SFTP backend (russh): connect, auth
   (password/key/agent), host-key trust store + prompt flow, list, download/upload with
   progress events, mkdir/rename/delete.
@@ -181,15 +222,25 @@ checker (replaced by Tauri updater), shell-extension drag & drop.
 - Wire real data into the UI: connect screen → session tab → browse → single transfers
   with flow-gutter pills. Keychain storage. **Milestone: usable SFTP client.**
 
-### Phase 2 — Transfer queue done right (weeks 5–6)
+### Phase 2 — Durable SFTP queue
 - Scheduler: queue, concurrency limit, priorities/reorder, pause-all, retry w/ backoff,
-  cancel via abort handles, queue persistence (SQLite via `rusqlite` or JSON).
-- Resume: byte-offset resume (SFTP random access; FTP REST later), conflict sheet with
-  full action set incl. "apply to remaining N" and keep-both rename.
+  cooperative cancellation, SQLite persistence via `rusqlite`, schema migrations.
+- Resume: source facts + partial ownership + verified content prefix + durable
+  offsets; changed or unverifiable source requires restart/skip/cancel. Final size
+  alone is insufficient. Conflict actions include "apply to remaining" and keep-both.
 - Recursive folder transfers (traversal engine ≈ FileZilla's recursive_operation).
-- Auto-reconnect with queue preservation + connection-lost banner.
+- Auto-reconnect and app/UI restart recovery with queue preservation.
 
-### Phase 3 — FTP/FTPS (weeks 7–9)
+### Phase 5 — Ship SFTP 1.0 (before Phases 3 and 4)
+- Complete essential settings, status/error logs, keyboard/focus behavior, and all
+  loading/permission/connection-loss states needed by the SFTP flows.
+- Fault injection, hash-verified recovery, supported-platform QA, and a private beta.
+- macOS: signing + notarization, universal binary (aarch64 + x86_64).
+- Windows: signed NSIS installer; updater and release pipeline on both platforms.
+- Release only after Phase 5's SFTP exit criteria pass. Editors, LIST parsing, and
+  FTP/FTPS interoperability are not prerequisites for SFTP 1.0.
+
+### Phase 3 — FTP/FTPS (post-1.0)
 - suppaftp backend behind the same Protocol trait; rustls FTPS + cert trust sheet;
   INSECURE_FTP warnings per the design.
 - Listing: FEAT/MLSD detection; heuristic LIST parser (Unix/DOS/IIS) with a golden-file
@@ -197,32 +248,32 @@ checker (replaced by Tauri updater), shell-extension drag & drop.
 - Parallel FTP transfers = additional control connections (per-site connection cap).
 - Integration tests against dockerized vsftpd/ProFTPD/pure-ftpd + openssh-sftp in CI.
 
-### Phase 4 — The Relay experience (weeks 10–12)
+### Phase 4 — The Relay experience (post-1.0)
 - Command palette actions, Quick Look, built-in editor tab (save-to-server + local
   backup), external-editor watch → upload prompt, activity feed + raw log toggle,
-  server editor Test-connection, settings (theme, density, concurrency, default
-  conflict action), toasts, bookmarks, import/export (incl. FileZilla sitemanager.xml
+  extended settings, bookmarks, import/export (incl. FileZilla sitemanager.xml
   import — parse their XML, don't link their code).
-
-### Phase 5 — Ship (weeks 13–14)
-- macOS: signing + notarization, universal binary (aarch64 + x86_64).
-- Windows: MSI/NSIS via Tauri bundler, code-signing cert.
-- Tauri updater plugin + release pipeline; crash/log capture; perf pass
-  (10k-file directories, memory under long transfer sessions).
-- v1.0 → then v1.x parity items from §5.
+- Repeat Phase 5's applicable regression, beta, packaging, and updater checks for
+  each later release; add protocol/editor-specific acceptance criteria.
 
 ## 7. Risks & open questions
 
-1. **LIST parsing breadth** — the eternal FTP tarpit. Mitigation: MLSD-first, corpus
-   tests, ship with "server type" override like FileZilla's.
-2. **russh-sftp maturity** — smaller project than russh; pin versions, keep `ssh2` as a
-   documented escape hatch, verify its license at pin time.
-3. **FTPS interop with ancient servers** (session reuse requirements, odd TLS stacks) —
-   rustls may reject what native-tls tolerates; keep the TLS backend feature-flagged.
-4. **GPL hygiene** — contributors must treat `filezilla/` as read-only reference.
-   Consider moving it to a separate `reference/` clone outside the shipped repo before
-   open-sourcing Relay.
-5. **Windows agent auth** — russh agent support vs. Pageant/OpenSSH-agent-on-Windows
-   named pipes; needs an early spike in Phase 1.
-6. **Performance** — virtualized lists + Rust-side sorting/filtering for huge
-   directories; throttle progress events (~10 Hz) so the webview isn't flooded.
+1. **SFTP interoperability** — Phase 0 must prove Windows agent auth, channel
+   ownership, bounded cancellation, and throughput under realistic latency. Record
+   versions, commands, platforms, results, and fallback decisions in a compatibility ADR.
+2. **Resume correctness** — offsets and matching sizes do not establish content
+   identity. Test source replacement (including same-size changes), partial corruption,
+   stale checkpoints, and forced termination. Prefer a safe restart to uncertain resume.
+3. **FTPS interoperability** — prove session reuse and certificate handling early;
+   a shared TLS cache alone is not acceptance evidence. Backend changes require a
+   reproducible failing server fixture. Full FTP/FTPS support stays post-1.0.
+4. **UI/runtime boundary** — Tauri-free core, nonblocking scheduler, snapshot recovery,
+   and Rust-owned job transitions are architectural requirements, verified in P0–P2.
+5. **Platform behavior and performance** — test macOS and Windows webviews early;
+   virtualize listings, batch progress (~10 Hz per job), and bound event/log buffers.
+6. **LIST parsing breadth** — post-1.0, MLSD-first with a Unix/DOS/IIS corpus and
+   explicit degraded states; expand formats only with demonstrated demand.
+7. **Reference handling** — `reference/` remains read-only and untracked except its
+   README; implement independently and never copy reference code.
+8. **Delivery scope** — estimate from prototype and slice results. Schedule beta and
+   signing setup explicitly; do not promise full FileZilla parity on the original timeline.

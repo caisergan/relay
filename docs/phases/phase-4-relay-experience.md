@@ -1,8 +1,15 @@
-# Phase 4 — The Relay Experience (weeks 10–12)
+# Phase 4 — The Relay Experience (Post-1.0)
 
 Objective: the features that make Relay feel like Relay rather than "FileZilla with new
 paint": editor, Quick Look, command palette, activity feed, settings, import — every
 overlay and flow the design specifies, wired to the real engine.
+
+This expansion follows SFTP 1.0 and the planned P3 protocol expansion. Editors,
+Quick Look, the full command palette, groups/bookmarks, and import/export do not
+block SFTP release. P1/P2/P5 already deliver saved-server CRUD/Test connection,
+essential settings, basic logs, keyboard/focus accessibility, and error states;
+extend those implementations here rather than postponing their baseline to this phase.
+Use P0's shared channel/snapshot bridge for all added views and job interactions.
 
 ## 4.1 Built-in remote editor (editor tab kind)
 
@@ -61,15 +68,15 @@ Reimplements FileZilla's edithandler with the `notify` crate:
 
 ## 4.5 Activity slide-over & logging
 
-- Human feed: `Activity` events (uploaded/downloaded/error/connected — design's icons +
-  relative timestamps) with per-session filter; raw-log toggle swaps to the P3 ring
+- Human feed: `Activity` updates (uploaded/downloaded/error/connected — design's icons +
+  relative timestamps) with per-session filter; raw-log toggle swaps to the P1/P3 ring
   buffer view (Status/Command/Response/Error coloring per design).
 - "Copy log" button; log-to-file setting (rotating, 5 MB × 3, in app_log_dir via
   `tracing-appender`) — support-request friendly.
 
 ## 4.6 Settings, servers, bookmarks, import
 
-- Settings sheet (design): theme (light/dark/system), row density, concurrent
+- Extend the shipped settings sheet: theme (light/dark/system), row density, concurrent
   transfers slider 1–8 (live — scheduler listens), default conflict action
   (Ask/Overwrite/Skip). Extended page (non-design, plain list): default download dir,
   external editor path, auto-upload-on-change toggle, keepalive interval, log level,
@@ -83,13 +90,13 @@ Reimplements FileZilla's edithandler with the `notify` crate:
   ONLY with explicit user consent checkbox → keychain. Also import folder structure →
   groups. This is data-format compatibility, not code reuse — clean re: GPL.
   Export: our own `relay-servers.json` (documented schema) + optional FZ-format export
-  deferred to v1.x.
+  deferred to a later release.
 - Recents on ConnectView: last 8 ad-hoc connections (host+proto only, no secrets),
   "promote to saved server" affordance (FileZilla's copy-to-sitemanager lesson).
 
-## 4.7 Polish pass required by the design
+## 4.7 Extend the shipped accessibility and UX baseline
 
-- All designed empty/edge states wired: empty folder, permission denied, connection
+- Preserve the P5 empty/edge states and extend them to new flows: empty folder, permission denied, connection
   lost pane variant, loading skeletons, sidebar-collapsed floating button.
 - Toast system finalized (ok/danger/transit + action button, stacking, auto-dismiss
   with hover-pause).
@@ -111,3 +118,6 @@ Reimplements FileZilla's edithandler with the `notify` crate:
    token-accurate in both themes and densities.
 5. No unhandled-promise/panic paths: error taxonomy renders a designed state or toast
    for every `EngineError` variant (checklist test).
+6. Repeat P5's relevant regression, performance, packaging, updater, and beta checks
+   for this release; lazily loaded editor/preview code does not regress SFTP startup
+   or transfer behavior. Editor remounts reconcile jobs without duplicate saves.

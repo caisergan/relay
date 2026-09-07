@@ -1,8 +1,12 @@
-# Phase 1 — SFTP Vertical Slice (weeks 2–4)
+# Phase 1 — SFTP Vertical Slice
 
 Objective: a genuinely usable SFTP client: connect (all auth methods), trust host keys,
 browse local+remote, transfer single files with live progress, manage files. Everything
 runs through the real engine — no mocks left on the SFTP path.
+
+Prerequisite: P0's SFTP/keychain gates and runtime/IPC contract are proven. This is
+an internal usable slice; the public SFTP 1.0 release follows P2 and P5. Record a new
+delivery estimate after this slice instead of assuming the previous week allocation.
 
 ## 1.1 Session actor (the concurrency backbone)
 
@@ -25,7 +29,7 @@ pub struct SessionActor {
     id: SessionId,
     backend: Box<dyn Protocol>,        // SftpBackend now, FtpBackend in P3
     cmd_rx: mpsc::Receiver<SessionCmd>,
-    events: mpsc::Sender<EngineEvent>, // -> Tauri emit loop
+    events: mpsc::Sender<EngineEvent>, // -> core state coordinator -> shell channel adapter
     interact: Arc<dyn Interact>,
 }
 ```
@@ -33,13 +37,17 @@ pub struct SessionActor {
 Actor loop rules:
 - `tokio::select!` over `cmd_rx`, a 30s keepalive interval (`noop()`, also measures
   latency → `Latency` event), and the connection's liveness.
-- Browse operations (list/stat/mkdir/...) run inline in the actor — they're short and
-  serialized per session, exactly like FileZilla's control connection.
+- Browse operations (list/stat/mkdir/...) are serialized per session, with deadlines
+  and cancellation; remote operations can stall. A stalled listing must not prevent
+  disconnect or leave shutdown waiting indefinitely.
 - **Transfers do NOT run in the browse actor** (they'd block browsing). See 1.4.
 - On fatal error: emit `SessionState::Disconnected{reason}`, drop backend. (Reconnect
   logic arrives in P2; P1 shows the designed connection-lost pane + manual reconnect.)
-- Spawn with `tauri::async_runtime::spawn`; store `AbortHandle` in `SessionHandle`;
-  `session_close` sends `Disconnect` then aborts after a grace timeout.
+- Spawn through the injected `tokio::runtime::Handle`; store cancellation tokens and
+  join handles in `SessionHandle`. No Tauri imports in `relay-core`. `session_close`
+  cancels the session and its children, denies outstanding prompts, and awaits cleanup
+  with a grace deadline; abort is only a fallback. The shell initiates the same process
+  on app exit. Plain Tokio tests exercise this lifecycle without a GUI.
 
 ## 1.2 SftpBackend (russh + russh-sftp)
 
@@ -70,14 +78,24 @@ Operation mapping:
   (`rwxr-xr-x` renderer + unit tests), uid/gid→owner strings when `longname` provides
   them. Symlinks: `stat` the target for `EntryKind::Symlink{target_kind}`.
 - `download`/`upload`: build on **`RawSftpSession::read/write(handle, offset, …)`**
-  (true pread/pwrite; verified in russh-sftp v2.3.x) rather than the higher-level
-  `File` AsyncRead/Write wrapper — offset addressing gives us resume for free and
-  leaves the door open to multi-chunk parallel single-file transfers later.
+  using the versions and handle ownership proven in P0. Offset addressing supplies
+  the mechanics for P2 resume; it does not establish source or partial-file integrity.
   Loop: read/write chunk at `offset + transferred` → `progress(bytes_total)`;
   chunk 128 KiB (spike: measure 32/64/128/256 KiB against a real server; russh-sftp
-  honors `limits@openssh.com`). Check `cancel.is_cancelled()` each iteration.
-- Download safety: write to `{name}.relaypart`, fsync, atomic rename on completion —
-  this is also what makes resume detection trivial (a `.relaypart` file = partial).
+  negotiates server limits). Check cancellation while awaiting I/O as well as between
+  chunks; apply deadlines and close/discard a lane when cancellation leaves its
+  protocol state uncertain. Use P0 latency measurements to choose bounded request
+  pipelining if sequential chunks limit throughput.
+- Download safety: exclusively create a job-specific sibling temporary file, e.g.
+  `.{name}.{job_id}.relaypart`, flush/fsync, then finalize with the selected conflict
+  policy. Verify replacement/rename behavior on macOS and Windows; keep-both must
+  not overwrite a file created between the initial conflict check and completion.
+  A suffix alone never establishes ownership or resume eligibility. P1 cancels and
+  removes only its own partials; P2 adds durable ownership records and paused recovery.
+- Uploads also use an owned job-specific remote temporary path where supported,
+  then finalize after acknowledged writes and validation. Record rename/replace
+  capabilities; if safe finalization is unavailable, fail with a clear error in the
+  initial SFTP slice rather than claiming atomic replacement.
 - `read_file`: for Quick Look/editor; enforce `max` (default 512 KiB) and return
   `EngineError::Protocol("too large")` beyond it.
 
@@ -96,6 +114,8 @@ app_data_dir()/
 - `SecretSource` (trait) → `KeyringSecrets`: service `"relay"`, account
   `"{server_uuid}:password"` / `":passphrase"`. Fallback `Ask` path when the entry is
   missing. Server delete ⇒ best-effort keyring cleanup.
+- Run blocking OS keychain calls off async worker threads. The engine's prompt broker
+  retains pending prompt state; the shell only transports requests and replies.
 
 ## 1.4 Transfers without a queue (P1 scope)
 
@@ -115,6 +135,8 @@ Rust-side (consistency + hidden files + future watching):
 - `local_list_dir(path) -> Vec<LocalEntry>` via `std::fs::read_dir` + `metadata()`;
   hidden = dotfiles (macOS) / `FILE_ATTRIBUTE_HIDDEN` (Windows, via
   `std::os::windows::fs::MetadataExt`). Sort dirs-first server-side… i.e. Rust-side.
+- Run blocking filesystem enumeration on a bounded blocking worker; cancel or ignore
+  stale requests when the user navigates away.
 - `local_default_dir()` = home dir. Volume/drive enumeration for breadcrumb root menu:
   macOS `/Volumes/*`, Windows `GetLogicalDrives` (the `sysinfo` crate covers both).
 - Errors map to the designed permission-denied / not-found pane states.
@@ -124,10 +146,16 @@ Rust-side (consistency + hidden files + future watching):
 - ConnectView: URL parser (`sftp://user@host:22/path`) as a pure TS function with unit
   tests — proto/user/host/port/path chips + "inferred from port" warning per design;
   Enter → `servers_save` (ephemeral recent) + `session_open`.
-- Prompt plumbing: `engine://event` carries `PromptRequest{prompt_id, session_id, kind, data}`;
-  `uiStore` renders the matching sheet; answer → `resolve_prompt`. The Rust side holds
-  `HashMap<PromptId, oneshot::Sender<PromptReply>>` — entries time out after 10 min
-  (auto-Deny) so an ignored sheet can't leak a stuck operation.
+- SFTP is the only selectable protocol for 1.0. Reject FTP/FTPS URLs with a clear
+  unavailable-protocol message rather than trying SFTP on their ports.
+- Prompt plumbing: the P0 channel carries `PromptOpened`/`PromptClosed`; snapshots
+  include unresolved prompts. `uiStore` renders by stable prompt id; answers use
+  `resolve_prompt`. The core broker holds prompt facts and oneshot replies; it accepts
+  a reply once, rejects stale/duplicate ids, and times out after 10 min (auto-Deny).
+  A UI remount reconstructs the existing prompt rather than creating another one.
+- Implement bounded per-session status/error logs and a basic copyable log view now,
+  with secrets redacted. Rich activity/raw-protocol UI is P4. Logs use the P0 channel
+  and a bounded Rust backlog fetched on demand.
 - Remote pane: listing render, sort (name/size/modified; dirs first), filter, dimmed
   dotfiles, skeleton rows while `ListDir` in flight, breadcrumb navigation, double-click
   dir enter, F2 rename, Del delete (with confirm modal), new-folder button.
@@ -147,12 +175,15 @@ Tests:
   progress monotonicity + cancellation mid-transfer, host-key reject path.
   Gate behind `--features integration` so plain `cargo test` stays offline.
 - Manual matrix: macOS + Windows against a real VPS (openssh) — agent auth on both OSes
-  (**the Windows agent spike from P0 risk list happens here at the latest**).
+  reuses and expands the passing P0 Windows/macOS agent prototype.
+- Lifecycle: stalled listing/transfer followed by close; no orphan tasks or unresolved
+  prompts. Remount during transfer and trust prompt; snapshot restores current state.
 
 Exit criteria:
 1. Connect to a real server via password, key file (with passphrase), and agent.
 2. Host-key sheet appears on first connect; pin persists; changed-key shows red variant.
 3. Browse 5k-entry directory smoothly; rename/delete/mkdir reflected after refresh.
-4. Upload + download with live gutter pills; cancel works; partial file cleaned up
-   (`.relaypart` present during, atomic rename after).
+4. Upload + download with live gutter pills; bounded cancellation works; only owned
+   temporary files are cleaned up, and successful finalization respects conflicts on
+   both OSes. The destination is never replaced by an incomplete transfer.
 5. Passwords live only in the OS keychain (verify `servers.json` by inspection).

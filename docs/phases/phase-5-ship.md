@@ -1,7 +1,29 @@
-# Phase 5 — Hardening & Ship (weeks 13–14)
+# Phase 5 — SFTP 1.0 Hardening & Ship
 
 Objective: signed, notarized, auto-updating installers for macOS and Windows, with the
 performance and reliability bar of a tool people trust with their servers.
+
+Execute this phase **after P2 and before P3/P4**. Phase numbering is retained for
+stable links; the first release supports SFTP only. Run the applicable checks again
+for later releases, adding FTP/FTPS and editor checks when those features land.
+Allow a dedicated beta window and estimate hardening from P0/P1 evidence; there is
+no fixed week-14 deadline. Start signing-account/setup work during foundation so
+external provisioning does not become a last-minute release dependency.
+
+## 5.0 Essential SFTP experience (required before beta)
+
+- Saved-server CRUD/Test connection, dual panes, queue/conflict flows, and settings
+  (theme, density, concurrency, default conflict action, download directory) complete.
+- Basic copyable status/error log with redaction and bounded history. Report issue
+  reachable from a menu/settings entry; the P4 activity panel/palette is not required.
+- Complete empty/loading/permission-denied/connection-loss states and actionable
+  source-changed/resume-unverifiable errors. No visible enabled FTP/editor/preview
+  controls that lead to unimplemented flows.
+- Keyboard navigation and shortcuts for shipped actions, focus traps in dialogs,
+  visible focus rings, icon labels, reduced motion, and contrast in both themes.
+  Verify title bar and OS drag-in on macOS and Windows; check the actual webviews.
+- Exercise P0 snapshot recovery while transferring, after completion, and while
+  answering prompts. Restarting/remounting the UI must not duplicate jobs or replies.
 
 ## 5.1 Performance pass (budget-driven, measure first)
 
@@ -11,21 +33,29 @@ Targets (measured, in release builds):
   already in from P0.)
 - Progress events ≤ 10 Hz per job, UI CPU < 10% during a 8-lane transfer.
 - Cold start < 1.5 s to interactive shell; memory < 200 MB with 3 sessions + queue.
-- Startup: lazy-load CodeMirror + language packs (editor tab opens < 300 ms warm).
+- SFTP 1.0 has no editor bundle. On the later P4 release, lazy-load CodeMirror and
+  language packs (editor tab opens < 300 ms warm) and recheck startup/memory budgets.
 Tooling: `tracing` spans + a hidden perf HUD (frame time, event rate); `cargo flamegraph`
 on the engine under a synthetic 1k-job queue.
 
 ## 5.2 Reliability hardening
 
-- Chaos week: scripted fault injection into the docker matrix — connection resets
+- Scripted fault injection into the SFTP fixture matrix — connection resets
   mid-chunk, stalled sockets (tc netem delay/loss), server restarts, disk-full on
   download (tmpfs quota), permission flips mid-recursive-transfer. No panics, no stuck
   jobs, every failure lands in a designed state.
+- Force-kill the process without an exit hook. Verify durable queue/partial recovery,
+  checkpoint reconciliation, idempotent finalization, and hashes in both directions.
+  Include same-size/same-mtime source replacement, corrupt partials, unavailable
+  verification, and SQLite write failures. A size match alone never passes recovery.
+- Re-run the P0/P1 authentication matrix on both OSes, including Windows OpenSSH
+  agent, encrypted keys, keyboard-interactive, and rejected/changed host keys.
 - Panic policy: `panic = "abort"` is NOT acceptable in the shell — install a panic hook
   that logs + shows a crash dialog with log-file path; engine tasks are
   `catch_unwind`-wrapped at the actor boundary so one session can't take the app down.
 - Secrets audit: grep-audit + test asserting `servers.json`/`relay.sqlite`/logs contain
-  no password/passphrase strings after a scripted session (incl. masked PASS in logs).
+  no password/passphrase strings after a scripted SFTP session. Extend with masked
+  FTP PASS checks when P3 ships.
 - Update safety: queue db schema version + migration table from day one (already in P2;
   verify upgrade path with a fixture db).
 
@@ -43,9 +73,10 @@ on the engine under a synthetic 1k-job queue.
 ## 5.4 Windows distribution
 
 - Bundler: NSIS (per-user install, no admin) — MSI only if enterprise asks later.
-- Code signing: **Azure Trusted Signing** (cheapest sane 2026 option for individual
-  devs) via `azuresigntool` in CI; fallback: OV cert + HSM token requires local signing
-  — decide based on budget; UNSIGNED IS NOT AN OPTION (SmartScreen would kill adoption).
+- Code signing: select a provider after checking current eligibility, pricing, and
+  CI integration during P0 (evaluate Microsoft's signing service and certificate
+  providers). Record the decision and verify a signed artifact on a clean machine;
+  the release gate requires signed installers, not a particular vendor.
 - WebView2: bootstrapper embed mode (`downloadBootstrapper`) — default Win11 has it.
 - Test on clean Win10 22H2 + Win11 VMs (SmartScreen behavior, HiDPI, credential manager).
 
@@ -61,9 +92,11 @@ on the engine under a synthetic 1k-job queue.
 
 ## 5.6 Beta & feedback loop
 
-- 2-week private beta (0.9.x) with 5–10 real users before 1.0: their weird servers feed
-  the LIST corpus and interop fixes (this is how FileZilla got good — compressed).
-- In-app "Report issue" (palette + menu): opens GitHub issue template with app version,
+- Plan an initial 2-week private beta (0.9.x) with 5–10 real users before SFTP 1.0;
+  extend if release blockers remain. Cover both OSes, authentication methods, long
+  queues, unreliable networks, and real SSH servers. Turn failures into fixtures.
+  Later P3 beta adds FTP/FTPS servers and expands the LIST corpus.
+- In-app "Report issue" (menu/settings; palette added in P4): opens GitHub issue template with app version,
   OS, and (user-confirmed) tail of the raw log with hostnames scrubbed.
 - Crash/log collection stays LOCAL (no telemetry in v1 — privacy as a feature vs
   FileZilla's bundleware reputation; state it in the README).
@@ -71,16 +104,25 @@ on the engine under a synthetic 1k-job queue.
 ## 5.7 v1.0 exit criteria
 
 1. Fresh macOS (both archs) and Windows machines: download → install → connect to
-   SFTP + FTPS + FTP servers → transfer 1 GB folder both directions — zero warnings
+   SFTP server → transfer 1 GB folder both directions — zero warnings
    beyond first-run Gatekeeper/SmartScreen norms, zero manual steps.
 2. Auto-update 0.9.x → 1.0.0 works on both OSes (staged test with the real manifest).
-3. Chaos suite green; perf budgets met; secrets audit clean.
-4. Beta feedback triaged: all P0/P1 bugs closed, LIST corpus expanded with every
-   format met during beta.
+3. SFTP chaos/integrity suite green; perf budgets met; secrets audit clean; UI
+   snapshot and prompt recovery pass on both OSes.
+4. Beta feedback triaged: all release-blocking/critical/high-severity bugs closed,
+   with regression fixtures for authentication, transfer, and recovery failures.
 5. Docs: README (screenshots, comparison table), quickstart, server-compat notes,
-   `SECURITY.md` (trust model: host-key pinning, cert pinning, keychain, no telemetry).
+   `SECURITY.md` (host-key pinning, keychain, resume verification, no telemetry).
+   State explicitly that FTP/FTPS, editors, and previews are planned extensions.
+6. P3/P4 completion is not required. Before later releases, extend these criteria to
+   cover shipped protocols, certificate trust, LIST corpus, editor save conflicts,
+   and the same install/update/recovery checks.
 
-## 5.8 Post-1.0 backlog (v1.x, ordered by expected demand)
+## 5.8 Post-1.0 sequence and later backlog
+
+First: P3 FTP/FTPS expansion, then P4 editors/Quick Look/palette/richer management.
+Each returns through the applicable release gates above. Subsequent candidates,
+prioritized from actual beta/user demand:
 
 1. chmod dialog + recursive chmod (perms currently display-only — top user ask bet).
 2. Speed limits (token bucket in the scheduler; FileZilla's CRateLimiter pattern).
