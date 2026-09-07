@@ -1,0 +1,45 @@
+[package]
+name = "relay-core"
+description = "Relay's transfer engine: command-in / event-out, with no GUI dependency."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# P3. The FTP backend stays out of the default build until its Phase 0 gates pass.
+ftp = ["dep:suppaftp"]
+# Opt-in tests that need a live server fixture (docker). Plain `cargo test` stays offline.
+integration = []
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+specta.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+uuid.workspace = true
+
+# Protocol backends. `ring` is the single crypto provider across russh, rustls and
+# suppaftp for Phase 0; aws-lc-rs is the documented fallback (ADR 004).
+russh = { version = "0.63.2", default-features = false, features = ["flate2", "ring", "rsa"] }
+russh-sftp = "2.4.0"
+suppaftp = { version = "11.0.0", default-features = false, features = ["async-secure", "tokio-rustls-ring"], optional = true }
+
+# Durable queue state (P2) and OS secret storage (P1).
+rusqlite = { version = "0.40.2", features = ["bundled", "chrono", "uuid"] }
+keyring = "4.2.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# Type generation only; never linked into the shipped engine.
+specta-serde = "0.0.12"
+specta-typescript = "0.0.12"

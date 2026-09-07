@@ -1,0 +1,263 @@
+/* Design tokens transcribed from claude-design-relay/Relay.dc.html.
+ *
+ * The design is the source of truth for every value here. When a colour or a metric
+ * disagrees with the prototype, the prototype wins — change it here, not in a
+ * component. Components must never hard-code a hex value. */
+
+/* Self-hosted, never a CDN: the app runs behind a strict CSP and must start offline. */
+@import '@fontsource/space-grotesk/400.css';
+@import '@fontsource/space-grotesk/500.css';
+@import '@fontsource/space-grotesk/600.css';
+@import '@fontsource/space-grotesk/700.css';
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+
+:root {
+  --surface: #f7f8f7;
+  --panel: #ffffff;
+  --panel-2: #fbfcfb;
+
+  --ink: #1a1d1c;
+  --ink-soft: #616763;
+  --ink-faint: #9aa19d;
+
+  /* Signal: selection, focus, links, the active transfer direction. */
+  --signal: #2456e6;
+  --signal-soft: #eaf0fe;
+  /* Transit: in-flight transfers and unsaved state. */
+  --transit: #e8a03c;
+  --transit-soft: #fbf1de;
+  --ok: #2e9e5b;
+  --ok-soft: #e6f4ec;
+  --danger: #d6453c;
+  --danger-soft: #fbebea;
+
+  --line: #e3e6e4;
+  --line-2: #eef0ee;
+
+  --app-bg: #e9ebe9;
+
+  --elev:
+    0 1px 2px rgba(20, 29, 28, 0.05), 0 10px 30px rgba(20, 29, 28, 0.08);
+  --elev-lg: 0 20px 60px rgba(20, 29, 28, 0.22);
+
+  /* Density. Comfortable is the default; compact is the settings toggle. */
+  --row: 40px;
+  --row-compact: 32px;
+
+  --font-display: 'Space Grotesk', system-ui, sans-serif;
+  --font-ui: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  --font-size: 13px;
+
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  --titlebar-h: 40px;
+  --gutter-w: 56px;
+
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --surface: #131619;
+  --panel: #1b1f23;
+  --panel-2: #20252a;
+
+  --ink: #e9ecea;
+  --ink-soft: #9ba4a0;
+  --ink-faint: #6b736f;
+
+  --signal: #5b87f2;
+  --signal-soft: #1d2a47;
+  --transit: #eba94a;
+  --transit-soft: #3a2e19;
+  --ok: #43b877;
+  --ok-soft: #17301f;
+  --danger: #e5655c;
+  --danger-soft: #3a1f1e;
+
+  --line: #2b3137;
+  --line-2: #242a2f;
+
+  --app-bg: #0d0f11;
+
+  color-scheme: dark;
+}
+
+[data-density='compact'] {
+  --row: 32px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--app-bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--font-size);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+a {
+  color: var(--signal);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+input,
+button,
+textarea,
+select {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+}
+
+::selection {
+  background: rgba(36, 86, 230, 0.18);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 130, 126, 0.35);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 130, 126, 0.55);
+  background-clip: content-box;
+}
+
+/* Focus is always visible: keyboard operation is a shipping requirement, not a
+ * post-1.0 nicety. */
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 1px;
+}
+
+@keyframes rl-skel {
+  0% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.5;
+  }
+}
+@keyframes rl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes rl-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(46, 158, 91, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(46, 158, 91, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(46, 158, 91, 0);
+  }
+}
+@keyframes rl-pulse-amber {
+  0% {
+    box-shadow: 0 0 0 0 rgba(232, 160, 60, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(232, 160, 60, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(232, 160, 60, 0);
+  }
+}
+@keyframes rl-trail {
+  0% {
+    opacity: 0;
+    transform: scaleY(0.2);
+  }
+  30% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: scaleY(1);
+  }
+}
+@keyframes rl-flow {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 0 -18px;
+  }
+}
+@keyframes rl-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes rl-sheet {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes rl-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Guarded from the start, per the design. The flow gutter is the most motion-heavy
+ * surface in the app and must not be the reason someone cannot use it. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

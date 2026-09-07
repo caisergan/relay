@@ -1,0 +1,29 @@
+[package]
+name = "relay-app"
+description = "Relay — the Tauri shell. A thin adapter over relay-core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# The desktop binary links the library; mobile targets would need the cdylib.
+name = "relay_app_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+relay-core.workspace = true
+
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2.11.5", features = ["protocol-asset"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid.workspace = true

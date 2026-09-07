@@ -1,0 +1,6 @@
+# macOS universal-binary targets are installed by the release job, not here:
+# listing them would force every Linux and Windows checkout to download them.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
