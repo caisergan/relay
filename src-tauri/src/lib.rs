@@ -25,7 +25,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
-            app.manage(AppState::new());
+            app.manage(AppState::start());
 
             // The window is created hidden so the first paint is themed rather than a
             // white flash; the frontend reveals it once tokens are applied.

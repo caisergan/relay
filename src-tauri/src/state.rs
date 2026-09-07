@@ -8,8 +8,8 @@ use relay_core::demo::DemoEngine;
 use relay_core::hub::EngineHub;
 use relay_core::model::{ServerConfig, ServerId};
 use relay_core::settings::Settings;
+use tauri::async_runtime::JoinHandle;
 use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 pub struct AppState {
@@ -22,11 +22,16 @@ pub struct AppState {
     pub servers: RwLock<Vec<ServerConfig>>,
     pub settings: RwLock<Settings>,
     /// Forwarder task per subscription, so unsubscribing actually stops the work.
+    /// Tauri's `JoinHandle`, not tokio's: they are distinct types and the shell spawns
+    /// through Tauri's runtime.
     pub forwarders: RwLock<HashMap<Uuid, JoinHandle<()>>>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    /// Starts the engine. Named `start` rather than `new` because it spawns the pump
+    /// and needs a live Tauri async runtime — a `Default` that panics off-runtime
+    /// would be worse than an honest name.
+    pub fn start() -> Self {
         let rt = tauri::async_runtime::handle().inner().clone();
         let hub = EngineHub::start(&rt);
         let engine = Arc::new(DemoEngine::new(Arc::clone(&hub), rt));
