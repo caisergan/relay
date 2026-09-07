@@ -250,7 +250,7 @@ async fn a_transfer_can_be_cancelled_and_leaves_the_destination_alone() {
             .map(|j| j.state)
     })
     .await;
-    assert_eq!(state, JobState::Cancelled);
+    assert!(matches!(state, JobState::Cancelled { .. }));
     assert!(
         !local.exists(),
         "a cancelled download must not leave a half-written file at the destination"

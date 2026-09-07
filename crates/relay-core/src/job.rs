@@ -49,7 +49,13 @@ pub enum JobState {
         /// finished, and two fields that can disagree about that would eventually.
         skipped: bool,
     },
-    Cancelled,
+    /// Carries a time for the same reason `Done` does: the Completed tab sorts by it,
+    /// and the seven-day prune has nothing to compare a bare unit variant against —
+    /// which would leave cancelled jobs in the database for ever.
+    #[serde(rename_all = "camelCase")]
+    Cancelled {
+        at: DateTime<Utc>,
+    },
 }
 
 impl JobState {
@@ -57,7 +63,7 @@ impl JobState {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            JobState::Done { .. } | JobState::Cancelled | JobState::Failed { .. }
+            JobState::Done { .. } | JobState::Cancelled { .. } | JobState::Failed { .. }
         )
     }
 

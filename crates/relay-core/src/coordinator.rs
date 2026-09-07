@@ -280,7 +280,10 @@ impl Inner {
         while self.finished_order.len() > MAX_FINISHED_JOBS {
             if let Some(id) = self.finished_order.pop_front()
                 && let Some(job) = self.jobs.get(&id)
-                && matches!(job.state, JobState::Done { .. } | JobState::Cancelled)
+                && matches!(
+                    job.state,
+                    JobState::Done { .. } | JobState::Cancelled { .. }
+                )
             {
                 self.jobs.remove(&id);
             }

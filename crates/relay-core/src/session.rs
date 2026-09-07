@@ -646,7 +646,9 @@ impl SessionActor {
         }
         if let Some(index) = self.pending.iter().position(|o| o.job == job) {
             let order = self.pending.remove(index).expect("index from position");
-            self.out.job(&order, JobState::Cancelled, Bytes::ZERO).await;
+            self.out
+                .job(&order, JobState::Cancelled { at: Utc::now() }, Bytes::ZERO)
+                .await;
             return Ok(());
         }
         Err(EngineError::NotFound {
@@ -867,7 +869,7 @@ async fn run_transfer(task: TransferTask) {
             },
             Bytes(out.final_size),
         ),
-        Err(EngineError::Cancelled) => (JobState::Cancelled, Bytes::ZERO),
+        Err(EngineError::Cancelled) => (JobState::Cancelled { at: Utc::now() }, Bytes::ZERO),
         Err(error) => (failed(error), Bytes::ZERO),
     };
     publish(
@@ -945,9 +947,14 @@ async fn resolve_conflict(ctx: &Conflict<'_>) -> std::result::Result<(), JobStat
 
     match action {
         ConflictAction::Overwrite => Ok(()),
-        // No `Skipped` state exists: the drawer draws this as a job that did not run,
-        // which is what happened. Phase 2 revisits it along with the scheduler.
-        ConflictAction::Skip => Err(JobState::Cancelled),
+        // Skipping is finishing: the destination is in the state the user asked for.
+        // `Cancelled` was the phase 1 stand-in and said the wrong thing — the job did
+        // what it was told, so it is `Done`, with `skipped` recording that no bytes
+        // moved.
+        ConflictAction::Skip => Err(JobState::Done {
+            at: Utc::now(),
+            skipped: true,
+        }),
         ConflictAction::KeepBoth | ConflictAction::Resume => {
             Err(failed(EngineError::Unsupported {
                 operation: "keep-both and resume arrive with the phase 2 queue".into(),

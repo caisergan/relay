@@ -168,7 +168,13 @@ export type JobState =
  *  It lives inside `Done` rather than beside it because a skipped job *is*
  *  finished, and two fields that can disagree about that would eventually.
  */
-skipped: boolean } | { kind: "cancelled" };
+skipped: boolean } | 
+/**
+ *  Carries a time for the same reason `Done` does: the Completed tab sorts by it,
+ *  and the seven-day prune has nothing to compare a bare unit variant against —
+ *  which would leave cancelled jobs in the database for ever.
+ */
+{ kind: "cancelled"; at: string };
 
 /**  A directory listing as currently known for a session's remote pane. */
 export type ListingSnapshot = {

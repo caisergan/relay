@@ -517,7 +517,7 @@ pub fn advance(job: &mut Job, event: JobEvent) -> bool {
             JobEvent::Cancel,
         ) => {
             job.speed_bps = None;
-            job.state = S::Cancelled;
+            job.state = S::Cancelled { at: Utc::now() };
             true
         }
 
@@ -641,7 +641,7 @@ mod tests {
                 at: Utc::now(),
                 skipped: false,
             },
-            JobState::Cancelled,
+            JobState::Cancelled { at: Utc::now() },
         ]
     }
 
