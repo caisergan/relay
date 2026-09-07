@@ -587,37 +587,38 @@ async fn a_paused_download_resumes_from_a_verified_checkpoint() {
     // ---- the interrupted attempt -------------------------------------------
     let checkpoints: Arc<std::sync::Mutex<Vec<(u64, String)>>> = Arc::default();
     let cancel = CancellationToken::new();
-    let keep = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let request = TransferReq {
         job,
         remote_path: source.clone(),
         local_path: local.clone(),
         offset: 0,
         prefix: None,
-        progress: ProgressSink::noop(),
+        // The pause is triggered by a byte count, not by a clock. A sleep long enough
+        // to be sure of passing the first checkpoint on a slow link is long enough to
+        // finish the whole file on a fast one — which is what CI's local docker did,
+        // leaving the test to "pause" a transfer that had already completed.
+        progress: {
+            let cancel = cancel.clone();
+            ProgressSink::new(move |bytes| {
+                if bytes >= 12 * 1024 * 1024 {
+                    cancel.cancel();
+                }
+            })
+        },
         checkpoint: {
             let seen = Arc::clone(&checkpoints);
             CheckpointSink::new(move |at, digest| seen.lock().unwrap().push((at, digest)))
         },
         cancel: cancel.clone(),
         // A pause, not a cancellation: the bytes are what the resume will continue.
-        keep_partial: Arc::clone(&keep),
+        keep_partial: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };
 
     let mut lane = c.backend.open_lane().await.expect("lane");
-    let task = tokio::spawn(async move {
-        let outcome = lane.download(request).await;
-        lane.close().await;
-        outcome
-    });
-    // Long enough to move past the first checkpoint, which the backend takes every
-    // eight megabytes.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    cancel.cancel();
-    let outcome = tokio::time::timeout(Duration::from_secs(10), task)
+    let outcome = tokio::time::timeout(Duration::from_secs(60), lane.download(request))
         .await
-        .expect("the pause is observed")
-        .expect("no panic");
+        .expect("the pause is observed");
+    lane.close().await;
     assert!(
         matches!(outcome, Err(EngineError::Cancelled)),
         "{outcome:?}"
@@ -626,8 +627,8 @@ async fn a_paused_download_resumes_from_a_verified_checkpoint() {
     let recorded = checkpoints.lock().unwrap().clone();
     assert!(
         !recorded.is_empty(),
-        "no checkpoint was taken in 1.5s; the transfer is too slow for this test to \
-         mean anything"
+        "twelve megabytes moved without a checkpoint; there is nothing here to resume \
+         from and this test would prove nothing"
     );
     let (at, digest) = recorded.last().cloned().expect("a checkpoint");
 
