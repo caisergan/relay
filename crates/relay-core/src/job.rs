@@ -67,8 +67,18 @@ impl JobState {
         )
     }
 
+    /// Whether a job in this state is spending one of the concurrency slider's slots.
+    ///
+    /// `Preparing` counts: it is stat'ing a destination over the connection, and a
+    /// server that is slow to answer would otherwise let the queue dispatch without
+    /// limit. `AwaitingPrompt` deliberately does not — a person deciding is not the
+    /// connection working, and holding a slot open for the ten minutes a prompt may
+    /// live would let one unanswered sheet stall every other transfer.
     pub fn occupies_transfer_slot(&self) -> bool {
-        matches!(self, JobState::Transferring | JobState::Verifying)
+        matches!(
+            self,
+            JobState::Preparing | JobState::Transferring | JobState::Verifying
+        )
     }
 }
 

@@ -11,6 +11,7 @@
 //! - [`protocol`] — what a backend must implement, and the transfer lanes it hands out.
 //! - [`queue`] — the job record and the single function allowed to change its state.
 //! - [`store`] — the same records on disk, so a restart resumes rather than forgets.
+//! - [`scheduler`] — the one task that decides which job runs, and when.
 //! - [`interact`] — prompts, and the broker that owns every unanswered question.
 //! - [`events`] / [`coordinator`] — the ordered update stream and the authoritative
 //!   projection behind snapshot recovery.
@@ -32,6 +33,7 @@ pub mod mock;
 pub mod model;
 pub mod protocol;
 pub mod queue;
+pub mod scheduler;
 pub mod secrets;
 pub mod servers;
 pub mod session;

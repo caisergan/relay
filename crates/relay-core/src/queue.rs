@@ -436,7 +436,10 @@ pub fn advance(job: &mut Job, event: JobEvent) -> bool {
             job.speed_bps = None;
             true
         }
-        (S::Transferring | S::Verifying, JobEvent::Complete) => {
+        // `Preparing` is here defensively. A runner that reports a completion it
+        // never reported a start for is misbehaving, but refusing to believe it would
+        // strand the job — and its concurrency slot — in `Preparing` for ever.
+        (S::Preparing | S::Transferring | S::Verifying, JobEvent::Complete) => {
             // A job that completes without a known size has moved exactly as many
             // bytes as it moved; recording that makes the finished row honest.
             job.size.get_or_insert(job.transferred);
@@ -555,8 +558,14 @@ pub fn backoff(attempts: u32) -> TimeDelta {
 /// that happens the queue is spread out again — rare, and cheap when it is not.
 pub fn renumber(jobs: &mut [&mut Job]) {
     for (index, job) in jobs.iter_mut().enumerate() {
-        job.order = Order((index as i64 + 1) * ORDER_STRIDE);
+        job.order = position(index);
     }
+}
+
+/// The nth evenly spaced position. One definition, so a queue spread out by
+/// [`renumber`] and one spread out by the scheduler land on the same numbers.
+pub fn position(index: usize) -> Order {
+    Order((index as i64 + 1) * ORDER_STRIDE)
 }
 
 /// A position between two neighbours, or `None` when the gap is exhausted and the

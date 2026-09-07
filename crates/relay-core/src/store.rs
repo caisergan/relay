@@ -196,6 +196,31 @@ impl QueueStore {
         .await
     }
 
+    /// Persist a job without waiting for the write.
+    ///
+    /// For transitions whose exact value recovery does not depend on — `Preparing`,
+    /// `Transferring` — because `recover` maps every one of them to
+    /// `Paused(Restarted)` regardless. Awaiting an fsync for a state that will be
+    /// discarded on the way back in would put the disk in the scheduler's loop for
+    /// nothing. Enqueue, terminal states and checkpoints all use [`Self::save`]
+    /// instead, and wait.
+    ///
+    /// Still ordered behind everything already submitted; only the acknowledgement is
+    /// dropped. A failure is logged rather than returned, since there is no caller
+    /// left to tell.
+    pub fn save_detached(&self, job: Job) {
+        let id = job.id;
+        let _ = self.tx.send(Box::new(move |conn| {
+            let outcome = conn
+                .transaction()
+                .map_err(db)
+                .and_then(|tx| write_job(&tx, &job).and_then(|()| tx.commit().map_err(db)));
+            if let Err(err) = outcome {
+                tracing::warn!(%id, %err, "could not persist a job's progress state");
+            }
+        }));
+    }
+
     /// Persist a job's current state, and its resume record if it has one.
     ///
     /// The two are written in one transaction. A checkpoint that survives without the
