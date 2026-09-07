@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { commands } from '@/ipc/commands'
 import type { LocalEntry, LogLine, RemoteEntry, ServerConfig } from '@/ipc/gen'
+import { faultText, toFault } from '@/lib/errors'
 import { crumbs, joinPath, parentPath } from '@/lib/format'
+import { canGoBack, canGoForward, peek, push, type History } from '@/lib/history'
 import { useOrderedJobs } from '@/state/queueStore'
 import { useServersStore } from '@/state/serversStore'
 import { emptyPane, useSessionsStore } from '@/state/sessionsStore'
@@ -13,6 +15,9 @@ import { FlowGutter } from './FlowGutter'
 import {
   IconActivity,
   IconChevronLeft,
+  IconChevronRight,
+  IconEye,
+  IconEyeOff,
   IconFolderPlus,
   IconMonitor,
   IconRefresh,
@@ -20,6 +25,9 @@ import {
   IconServer,
   IconWarning,
 } from './Icons'
+import { PaneFault, PaneMessage } from './PaneMessage'
+import { PaneSplitter } from './PaneSplitter'
+import { loadRoots, RootMenu, type Root } from './RootMenu'
 import { avatarFor, tintFor } from './TitleBar'
 
 interface Props {
@@ -37,6 +45,13 @@ export function SessionView({ sessionId }: Props) {
   // rather than a `window.confirm` the user can dismiss by muscle memory.
   const [pendingDelete, setPendingDelete] = useState<FileRow | null>(null)
   const [logOpen, setLogOpen] = useState(false)
+  /** The failed path is remembered separately from `listing.path`, which still names
+   * the last directory that actually listed. The pane needs both: one to draw the
+   * denied state about, one to go back to. */
+  const [remoteFailedPath, setRemoteFailedPath] = useState<string | null>(null)
+  /// The splitter measures this to turn a pointer position into a percentage.
+  const panesRef = useRef<HTMLDivElement>(null)
+  const localPercent = useUiStore((s) => s.localPanePercent)
 
   const sessionJobs = useMemo(
     () => jobs.filter((job) => job.session === sessionId),
@@ -44,17 +59,30 @@ export function SessionView({ sessionId }: Props) {
   )
 
   const loadLocal = useCallback(
-    async (path: string) => {
+    /// `record: false` is how back and forward replay a path without pushing it again,
+    /// which would otherwise make the two buttons walk in circles.
+    async (path: string, record = true) => {
       patchPane(sessionId, { localLoading: true, localError: null })
       try {
         const entries = await commands.localListDir(path)
+        // Read the history fresh rather than closing over it: this callback is memoised
+        // and a captured history would be the one from the render that created it.
+        const current = useSessionsStore.getState().panes[sessionId] ?? emptyPane
         patchPane(sessionId, {
           localPath: path,
           localEntries: entries,
           localLoading: false,
+          ...(record ? { localHistory: push(current.localHistory, path) } : {}),
         })
       } catch (error) {
-        patchPane(sessionId, { localLoading: false, localError: String(error) })
+        // Keep the path that failed, not the one the pane is still showing: the
+        // designed pane names the directory it could not read.
+        patchPane(sessionId, {
+          localLoading: false,
+          localPath: path,
+          localEntries: [],
+          localError: toFault(error),
+        })
       }
     },
     [patchPane, sessionId],
@@ -65,21 +93,50 @@ export function SessionView({ sessionId }: Props) {
     void commands.localDefaultDir().then(loadLocal)
   }, [pane.localPath, loadLocal])
 
+  // Roots are per machine, not per session, but the menu belongs to a pane; fetching
+  // once per mount keeps `local_roots` off the navigation path.
+  const [roots, setRoots] = useState<Root[]>([])
+  useEffect(() => {
+    let live = true
+    void loadRoots().then((next) => {
+      if (live) setRoots(next)
+    })
+    return () => {
+      live = false
+    }
+  }, [])
+
+  const allRemoteRows = useMemo(() => (listing?.entries ?? []).map(remoteRow), [listing])
+  const allLocalRows = useMemo(() => pane.localEntries.map(localRow), [pane.localEntries])
+
+  /// Counted before the filter, so the toggle can say how much it is keeping back
+  /// rather than leaving the user to wonder why a directory looks empty.
+  const remoteHidden = useMemo(
+    () => allRemoteRows.filter((row) => row.hidden).length,
+    [allRemoteRows],
+  )
+  const localHidden = useMemo(
+    () => allLocalRows.filter((row) => row.hidden).length,
+    [allLocalRows],
+  )
+
   const remoteRows = useMemo(
     () =>
       sortRows(
-        (listing?.entries ?? []).map(remoteRow).filter(matching(pane.remoteFilter)),
+        allRemoteRows
+          .filter(visible(pane.remoteShowHidden))
+          .filter(matching(pane.remoteFilter)),
         pane.remoteSort,
       ),
-    [listing, pane.remoteFilter, pane.remoteSort],
+    [allRemoteRows, pane.remoteFilter, pane.remoteSort, pane.remoteShowHidden],
   )
   const localRows = useMemo(
     () =>
       sortRows(
-        pane.localEntries.map(localRow).filter(matching(pane.localFilter)),
+        allLocalRows.filter(visible(pane.localShowHidden)).filter(matching(pane.localFilter)),
         pane.localSort,
       ),
-    [pane.localEntries, pane.localFilter, pane.localSort],
+    [allLocalRows, pane.localFilter, pane.localSort, pane.localShowHidden],
   )
 
   if (!session) return null
@@ -87,12 +144,44 @@ export function SessionView({ sessionId }: Props) {
   const remotePath = listing?.path ?? session.remotePath ?? '/'
   const connected = session.state.kind === 'connected'
 
-  const navigateRemote = (path: string) => {
-    patchPane(sessionId, { remoteLoading: true })
-    commands.sessionListDir(sessionId, path).catch((error: unknown) => {
-      patchPane(sessionId, { remoteLoading: false })
-      toast('error', `Could not open ${path}: ${String(error)}`)
+  const navigateRemote = (path: string, record = true) => {
+    patchPane(sessionId, { remoteLoading: true, remoteError: null })
+    setRemoteFailedPath(null)
+    commands
+      .sessionListDir(sessionId, path)
+      .then(() => {
+        // Recorded on success only: a directory that refused to list is not somewhere
+        // back should be able to return to.
+        if (!record) return
+        const current = useSessionsStore.getState().panes[sessionId] ?? emptyPane
+        patchPane(sessionId, { remoteHistory: push(current.remoteHistory, path) })
+      })
+      .catch((error: unknown) => {
+        // A failed listing is a state of the pane, not a passing notification. The toast
+        // it replaces expired while the pane went on showing the previous directory, so
+        // nothing on screen said the folder had not opened.
+        setRemoteFailedPath(path)
+        patchPane(sessionId, { remoteLoading: false, remoteError: toFault(error) })
+      })
+  }
+
+  /// Stepping moves the cursor first, then replays that path without recording it.
+  const stepLocal = (delta: number) => {
+    const target = peek(pane.localHistory, delta)
+    if (target === null) return
+    patchPane(sessionId, {
+      localHistory: { ...pane.localHistory, at: pane.localHistory.at + delta },
     })
+    void loadLocal(target, false)
+  }
+
+  const stepRemote = (delta: number) => {
+    const target = peek(pane.remoteHistory, delta)
+    if (target === null) return
+    patchPane(sessionId, {
+      remoteHistory: { ...pane.remoteHistory, at: pane.remoteHistory.at + delta },
+    })
+    navigateRemote(target, false)
   }
 
   const enqueue = (direction: 'up' | 'down', name: string, isDir: boolean) => {
@@ -108,7 +197,7 @@ export function SessionView({ sessionId }: Props) {
         joinPath(remotePath, name),
         joinPath(pane.localPath, name),
       )
-      .catch((error: unknown) => toast('error', String(error)))
+      .catch((error: unknown) => toast('error', faultText(error)))
   }
 
   const transfer = (direction: 'up' | 'down') => (row: FileRow) =>
@@ -133,7 +222,7 @@ export function SessionView({ sessionId }: Props) {
       .sessionMkdir(sessionId, joinPath(remotePath, name.trim()))
       .then(refreshRemote)
       .catch((error: unknown) =>
-        toast('error', `Could not create the folder: ${String(error)}`),
+        toast('error', `Could not create the folder: ${faultText(error)}`),
       )
   }
 
@@ -147,7 +236,7 @@ export function SessionView({ sessionId }: Props) {
         joinPath(remotePath, name.trim()),
       )
       .then(refreshRemote)
-      .catch((error: unknown) => toast('error', `Could not rename: ${String(error)}`))
+      .catch((error: unknown) => toast('error', `Could not rename: ${faultText(error)}`))
   }
 
   const confirmDelete = (row: FileRow) => setPendingDelete(row)
@@ -157,7 +246,7 @@ export function SessionView({ sessionId }: Props) {
     void commands
       .sessionRemove(sessionId, joinPath(remotePath, row.name), row.isDir)
       .then(refreshRemote)
-      .catch((error: unknown) => toast('error', `Could not delete: ${String(error)}`))
+      .catch((error: unknown) => toast('error', `Could not delete: ${faultText(error)}`))
   }
 
   /// Clicking the same column again reverses it, which is the behaviour every file
@@ -172,8 +261,8 @@ export function SessionView({ sessionId }: Props) {
         logOpen={logOpen}
         onToggleLog={() => setLogOpen((v) => !v)}
       />
-      <div className="panes">
-        <div className="pane pane--local">
+      <div className="panes" ref={panesRef}>
+        <div className="pane pane--local" style={{ width: `${localPercent}%` }}>
           <PaneHeader
             kind="local"
             title="This Mac"
@@ -182,20 +271,32 @@ export function SessionView({ sessionId }: Props) {
             filterLabel="Filter"
             onFilter={(localFilter) => patchPane(sessionId, { localFilter })}
             onNavigate={(path) => void loadLocal(path)}
+            roots={roots}
+            showHidden={pane.localShowHidden}
+            hiddenCount={localHidden}
+            onToggleHidden={() =>
+              patchPane(sessionId, { localShowHidden: !pane.localShowHidden })
+            }
+            history={pane.localHistory}
+            onStep={stepLocal}
           />
           {pane.localError ? (
-            <div className="empty">
-              <span className="empty__title">Cannot read this folder</span>
-              <span>{pane.localError}</span>
-            </div>
+            <PaneFault
+              fault={pane.localError}
+              side="local"
+              {...(pane.localPath && pane.localPath !== '/'
+                ? { onBack: () => void loadLocal(parentPath(pane.localPath)) }
+                : {})}
+            />
           ) : (
             <FileList
               pane="local"
               rows={localRows}
               loading={pane.localLoading}
-              emptyTitle="Nothing here"
-              emptyBody="This folder is empty."
               direction="up"
+              {...(pane.localPath && pane.localPath !== '/'
+                ? { onBack: () => void loadLocal(parentPath(pane.localPath)) }
+                : {})}
               sort={pane.localSort}
               onSort={(key) => patchPane(sessionId, { localSort: cycle(pane.localSort, key) })}
               selected={pane.localSelected}
@@ -207,6 +308,7 @@ export function SessionView({ sessionId }: Props) {
           )}
         </div>
 
+        <PaneSplitter areaRef={panesRef} />
         <FlowGutter jobs={sessionJobs} />
 
         <div className="pane pane--remote">
@@ -222,27 +324,40 @@ export function SessionView({ sessionId }: Props) {
             onFilter={(remoteFilter) => patchPane(sessionId, { remoteFilter })}
             onNavigate={navigateRemote}
             onRefresh={refreshRemote}
+            showHidden={pane.remoteShowHidden}
+            hiddenCount={remoteHidden}
+            onToggleHidden={() =>
+              patchPane(sessionId, { remoteShowHidden: !pane.remoteShowHidden })
+            }
+            history={pane.remoteHistory}
+            onStep={stepRemote}
             {...(connected ? { onNewFolder: newFolder } : {})}
           />
+          {/* Order matters: a dropped connection explains a failed listing, so the
+              connection state is drawn before the listing's own error. */}
           {!connected ? (
-            <div className="empty">
-              <span className="empty__title">
-                {session.state.kind === 'connecting' ? 'Connecting…' : 'Not connected'}
-              </span>
-              <span>
-                {session.state.kind === 'disconnected'
-                  ? session.state.reason
-                  : 'Waiting for the server.'}
-              </span>
-            </div>
+            session.state.kind === 'disconnected' ? (
+              <PaneMessage kind="disconnected" side="remote" body={session.state.reason} />
+            ) : session.state.kind === 'connecting' ? (
+              <PaneMessage kind="connecting" side="remote" />
+            ) : (
+              <PaneMessage kind="lost" side="remote" />
+            )
+          ) : pane.remoteError ? (
+            <PaneFault
+              fault={pane.remoteError}
+              side="remote"
+              onBack={() => navigateRemote(parentPath(remoteFailedPath ?? remotePath))}
+            />
           ) : (
             <FileList
               pane="remote"
               rows={remoteRows}
               loading={pane.remoteLoading}
-              emptyTitle="Empty directory"
-              emptyBody="Nothing on the server at this path."
               direction="down"
+              {...(remotePath !== '/'
+                ? { onBack: () => navigateRemote(parentPath(remotePath)) }
+                : {})}
               sort={pane.remoteSort}
               onSort={(key) =>
                 patchPane(sessionId, { remoteSort: cycle(pane.remoteSort, key) })
@@ -384,7 +499,7 @@ function SessionHeader({
           title="Close this session"
           onClick={() => {
             commands.sessionClose(sessionId).catch((error: unknown) => {
-              toast('error', `Could not disconnect: ${String(error)}`)
+              toast('error', `Could not disconnect: ${faultText(error)}`)
             })
           }}
         >
@@ -468,6 +583,12 @@ function PaneHeader({
   onNavigate,
   onRefresh,
   onNewFolder,
+  roots,
+  showHidden,
+  hiddenCount,
+  onToggleHidden,
+  history,
+  onStep,
 }: {
   kind: 'local' | 'remote'
   title: string
@@ -478,6 +599,15 @@ function PaneHeader({
   onNavigate: (path: string) => void
   onRefresh?: () => void
   onNewFolder?: () => void
+  /** Local pane only. A server has one root, so the remote breadcrumb has no menu. */
+  roots?: Root[]
+  showHidden: boolean
+  /** How many rows the toggle is currently keeping back, or would. */
+  hiddenCount: number
+  onToggleHidden: () => void
+  history: History
+  /** -1 for back, +1 for forward. */
+  onStep: (delta: number) => void
 }) {
   return (
     <div className="pane-header">
@@ -492,54 +622,107 @@ function PaneHeader({
         <div style={{ flex: 1 }} />
         {onNewFolder && (
           <button
-            className="ghostbtn"
+            className="ghostbtn ghostbtn--lg"
             title="New folder"
             aria-label="New folder"
             onClick={onNewFolder}
           >
-            <IconFolderPlus size={14} />
+            <IconFolderPlus size={17} />
           </button>
         )}
-        {onRefresh && (
-          <button className="ghostbtn" title="Refresh" aria-label="Refresh" onClick={onRefresh}>
-            <IconRefresh size={14} />
-          </button>
-        )}
+        {/* The count is in the label rather than on a badge: the only time this
+            control matters is when it is holding something back, and that is
+            exactly when the number is worth saying. */}
         <button
-          className="ghostbtn"
-          title="Parent directory"
-          aria-label="Parent directory"
-          onClick={() => onNavigate(parentPath(path))}
+          className={`ghostbtn ghostbtn--lg${showHidden ? '' : ' ghostbtn--on'}`}
+          title={
+            showHidden
+              ? `Hide ${hiddenCount} hidden ${hiddenCount === 1 ? 'item' : 'items'}`
+              : `Show ${hiddenCount} hidden ${hiddenCount === 1 ? 'item' : 'items'}`
+          }
+          aria-label={showHidden ? 'Hide hidden items' : 'Show hidden items'}
+          aria-pressed={!showHidden}
+          onClick={onToggleHidden}
         >
-          <IconChevronLeft size={14} />
+          {showHidden ? <IconEye size={17} /> : <IconEyeOff size={17} />}
         </button>
+        {/* No parent button: the breadcrumb above already names every ancestor and
+            navigates to it in one click, so a chevron that walks up one level at a
+            time was a second, slower way to do the same thing. */}
+        {onRefresh && (
+          <button
+            className="ghostbtn ghostbtn--lg"
+            title="Refresh"
+            aria-label="Refresh"
+            onClick={onRefresh}
+          >
+            <IconRefresh size={17} />
+          </button>
+        )}
       </div>
 
-      <div className="crumbs" title={`${title} — ${path}`}>
-        {crumbs(path).map((crumb, index, all) => (
-          <span key={crumb.path} className="crumbs__seg">
-            <button
-              className={`crumb${index === all.length - 1 ? ' crumb--last' : ''}`}
-              onClick={() => onNavigate(crumb.path)}
-            >
-              {crumb.label}
-            </button>
-            {index < all.length - 1 && index > 0 && <span className="crumbs__sep">/</span>}
-          </span>
-        ))}
+      {/* The menu sits outside `.crumbs`, which scrolls horizontally: a popup inside a
+          scroll container is clipped by it, and `overflow-x: auto` makes the vertical
+          axis a scroll container too. */}
+      <div className="pane-header__path">
+        {roots && <RootMenu roots={roots} current={path} onPick={onNavigate} />}
+        <div className="crumbs" title={`${title} — ${path}`}>
+          {crumbs(path).map((crumb, index, all) => (
+            <span key={crumb.path} className="crumbs__seg">
+              <button
+                className={`crumb${index === all.length - 1 ? ' crumb--last' : ''}`}
+                onClick={() => onNavigate(crumb.path)}
+              >
+                {crumb.label}
+              </button>
+              {index < all.length - 1 && index > 0 && <span className="crumbs__sep">/</span>}
+            </span>
+          ))}
+        </div>
       </div>
 
-      <div className="searchbox searchbox--pane">
-        <IconSearch size={12} className="searchbox__icon" />
-        <input
-          placeholder={filterLabel}
-          value={filter}
-          aria-label={`${filterLabel} — ${title}`}
-          onChange={(e) => onFilter(e.currentTarget.value)}
-        />
+      {/* The filter shares its row with the history buttons, in the design's own
+          pattern for this position: a bordered segmented group beside a filter that
+          takes the remaining width. */}
+      <div className="pane-header__tools">
+        <div className="searchbox searchbox--pane">
+          <IconSearch size={12} className="searchbox__icon" />
+          <input
+            placeholder={filterLabel}
+            value={filter}
+            aria-label={`${filterLabel} — ${title}`}
+            onChange={(e) => onFilter(e.currentTarget.value)}
+          />
+        </div>
+        <div className="segbtns">
+          <button
+            className="segbtn"
+            title={`Back${peek(history, -1) ? ` to ${peek(history, -1)}` : ''}`}
+            aria-label={`Back — ${title}`}
+            disabled={!canGoBack(history)}
+            onClick={() => onStep(-1)}
+          >
+            <IconChevronLeft size={14} />
+          </button>
+          <button
+            className="segbtn"
+            title={`Forward${peek(history, 1) ? ` to ${peek(history, 1)}` : ''}`}
+            aria-label={`Forward — ${title}`}
+            disabled={!canGoForward(history)}
+            onClick={() => onStep(1)}
+          >
+            <IconChevronRight size={14} />
+          </button>
+        </div>
       </div>
     </div>
   )
+}
+
+/** Hidden files are shown by default, as the design draws them. Hiding is the opt-in,
+ * because a listing that silently omits `.env` is worse than a busy one. */
+function visible(showHidden: boolean) {
+  return (row: FileRow) => showHidden || !row.hidden
 }
 
 function matching(filter: string) {

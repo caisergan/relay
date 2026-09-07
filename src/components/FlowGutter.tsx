@@ -13,8 +13,13 @@ interface Props {
 export function FlowGutter({ jobs }: Props) {
   const moving = jobs.filter((job) => job.state.kind === 'transferring')
 
+  // Nothing in flight means nothing to read: an empty channel with a `0` in it is a
+  // permanent 52px reminder that no transfer is happening, which is the one fact the
+  // panes on either side already make obvious. The space returns to the panes.
+  if (moving.length === 0) return null
+
   return (
-    <div className={`gutter${moving.length === 0 ? ' gutter--idle' : ''}`}>
+    <div className="gutter">
       <div className="gutter__spine" aria-hidden />
       <div className="gutter__count" aria-label={`${moving.length} transfers in flight`}>
         {moving.length}

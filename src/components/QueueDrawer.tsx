@@ -1,5 +1,6 @@
 import { commands } from '@/ipc/commands'
 import type { JobSnapshot } from '@/ipc/gen'
+import { faultText } from '@/lib/errors'
 import { formatBytes, formatSpeed } from '@/lib/format'
 import { useOrderedJobs, useQueueStore } from '@/state/queueStore'
 import { useUiStore, type DrawerTab } from '@/state/uiStore'
@@ -142,7 +143,7 @@ export function QueueDrawer() {
                       onClick={() => {
                         commands
                           .queueControl({ kind: 'cancel', job: job.id })
-                          .catch((error: unknown) => toast('error', String(error)))
+                          .catch((error: unknown) => toast('error', faultText(error)))
                       }}
                     >
                       <IconClose size={13} />

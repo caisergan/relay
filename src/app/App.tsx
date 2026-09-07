@@ -1,5 +1,8 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 
+import { IconMenu } from '@/components/Icons'
+import { commands } from '@/ipc/commands'
+import { faultText } from '@/lib/errors'
 import { PromptSheets } from '@/components/PromptSheets'
 import { QueueDrawer } from '@/components/QueueDrawer'
 import { SessionView } from '@/components/SessionView'
@@ -19,9 +22,14 @@ export function App() {
   useTheme()
 
   const loadServers = useServersStore((s) => s.load)
+  const servers = useServersStore((s) => s.servers)
+  const serversLoaded = useServersStore((s) => s.loaded)
+  const sessionCount = useSessionsStore((s) => s.order.length)
   const activeId = useSessionsStore((s) => s.activeId)
   const connected = useUiStore((s) => s.connected)
   const toggleDrawer = useUiStore((s) => s.toggleDrawer)
+  const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed)
+  const toggleSidebar = useUiStore((s) => s.toggleSidebar)
   const toast = useUiStore((s) => s.toast)
 
   useEffect(() => {
@@ -31,6 +39,31 @@ export function App() {
       void engineBridge.stop()
     }
   }, [loadServers])
+
+  /** Open the saved server on launch instead of the connect form.
+   *
+   * The connect form is for servers Relay does not know yet. Once one is saved, being
+   * asked to type an address that is already in the sidebar is a step with no purpose.
+   *
+   * Fires at most once per run, and the guard is set even when it decides *not* to
+   * open: without that, closing the session would immediately reopen it, which is a
+   * window you cannot get out of. Adding a first server later does not trigger it
+   * either — that flow opens its own session. */
+  const launched = useRef(false)
+  useEffect(() => {
+    if (launched.current || !serversLoaded) return
+    launched.current = true
+    // Something is already open — a restored session — so the pane is not empty and
+    // there is nothing to fill.
+    if (sessionCount > 0) return
+    const first = servers[0]
+    if (!first) return
+    commands.sessionOpen(first.id).catch((error: unknown) => {
+      // A failure lands the user on the connect form, which is where they would have
+      // been anyway; the toast says why rather than leaving it unexplained.
+      toast('error', `Could not open ${first.name}: ${faultText(error)}`)
+    })
+  }, [serversLoaded, servers, sessionCount, toast])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -59,6 +92,20 @@ export function App() {
       )}
       <div className="body">
         <Sidebar />
+        {/* The design's rail: with the sidebar folded away there is otherwise nothing
+            left to click to bring it back. It floats over the pane header rather than
+            taking a column, because a permanent strip is the thing being collapsed. */}
+        {sidebarCollapsed && (
+          <button
+            className="railbtn"
+            title="Expand sidebar"
+            aria-label="Expand sidebar"
+            aria-expanded={false}
+            onClick={() => toggleSidebar(false)}
+          >
+            <IconMenu size={16} />
+          </button>
+        )}
         <div className="main">
           {activeId ? <SessionView sessionId={activeId} /> : <ConnectView />}
           <QueueDrawer />

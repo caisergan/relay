@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 
 import { commands } from '@/ipc/commands'
 import type { AuthMethod, Proto, ServerConfig } from '@/ipc/gen'
+import { faultText } from '@/lib/errors'
 import { useServersStore } from '@/state/serversStore'
 import { useUiStore } from '@/state/uiStore'
 
@@ -120,7 +121,7 @@ export function ServerEditor({ server, isNew, connectOnSave = false, onClose }: 
           .join(' · '),
       })
     } catch (error) {
-      setTest({ kind: 'failed', detail: message(error) })
+      setTest({ kind: 'failed', detail: faultText(error) })
     }
   }
 
@@ -138,7 +139,7 @@ export function ServerEditor({ server, isNew, connectOnSave = false, onClose }: 
         await commands.sessionOpen(saved.id)
       }
     } catch (error) {
-      toast('error', `Could not save: ${message(error)}`)
+      toast('error', `Could not save: ${faultText(error)}`)
     } finally {
       setBusy(false)
     }
@@ -432,15 +433,6 @@ function authFor(kind: string, previous: AuthMethod): AuthMethod {
     default:
       return { kind: 'agent' }
   }
-}
-
-/** Engine errors arrive as the tagged union, not as strings. */
-function message(error: unknown): string {
-  if (error !== null && typeof error === 'object' && 'kind' in error) {
-    const tagged = error as { kind: string; message?: string; operation?: string }
-    return tagged.message ?? tagged.operation ?? tagged.kind
-  }
-  return String(error)
 }
 
 function Field({

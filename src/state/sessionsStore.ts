@@ -2,20 +2,36 @@ import { create } from 'zustand'
 
 import type { Sort } from '@/components/FileList'
 import type { ListingSnapshot, LocalEntry, Session, SessionState } from '@/ipc/gen'
+import type { Fault } from '@/lib/errors'
+import { emptyHistory, type History } from '@/lib/history'
 
 /** Per-tab view state. Purely local: the engine owns everything else. */
 export interface PaneState {
   localPath: string
   localEntries: LocalEntry[]
   localLoading: boolean
-  localError: string | null
+  /** The structured fault, not a string: the pane picks a designed state from the
+   * kind, which a stringified error throws away. */
+  localError: Fault | null
   remoteFilter: string
   localFilter: string
   remoteLoading: boolean
+  /** A failed listing belongs to the pane, not to a toast that outlives it. */
+  remoteError: Fault | null
   /** Sort is per pane and per tab: the local side is usually a project directory and
    * the remote side a deploy target, and they rarely want the same order. */
   localSort: Sort
   remoteSort: Sort
+  /** Whether dotfiles are listed at all. Per pane and per tab, like the sort: the
+   * local side is usually a project directory where dotfiles are noise, and the remote
+   * side a server where `.htaccess` and `.env` are the whole reason to be looking.
+   * Defaults to showing them, which is what the design draws. */
+  localShowHidden: boolean
+  remoteShowHidden: boolean
+  /** Where each pane has been, so back and forward can retrace it. The breadcrumb only
+   * goes up; returning to a sibling you were just in has no other route. */
+  localHistory: History
+  remoteHistory: History
   /** The focused row's name, or null. Single-select for now; the design's multi-select
    * (⌘-click, shift-range) lands with the batch queue in phase 2. */
   localSelected: string | null
@@ -30,8 +46,13 @@ const emptyPane: PaneState = {
   remoteFilter: '',
   localFilter: '',
   remoteLoading: false,
+  remoteError: null,
   localSort: { key: 'name', dir: 1 },
   remoteSort: { key: 'name', dir: 1 },
+  localShowHidden: true,
+  remoteShowHidden: true,
+  localHistory: emptyHistory,
+  remoteHistory: emptyHistory,
   localSelected: null,
   remoteSelected: null,
 }
@@ -115,6 +136,9 @@ export const useSessionsStore = create<SessionsState>((set) => ({
           [listing.session]: {
             ...(s.panes[listing.session] ?? emptyPane),
             remoteLoading: false,
+            // A listing that arrived is the answer to whatever failed before it.
+            // Left set, a denied pane would sit over the directory that succeeded.
+            remoteError: null,
           },
         },
       }

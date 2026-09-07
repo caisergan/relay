@@ -24,11 +24,11 @@
   user-select: none;
 }
 
+/* Reserves the corner macOS draws the real traffic lights into, so the first tab does
+   not slide under them. Width covers the three buttons plus the system's inset. */
 .titlebar__lights {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 14px 0 12px;
+  width: 78px;
+  flex: none;
 }
 
 .titlebar__tabs {
@@ -156,6 +156,29 @@
   flex: 1;
   display: flex;
   min-height: 0;
+  /* Anchors the collapsed sidebar's rail button. */
+  position: relative;
+}
+
+/* The design's floating expand button, shown only while the sidebar is collapsed. */
+.railbtn {
+  position: absolute;
+  left: 8px;
+  top: 10px;
+  z-index: 20;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: var(--elev);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-soft);
+}
+.railbtn:hover {
+  color: var(--signal);
 }
 
 /* ---------------------------------------------------------------- sidebar */
@@ -227,6 +250,50 @@
   padding: 0 8px;
   gap: 6px;
   border-radius: var(--radius);
+  /* Shares its row with the history buttons rather than spanning the pane. */
+  flex: 1;
+  min-width: 0;
+}
+
+/* The filter and the history buttons on one row, per the design's layout for this
+   position (there it is the filter and the list/grid toggle). */
+.pane-header__tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The design's segmented group: a bordered well on the surface colour holding flush
+   buttons, each lifting onto a panel when it is the one doing something. */
+.segbtns {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+.segbtn {
+  width: 26px;
+  height: 22px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-faint);
+}
+.segbtn:hover:not(:disabled) {
+  background: var(--panel);
+  color: var(--signal);
+  box-shadow: var(--elev);
+}
+/* Disabled rather than hidden: a control that appears once there is somewhere to go
+   would move the filter box under the cursor as you browse. */
+.segbtn:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 .searchbox--pane input {
   font-size: 12px;
@@ -534,16 +601,44 @@
   min-width: 0;
   background: var(--panel);
 }
-/* Asymmetric on purpose, per the design: the local pane is a shelf you pick from
-   and the remote pane is the thing you are working in. */
+/* Asymmetric on purpose, per the design: the local pane is a shelf you pick from and
+   the remote pane is the thing you are working in. The 37% is now the starting ratio
+   rather than a constant — the width comes from the store so the splitter can move it,
+   and the percentage is clamped there, not here. The divider moved to `.splitter`,
+   which needs to be grabbable and so cannot be a border. */
 .pane--local {
-  width: 37%;
-  min-width: 258px;
+  min-width: 0;
   flex: none;
-  border-right: 1px solid var(--line);
 }
 .pane--remote {
   flex: 1;
+  min-width: 0;
+}
+
+/* A 1px line inside a 5px grab strip: the divider stays as thin as the design drew it
+   while the target stays big enough to hit. */
+.splitter {
+  width: 5px;
+  flex: none;
+  cursor: col-resize;
+  position: relative;
+  display: flex;
+  justify-content: center;
+  background: var(--panel);
+  touch-action: none;
+}
+.splitter__line {
+  width: 1px;
+  height: 100%;
+  background: var(--line);
+}
+.splitter:hover .splitter__line,
+.splitter:focus-visible .splitter__line {
+  width: 3px;
+  background: var(--signal);
+}
+.splitter:focus-visible {
+  outline: none;
 }
 
 .pane-header {
@@ -555,10 +650,16 @@
   border-bottom: 1px solid var(--line);
   background: var(--panel-2);
 }
+/* A fixed height, not one that follows the contents: the remote pane carries refresh
+   and new-folder buttons and the local pane carries none, so letting the row size
+   itself pushed the remote breadcrumb, filter and column headers a button's height
+   below the local pane's. The two panes are read across, so their rows have to line
+   up whatever each one holds. */
 .pane-header__id {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: 30px;
 }
 .pane-header__glyph {
   color: var(--ink-soft);
@@ -596,11 +697,37 @@
   background: var(--line);
   color: var(--ink);
 }
+/* New folder and refresh do something to the directory, unlike the 22px toggles beside
+   them, and were too small to hit confidently at the top of a dense listing. */
+.ghostbtn--lg {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius);
+}
+/* A toggle that is actively holding rows back has to look engaged, or the pane just
+   appears to be missing files. */
+.ghostbtn--on {
+  background: var(--signal-soft);
+  color: var(--signal);
+}
+.ghostbtn--on:hover {
+  background: var(--signal-soft);
+  color: var(--signal);
+}
 
+/* Holds the root menu beside the breadcrumb. The menu must not live inside `.crumbs`:
+   that scrolls, and a scroll container clips the popup. */
+.pane-header__path {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
 .crumbs {
   display: flex;
   align-items: center;
   gap: 1px;
+  flex: 1;
   min-width: 0;
   overflow-x: auto;
   font-family: var(--font-mono);
@@ -631,6 +758,87 @@
 .crumb--last {
   color: var(--ink);
   font-weight: 500;
+}
+
+/* The breadcrumb's root menu (phase 1 §1.5). The local pane's first crumb opens the
+   volumes, because otherwise there is no way to leave the home directory's subtree —
+   an external disk is not reachable by walking up from `~`. */
+.rootmenu {
+  position: relative;
+  display: flex;
+  flex: none;
+}
+.rootmenu__btn {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 5px;
+  border-radius: 5px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.rootmenu__btn:hover,
+.rootmenu__btn[aria-expanded='true'] {
+  background: var(--signal-soft);
+  color: var(--signal);
+}
+.rootmenu__pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 190px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: var(--elev);
+}
+.rootmenu__item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--ink);
+  text-align: left;
+}
+.rootmenu__item:hover {
+  background: var(--line-2);
+}
+.rootmenu__item--on {
+  color: var(--signal);
+  font-weight: 500;
+}
+.rootmenu__glyph {
+  color: var(--ink-faint);
+  flex: none;
+}
+.rootmenu__item--on .rootmenu__glyph {
+  color: var(--signal);
+}
+.rootmenu__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rootmenu__path {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-faint);
+  flex: none;
+}
+.rootmenu__empty {
+  padding: 6px 8px;
+  font-size: 11.5px;
+  color: var(--ink-faint);
 }
 
 /* ---------------------------------------------------------------- rows */
@@ -678,6 +886,12 @@
 .cols .cols__label.row__perms {
   flex: none;
   justify-content: flex-end;
+  color: inherit;
+}
+/* The header keeps the column's width but not its row-level type. */
+.cols .cols__label.row__perms {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
 }
 .cols__arrow {
   font-size: 9px;
@@ -690,8 +904,10 @@
   background: var(--panel);
 }
 /* An empty listing should sit in the middle of the pane, not at the top of a tall
-   scroll container. */
-.rows:has(> .empty) {
+   scroll container. The designed empty state stays inside `.rows` so that an empty
+   folder is still a drop target — which is what its own text invites. */
+.rows:has(> .empty),
+.rows:has(> .panemsg) {
   display: flex;
 }
 .rows--dropping {
@@ -718,7 +934,8 @@
   box-shadow: inset 2px 0 0 var(--signal);
 }
 /* Dotfiles recede by name, not by dimming the whole row: the size and date of a
-   hidden file are exactly as true as any other row's. */
+   hidden file are exactly as true as any other row's. Directories are not exempt —
+   a hidden directory is hidden. */
 .row--hidden .row__name {
   color: var(--ink-soft);
 }
@@ -729,6 +946,9 @@
   align-items: center;
   justify-content: center;
 }
+/* The four columns' type and colour are the design's, value for value: the name in
+   full-strength ink, the size one step back, and the permissions and date faintest —
+   a row should read as its name first and its metadata second. */
 .row__name {
   flex: 1;
   min-width: 0;
@@ -736,6 +956,8 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12.5px;
+  font-weight: 400;
+  color: var(--ink);
 }
 .row__name--dir {
   font-weight: 500;
@@ -744,25 +966,35 @@
   width: 56px;
   flex: none;
   text-align: right;
+  white-space: nowrap;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--ink-soft);
 }
 .row__when {
-  width: 100px;
+  width: 84px;
   flex: none;
+  padding-right: 4px;
   text-align: right;
+  white-space: nowrap;
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--ink-faint);
 }
 .row__perms {
-  width: 78px;
+  width: 72px;
   flex: none;
   text-align: right;
+  white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 10px;
   color: var(--ink-faint);
+}
+/* The design singles out exactly one mode: a file only its owner can even read. It is
+   the one permission string worth noticing in a listing, so it gets the amber the rest
+   of the interface uses for "look at this" rather than for "this is broken". */
+.row__perms--private {
+  color: var(--transit);
 }
 
 /* Floating, so hovering a row does not shove its size and date sideways. */
@@ -838,6 +1070,68 @@
   color: var(--ink-soft);
 }
 
+/* The designed pane states (`paneMsg` in the design): a tinted glyph tile, a title, a
+   sentence, and the way out. Measurements are the design's. */
+.panemsg {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 30px;
+  text-align: center;
+}
+.panemsg__icon {
+  width: 54px;
+  height: 54px;
+  flex: none;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.panemsg__icon--danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.panemsg__icon--signal {
+  background: var(--signal-soft);
+  color: var(--signal);
+}
+.panemsg__icon--transit {
+  background: var(--transit-soft);
+  color: var(--transit);
+}
+.panemsg__title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--ink);
+}
+.panemsg__body {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  max-width: 300px;
+  line-height: 1.5;
+  /* A server's own path can be one long unbroken token; it must wrap rather than
+     widen the pane past the design's 300px measure. */
+  overflow-wrap: anywhere;
+}
+.panemsg__btn {
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.panemsg__btn:hover {
+  background: var(--line-2);
+}
+
 /* ---------------------------------------------------------------- gutter */
 
 .gutter {
@@ -858,9 +1152,6 @@
   transform: translateX(-50%);
   background: repeating-linear-gradient(to bottom, var(--line) 0 5px, transparent 5px 9px);
   animation: rl-flow 1s linear infinite;
-}
-.gutter--idle .gutter__spine {
-  animation: none;
 }
 .gutter__count {
   position: absolute;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { sortRows, type FileRow, type Sort } from './FileList'
+import { permsClass, sortRows, type FileRow, type Sort } from './FileList'
 
 function row(name: string, over: Partial<FileRow> = {}): FileRow {
   return {
@@ -78,5 +78,20 @@ describe('sortRows', () => {
     sortRows(rows, byName)
 
     expect(rows.map((r) => r.name)).toEqual(before)
+  })
+})
+
+describe('permsClass', () => {
+  // The design tints exactly one mode: a file only its owner can even read. Everything
+  // else — including `rwx------` on a directory, which is entirely ordinary — stays
+  // faint, so the tint keeps meaning something.
+  it('tints only an owner-only file', () => {
+    expect(permsClass('rw-------')).toContain('row__perms--private')
+  })
+
+  it('leaves every other mode faint', () => {
+    for (const mode of ['rwx------', 'rw-r--r--', 'rwxr-xr-x', null]) {
+      expect(permsClass(mode), mode ?? 'null').toBe('row__perms')
+    }
   })
 })

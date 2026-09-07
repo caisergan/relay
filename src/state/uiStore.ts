@@ -24,6 +24,12 @@ interface UiState {
   toasts: Toast[]
   /** False while the engine stream is down; the shell shows a reconnecting strip. */
   connected: boolean
+  /** The design's `sidebarCollapsed`: the server list folds away to a floating rail. */
+  sidebarCollapsed: boolean
+  /** The local pane's share of the pane area, as a percentage. The design fixes this
+   * at 37%, but a fixed split cannot suit both a laptop and a wide display, so it is
+   * a starting value rather than a constant. */
+  localPanePercent: number
 
   setTheme: (theme: Theme) => void
   setResolved: (resolved: 'light' | 'dark') => void
@@ -38,7 +44,15 @@ interface UiState {
   toast: (kind: Toast['kind'], text: string) => void
   dismissToast: (id: string) => void
   setConnected: (connected: boolean) => void
+  toggleSidebar: (collapsed?: boolean) => void
+  setLocalPanePercent: (percent: number) => void
 }
+
+/** Neither pane may be dragged away entirely: a pane too narrow to show a filename is
+ * not a smaller pane, it is a broken one, and there would be no handle left to drag
+ * back. Collapsing is what the sidebar's toggle is for. */
+const MIN_PANE_PERCENT = 18
+const MAX_PANE_PERCENT = 78
 
 export const useUiStore = create<UiState>((set) => ({
   theme: 'system',
@@ -51,6 +65,8 @@ export const useUiStore = create<UiState>((set) => ({
   prompts: {},
   toasts: [],
   connected: false,
+  sidebarCollapsed: false,
+  localPanePercent: 37,
 
   setTheme: (theme) => set({ theme }),
   setResolved: (resolved) => set({ resolved }),
@@ -72,4 +88,12 @@ export const useUiStore = create<UiState>((set) => ({
     set((s) => ({ toasts: [...s.toasts, { id: crypto.randomUUID(), kind, text }] })),
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   setConnected: (connected) => set({ connected }),
+  toggleSidebar: (collapsed) =>
+    set((s) => ({ sidebarCollapsed: collapsed ?? !s.sidebarCollapsed })),
+  setLocalPanePercent: (percent) =>
+    set({
+      localPanePercent: Math.min(Math.max(percent, MIN_PANE_PERCENT), MAX_PANE_PERCENT),
+    }),
 }))
+
+export { MAX_PANE_PERCENT, MIN_PANE_PERCENT }

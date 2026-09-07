@@ -103,6 +103,14 @@ export function IconChevronDown(props: IconProps) {
   )
 }
 
+export function IconChevronRight(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M9 6l6 6-6 6" />
+    </Svg>
+  )
+}
+
 export function IconChevronLeft(props: IconProps) {
   return (
     <Svg {...props}>
@@ -176,11 +184,14 @@ export function IconPlus(props: IconProps) {
   )
 }
 
+/** New folder. The plus is centred in the folder's *body* — below the tab, not in the
+ * middle of the whole 24-unit box — and drawn at the same 1.8 weight as `IconFolder`,
+ * which it otherwise reads as a heavier, differently-shaped folder beside. */
 export function IconFolderPlus(props: IconProps) {
   return (
-    <Svg {...props}>
+    <Svg strokeWidth={1.8} {...props}>
       <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-      <path d="M12 11v5M9.5 13.5h5" />
+      <path d="M12 11.5v5M9.5 14h5" />
     </Svg>
   )
 }
@@ -214,6 +225,86 @@ export function IconWarning(props: IconProps) {
   return (
     <Svg {...props}>
       <path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+    </Svg>
+  )
+}
+
+/** Hidden files are showing. The design's Quick Look glyph, reused: it is the same
+ * idea — this is the "you can see it" mark. */
+export function IconEye(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+      <circle cx="12" cy="12" r="2.5" />
+    </Svg>
+  )
+}
+
+/** Hidden files are hidden: the same eye, struck through. */
+export function IconEyeOff(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+      <circle cx="12" cy="12" r="2.5" />
+      <path d="M3 3l18 18" />
+    </Svg>
+  )
+}
+
+/** Expands the collapsed sidebar, from the design's floating rail button. */
+export function IconMenu(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 6h16M4 12h16M4 18h16" />
+    </Svg>
+  )
+}
+
+/** The permission-denied pane's glyph. */
+export function IconLock(props: IconProps) {
+  return (
+    <Svg strokeWidth={1.8} {...props}>
+      <path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5zm-3 8V7a3 3 0 0 1 6 0v3z" />
+    </Svg>
+  )
+}
+
+/** The connection-lost pane's glyph: reception arcs over a dot. */
+export function IconSignal(props: IconProps) {
+  return (
+    <Svg strokeWidth={1.8} {...props}>
+      <path d="M12 20h.01M8.5 16.4a5 5 0 0 1 7 0M5 12.9a10 10 0 0 1 14 0M2 9.5a15 15 0 0 1 20 0" />
+    </Svg>
+  )
+}
+
+/** The not-found pane's glyph. The design has no not-found state, so this is the
+ * design's own folder path under a slash rather than a new shape invented for it. */
+export function IconFolderMissing(props: IconProps) {
+  return (
+    <Svg strokeWidth={1.8} {...props}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <path d="M4 4l16 16" />
+    </Svg>
+  )
+}
+
+/** A volume in the breadcrumb's root menu. */
+export function IconDrive(props: IconProps) {
+  return (
+    <Svg strokeWidth={1.8} {...props}>
+      <rect x="2" y="7" width="20" height="10" rx="2" />
+      <path d="M6 12h.01M10 12h6" />
+    </Svg>
+  )
+}
+
+/** Home, the root menu's first entry. */
+export function IconHome(props: IconProps) {
+  return (
+    <Svg strokeWidth={1.8} {...props}>
+      <path d="M3 11l9-8 9 8" />
+      <path d="M6 10v10h12V10" />
     </Svg>
   )
 }

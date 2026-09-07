@@ -6,8 +6,6 @@ import { useUiStore } from '@/state/uiStore'
 
 import { IconClose, IconMoon, IconPlus, IconSearch, IconSun } from './Icons'
 
-const LIGHTS = ['#FF5F57', '#FEBC2E', '#28C840']
-
 function avatarFor(name: string): string {
   return name.slice(0, 2).toUpperCase()
 }
@@ -45,16 +43,11 @@ export function TitleBar() {
 
   return (
     <div className="titlebar" data-tauri-drag-region>
-      {isMac() && (
-        <div className="titlebar__lights">
-          {LIGHTS.map((color) => (
-            <span
-              key={color}
-              style={{ width: 12, height: 12, borderRadius: '50%', background: color }}
-            />
-          ))}
-        </div>
-      )}
+      {/* Space for the traffic lights, not a drawing of them. `tauri.macos.conf.json`
+          sets `titleBarStyle: "Overlay"`, so macOS paints the real buttons over the
+          web content at this corner; painting our own put a second, dead set directly
+          on top of the working ones. Only the reserved width is ours. */}
+      {isMac() && <div className="titlebar__lights" aria-hidden />}
       <div className="titlebar__tabs" data-tauri-drag-region>
         {order.map((id) => {
           const session = sessions[id]

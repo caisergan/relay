@@ -23,6 +23,14 @@ export function formatDuration(seconds: number | null): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 
+/** The design's column is 84px of mono, sized for "Jul 14 22:39" — every date in the
+ * design is from the current year. A real listing is full of older files, and adding
+ * the year to a string that already carried a clock time overflowed the column and
+ * wrapped the cell onto two lines.
+ *
+ * So the year replaces the time rather than joining it, which is the convention Finder
+ * and `ls -l` both use: recent files are worth timing to the minute, a file from two
+ * years ago is not. */
 export function formatWhen(iso: string | null): string {
   if (!iso) return '—'
   const date = new Date(iso)
@@ -32,9 +40,7 @@ export function formatWhen(iso: string | null): string {
   return date.toLocaleString(undefined, {
     month: 'short',
     day: 'numeric',
-    ...(sameYear ? {} : { year: 'numeric' }),
-    hour: '2-digit',
-    minute: '2-digit',
+    ...(sameYear ? { hour: '2-digit', minute: '2-digit' } : { year: 'numeric' }),
   })
 }
 

@@ -160,4 +160,45 @@ mod tests {
         let err = list_dir(Path::new("/definitely/not/here")).unwrap_err();
         assert!(matches!(err, EngineError::NotFound { .. }), "got {err:?}");
     }
+
+    /// The other half of the pair the breadcrumb's error panes switch on. The mapping
+    /// itself is unit-tested in `error.rs`; this proves a real unreadable directory
+    /// reaches it, rather than surfacing as a generic `LocalIo`.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_directory_maps_to_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = list_dir(&locked);
+
+        // Restore first, so a failing assertion still leaves a removable directory.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        match result {
+            // The mode bits were not enforced — running as root, or a filesystem that
+            // ignores them. Both happen in CI containers, and neither leaves anything
+            // to assert about a denial that did not occur.
+            Ok(_) => (),
+            Err(err) => assert!(
+                matches!(err, EngineError::PermissionDenied { .. }),
+                "got {err:?}"
+            ),
+        }
+    }
+
+    /// `roots()` feeds the breadcrumb's root menu. Whatever it names must be somewhere
+    /// the pane can actually open, or the menu offers dead entries.
+    #[test]
+    fn roots_are_listable_directories() {
+        let roots = roots();
+        assert!(!roots.is_empty(), "a machine always has at least one root");
+        for root in &roots {
+            assert!(root.is_dir(), "{} is not a directory", root.display());
+        }
+    }
 }

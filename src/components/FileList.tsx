@@ -12,6 +12,7 @@ import {
   IconTrash,
   tintForFile,
 } from './Icons'
+import { PaneMessage } from './PaneMessage'
 
 export interface FileRow {
   key: string
@@ -55,13 +56,24 @@ function compare(a: FileRow, b: FileRow, key: SortKey): number {
  * `text/plain`, so a stray text drag from another app cannot start a transfer. */
 export const ROW_DRAG = 'application/x-relay-rows'
 
+/** The one permission string the design tints: readable and writable by its owner and
+ * by nobody else. Matched exactly, as the design does — `rwx------` on a directory is
+ * ordinary and stays faint. */
+const OWNER_ONLY = 'rw-------'
+
+/** Exported so the rule can be tested directly: the rows themselves are virtualised,
+ * and a virtualiser measures its scroll container, which in jsdom is zero pixels tall
+ * and therefore renders no rows at all. */
+export function permsClass(perms: string | null): string {
+  return perms === OWNER_ONLY ? 'row__perms row__perms--private' : 'row__perms'
+}
+
 interface Props {
   pane: 'local' | 'remote'
   rows: FileRow[]
   loading: boolean
-  /** Renders the designed empty / denied states instead of an empty list. */
-  emptyTitle: string
-  emptyBody: string
+  /** Navigates to the parent, for the empty state's "Go back". Absent at a root. */
+  onBack?: () => void
   /** Which way the row's transfer button sends bytes. Sets the arrow and its tooltip. */
   direction: 'up' | 'down'
   sort: Sort
@@ -87,8 +99,7 @@ export function FileList({
   pane,
   rows,
   loading,
-  emptyTitle,
-  emptyBody,
+  onBack,
   direction,
   sort,
   onSort,
@@ -179,10 +190,7 @@ export function FileList({
   if (rows.length === 0) {
     return (
       <div className={`rows${dropping ? ' rows--dropping' : ''}`} {...dropProps}>
-        <div className="empty">
-          <span className="empty__title">{emptyTitle}</span>
-          <span>{emptyBody}</span>
-        </div>
+        <PaneMessage kind="empty" side={pane} {...(onBack ? { onBack } : {})} />
       </div>
     )
   }
@@ -250,7 +258,7 @@ export function FileList({
                 </span>
                 <span className="row__size">{row.isDir ? '—' : formatBytes(row.size)}</span>
                 <span className="row__when">{formatWhen(row.modified)}</span>
-                {showPerms && <span className="row__perms">{row.perms ?? '—'}</span>}
+                {showPerms && <span className={permsClass(row.perms)}>{row.perms ?? '—'}</span>}
 
                 {/* Floating, so it overlays the metadata columns on hover instead of
                     shoving them sideways. The design's pill: panel, hairline, lift. */}
