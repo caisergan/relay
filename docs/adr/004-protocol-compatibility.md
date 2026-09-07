@@ -17,8 +17,9 @@ this document separately: the first is measured, the second is not.
 
 One crypto provider across `russh`, `rustls` and `suppaftp`, so one stack is tested
 rather than two linked into one binary. `ring` was preferred over `russh`'s default
-`aws-lc-rs` for lighter build-time requirements on Windows; the Windows CI leg is what
-confirms or refutes that, and `aws-lc-rs` is the fallback.
+`aws-lc-rs` for lighter build-time requirements on Windows. That prediction is
+**currently unverified**: the Windows CI leg is switched off (see `.github/workflows/ci.yml`),
+so nothing is building this stack for Windows. `aws-lc-rs` remains the documented fallback.
 
 ## The fixture
 
@@ -123,6 +124,7 @@ default or deciding whether request pipelining is needed.
 | Gate | Why it is not answered |
 |---|---|
 | Windows OpenSSH named-pipe agent | Needs Windows. The unix-socket path is proven; the named-pipe path is not the same code |
+| Anything else Windows | The Windows CI leg is currently disabled, so `src-tauri` is not even compiled for it |
 | OS secrets — Keychain and Credential Manager | `keyring` compiles and nothing more. Write/read/delete and denied-store behaviour on both platforms are untested |
 | Throughput under realistic latency | Loopback only |
 | Keyboard-interactive success path | Needs a server configured to require it |

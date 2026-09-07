@@ -103,7 +103,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        # Windows is off for now: add `windows-latest` back here to restore it.
+        # While it is off, nothing verifies the Windows half of the product — the
+        # OpenSSH named-pipe agent, Credential Manager, the `ring` build, and the
+        # drawn window controls all stay unproven (ADR 004).
+        os: [macos-14]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
