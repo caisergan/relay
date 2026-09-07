@@ -208,14 +208,14 @@
 }
 
 /* Selection is a marker on the rail's edge, not a ring around the icon.
-   
+
    The ring put a blue outline around a blue avatar on a blue-tinted background —
    three blues at three strengths inside 38px, which read as a smudge rather than as a
    state, and the avatar's own live dot collided with it. An earlier note here claimed
    the rail had no room for an edge marker; it does. The rail is 52px around a 38px
    target, so there are 7px of margin on each side and the marker sits in them,
    touching nothing.
-   
+
    It is also the marker the expanded sidebar already uses. Collapsing the sidebar now
    changes the size of the selection, not its language. */
 .rail__item--active::before {
@@ -995,6 +995,19 @@
   height: var(--row);
   border-bottom: 1px solid var(--line-2);
   cursor: default;
+  /* An integer line box, shared by every column.
+
+     Inheriting the body's unitless 1.45 gave each column its own fractional one —
+     18.125px for the 12.5px name, 15.95px for the 11px size, 15.225px, 14.5px — and
+     `align-items: center` then centred each of them independently inside a 40px row.
+     The name landed at 10.9375px from the top: fifteen sixteenths of a pixel, on the
+     largest glyphs in the row. Text at a fractional offset can rasterise differently
+     when the area behind it is repainted, which is what hovering a row does, so the
+     name was the one column with both the offset and the size to make that visible.
+
+     20px divides evenly into every row height the density tokens produce (40 and 32),
+     so each column now centres on a whole pixel and the four share a baseline. */
+  line-height: 20px;
 }
 .row:hover {
   background: var(--line-2);
