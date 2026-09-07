@@ -164,7 +164,9 @@ function statusTone(job: JobSnapshot): string {
     case 'failed':
       return 'bad'
     case 'done':
-      return 'ok'
+      // A skipped job succeeded at doing nothing. Drawing it in the success colour
+      // would say a file was transferred that deliberately was not.
+      return job.state.skipped ? 'idle' : 'ok'
     case 'transferring':
       return 'transit'
     default:
@@ -179,7 +181,7 @@ function describe(job: JobSnapshot): string {
     case 'paused':
       return `paused (${job.state.reason})`
     case 'done':
-      return 'done'
+      return job.state.skipped ? 'skipped' : 'done'
     default:
       return job.state.kind
   }

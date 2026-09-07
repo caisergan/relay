@@ -12,7 +12,7 @@ use relay_core::EngineHub;
 use relay_core::coordinator::SnapshotError;
 use relay_core::events::{EngineEvent, ListingSnapshot, LogKind, LogLine};
 use relay_core::interact::{Interact, Prompt, PromptReply, ResolveError};
-use relay_core::job::{JobSnapshot, JobState};
+use relay_core::job::{JobKind, JobSnapshot, JobState};
 use relay_core::model::{Direction, FileKind, Proto, RemoteEntry, Session, SessionState};
 use relay_core::wire::{Bytes, Order, Seq};
 use uuid::Uuid;
@@ -38,6 +38,7 @@ fn job(id: Uuid, session: Uuid, state: JobState, transferred: u64) -> Box<JobSna
         id,
         session,
         server_id: Uuid::new_v4(),
+        kind: JobKind::File,
         direction: Direction::Down,
         remote_path: "/var/www/app.js".into(),
         local_path: "/tmp/app.js".into(),
@@ -47,6 +48,8 @@ fn job(id: Uuid, session: Uuid, state: JobState, transferred: u64) -> Box<JobSna
         order: Order(1024),
         speed_bps: None,
         eta_secs: None,
+        attempts: 1,
+        retry_at: None,
         conflict_policy: None,
         parent: None,
         started_at: None,
@@ -103,7 +106,15 @@ async fn a_remount_recovers_state_without_replaying_updates_twice() {
         .unwrap();
     events
         .send(EngineEvent::JobUpdate {
-            job: job(jid, sid, JobState::Done { at: Utc::now() }, 1000),
+            job: job(
+                jid,
+                sid,
+                JobState::Done {
+                    at: Utc::now(),
+                    skipped: false,
+                },
+                1000,
+            ),
         })
         .await
         .unwrap();
@@ -419,7 +430,15 @@ async fn progress_is_coalesced_but_the_terminal_state_always_arrives() {
     }
     hub.events()
         .send(EngineEvent::JobUpdate {
-            job: job(jid, sid, JobState::Done { at: Utc::now() }, 1000),
+            job: job(
+                jid,
+                sid,
+                JobState::Done {
+                    at: Utc::now(),
+                    skipped: false,
+                },
+                1000,
+            ),
         })
         .await
         .unwrap();

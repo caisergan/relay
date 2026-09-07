@@ -1,8 +1,10 @@
 //! The transfer job wire contract.
 //!
-//! Phase 0 fixes the *shape* the shell renders; phase 2 adds the scheduler, the SQLite
-//! table, and the transition function that owns these states. Rust is authoritative:
-//! the frontend projects `JobSnapshot` and never invents a transition of its own.
+//! Phase 0 fixed the *shape* the shell renders. Phase 2 supplies what was missing
+//! behind it: [`crate::queue`] holds the engine's own job record and the single
+//! transition function that owns these states, and [`crate::scheduler`] decides which
+//! of them runs. Rust stays authoritative — the frontend projects [`JobSnapshot`] and
+//! never invents a transition of its own.
 
 use std::path::PathBuf;
 
@@ -42,6 +44,10 @@ pub enum JobState {
     #[serde(rename_all = "camelCase")]
     Done {
         at: DateTime<Utc>,
+        /// The destination was deliberately left alone — a skip, by answer or policy.
+        /// It lives inside `Done` rather than beside it because a skipped job *is*
+        /// finished, and two fields that can disagree about that would eventually.
+        skipped: bool,
     },
     Cancelled,
 }
@@ -69,6 +75,20 @@ pub enum PauseReason {
     SessionDown,
     /// The global concurrency limit dropped below the number of running jobs.
     Throttled,
+    /// The process stopped while this was running. Recovery cannot know whether the
+    /// bytes in flight reached the disk, so the job waits to be verified rather than
+    /// being restarted or trusted.
+    Restarted,
+}
+
+/// Whether a job moves bytes itself or owns others that do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum JobKind {
+    File,
+    /// A recursive transfer. Its progress is the sum of its children's and it holds no
+    /// connection of its own, so it never spends one of the concurrency slots.
+    Folder,
 }
 
 /// What the queue drawer and the flow gutter render. Progress is coalesced before it
@@ -79,6 +99,7 @@ pub struct JobSnapshot {
     pub id: JobId,
     pub session: SessionId,
     pub server_id: ServerId,
+    pub kind: JobKind,
     pub direction: Direction,
     pub remote_path: String,
     pub local_path: PathBuf,
@@ -90,6 +111,11 @@ pub struct JobSnapshot {
     /// Bytes per second over the recent window; `None` until there is a window.
     pub speed_bps: Option<Bytes>,
     pub eta_secs: Option<u32>,
+    /// Attempts spent, including the running one. The drawer reads this with
+    /// `retry_at` to say "retrying" instead of an unexplained pause.
+    pub attempts: u32,
+    /// When a job requeued by the scheduler's backoff becomes eligible again.
+    pub retry_at: Option<DateTime<Utc>>,
     /// Set once "apply to remaining" propagates a decision onto later jobs.
     pub conflict_policy: Option<ConflictAction>,
     /// Folder jobs own their children; the drawer nests them under the parent.

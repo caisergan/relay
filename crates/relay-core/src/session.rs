@@ -30,7 +30,7 @@ use crate::coordinator::log_line;
 use crate::error::{EngineError, Result};
 use crate::events::{ActivityEntry, EngineEvent, ListingSnapshot, LogKind};
 use crate::interact::{ConflictAction, Interact, Prompt, PromptReply};
-use crate::job::{JobSnapshot, JobState};
+use crate::job::{JobKind, JobSnapshot, JobState};
 use crate::model::{
     Direction, FileFacts, JobId, PromptId, RemoteEntry, ServerConfig, ServerId, Session, SessionId,
     SessionState,
@@ -860,7 +860,13 @@ async fn run_transfer(task: TransferTask) {
     lane.close().await;
 
     let (state, transferred) = match outcome {
-        Ok(out) => (JobState::Done { at: Utc::now() }, Bytes(out.final_size)),
+        Ok(out) => (
+            JobState::Done {
+                at: Utc::now(),
+                skipped: false,
+            },
+            Bytes(out.final_size),
+        ),
         Err(EngineError::Cancelled) => (JobState::Cancelled, Bytes::ZERO),
         Err(error) => (failed(error), Bytes::ZERO),
     };
@@ -974,6 +980,7 @@ fn snapshot_for(
         id: order.job,
         session,
         server_id: order.server_id,
+        kind: JobKind::File,
         direction: order.direction,
         remote_path: order.remote_path.clone(),
         local_path: order.local_path.clone(),
@@ -983,6 +990,8 @@ fn snapshot_for(
         order: order.order,
         speed_bps,
         eta_secs,
+        attempts: 1,
+        retry_at: None,
         conflict_policy: order.conflict,
         parent: None,
         started_at,

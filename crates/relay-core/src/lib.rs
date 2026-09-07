@@ -9,6 +9,7 @@
 //!
 //! - [`model`] / [`job`] — the value types the shell and the generated TypeScript share.
 //! - [`protocol`] — what a backend must implement, and the transfer lanes it hands out.
+//! - [`queue`] — the job record and the single function allowed to change its state.
 //! - [`interact`] — prompts, and the broker that owns every unanswered question.
 //! - [`events`] / [`coordinator`] — the ordered update stream and the authoritative
 //!   projection behind snapshot recovery.
@@ -29,6 +30,7 @@ pub mod local;
 pub mod mock;
 pub mod model;
 pub mod protocol;
+pub mod queue;
 pub mod secrets;
 pub mod servers;
 pub mod session;

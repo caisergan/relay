@@ -114,6 +114,14 @@ export type FileKind = "file" | "dir" |
  */
 "symlink";
 
+/**  Whether a job moves bytes itself or owns others that do. */
+export type JobKind = "file" | 
+/**
+ *  A recursive transfer. Its progress is the sum of its children's and it holds no
+ *  connection of its own, so it never spends one of the concurrency slots.
+ */
+"folder";
+
 /**
  *  What the queue drawer and the flow gutter render. Progress is coalesced before it
  *  reaches this type: phase 5 budgets ten updates per second per job.
@@ -122,6 +130,7 @@ export type JobSnapshot = {
 	id: string,
 	session: string,
 	serverId: string,
+	kind: JobKind,
 	direction: Direction,
 	remotePath: string,
 	localPath: string,
@@ -133,6 +142,13 @@ export type JobSnapshot = {
 	/**  Bytes per second over the recent window; `None` until there is a window. */
 	speedBps: number | null,
 	etaSecs: number | null,
+	/**
+	 *  Attempts spent, including the running one. The drawer reads this with
+	 *  `retry_at` to say "retrying" instead of an unexplained pause.
+	 */
+	attempts: number,
+	/**  When a job requeued by the scheduler's backoff becomes eligible again. */
+	retryAt: string | null,
 	/**  Set once "apply to remaining" propagates a decision onto later jobs. */
 	conflictPolicy: ConflictAction | null,
 	/**  Folder jobs own their children; the drawer nests them under the parent. */
@@ -146,7 +162,13 @@ export type JobState =
 /**  Destination stat, conflict detection, resume verification. */
 { kind: "preparing" } | { kind: "awaitingPrompt"; prompt: string } | { kind: "transferring" } | 
 /**  Content is on the destination but has not been proven correct yet. */
-{ kind: "verifying" } | { kind: "paused"; reason: PauseReason } | { kind: "failed"; error: EngineError; attempts: number } | { kind: "done"; at: string } | { kind: "cancelled" };
+{ kind: "verifying" } | { kind: "paused"; reason: PauseReason } | { kind: "failed"; error: EngineError; attempts: number } | { kind: "done"; at: string; 
+/**
+ *  The destination was deliberately left alone — a skip, by answer or policy.
+ *  It lives inside `Done` rather than beside it because a skipped job *is*
+ *  finished, and two fields that can disagree about that would eventually.
+ */
+skipped: boolean } | { kind: "cancelled" };
 
 /**  A directory listing as currently known for a session's remote pane. */
 export type ListingSnapshot = {
@@ -194,7 +216,13 @@ export type PauseReason =
 /**  The session went away; the scheduler resumes these on reconnect. */
 "sessionDown" | 
 /**  The global concurrency limit dropped below the number of running jobs. */
-"throttled";
+"throttled" | 
+/**
+ *  The process stopped while this was running. Recovery cannot know whether the
+ *  bytes in flight reached the disk, so the job waits to be verified rather than
+ *  being restarted or trusted.
+ */
+"restarted";
 
 export type Prompt = { kind: "hostKey"; host: string; algo: string; sha256: string; 
 /**
