@@ -642,32 +642,24 @@ async fn a_paused_download_resumes_from_a_verified_checkpoint() {
     );
 
     // ---- verification -------------------------------------------------------
+    // The facts as the engine would have recorded them, and as they still are.
+    let facts = FileFacts {
+        path: source.clone(),
+        size: Bytes(32 * 1024 * 1024),
+        modified: None,
+        digest: None,
+    };
     let record = ResumeRecord {
         checkpoint: Bytes(at),
         prefix_sha256: digest.clone(),
-        ..ResumeRecord::new(
-            FileFacts {
-                path: source.clone(),
-                // Zero means "unknown" to the facts check, which is what the engine
-                // records when the source size was not read up front.
-                size: Bytes(0),
-                modified: None,
-                digest: None,
-            },
-            partial.display().to_string(),
-        )
+        ..ResumeRecord::new(facts.clone(), partial.display().to_string())
     };
     let mut lane = c.backend.open_lane().await.expect("lane");
     let prefix = relay_core::resume::check(
         relay_core::resume::Verify {
             record: &record,
             direction: Direction::Down,
-            source_now: Some(&FileFacts {
-                path: source.clone(),
-                size: Bytes(0),
-                modified: None,
-                digest: None,
-            }),
+            source_now: Some(&facts),
             local_path: &local,
             remote_path: &source,
         },
@@ -722,19 +714,19 @@ async fn a_partial_that_does_not_match_the_source_is_refused() {
     let bogus = vec![b'x'; 4096];
     std::fs::write(&partial, &bogus).expect("seed the partial");
 
+    // Everything about the source is unchanged and everything about the partial is
+    // self-consistent. Only the bytes disagree, which is the whole point.
+    let facts = FileFacts {
+        path: source.clone(),
+        size: Bytes(1024 * 1024),
+        modified: None,
+        digest: None,
+    };
     let record = ResumeRecord {
         checkpoint: Bytes(4096),
         // The digest the engine *would* have recorded had it written those bytes.
         prefix_sha256: sha256(&bogus),
-        ..ResumeRecord::new(
-            FileFacts {
-                path: source.clone(),
-                size: Bytes(0),
-                modified: None,
-                digest: None,
-            },
-            partial.display().to_string(),
-        )
+        ..ResumeRecord::new(facts.clone(), partial.display().to_string())
     };
 
     let mut lane = c.backend.open_lane().await.expect("lane");
@@ -742,12 +734,7 @@ async fn a_partial_that_does_not_match_the_source_is_refused() {
         relay_core::resume::Verify {
             record: &record,
             direction: Direction::Down,
-            source_now: Some(&FileFacts {
-                path: source.clone(),
-                size: Bytes(0),
-                modified: None,
-                digest: None,
-            }),
+            source_now: Some(&facts),
             local_path: &local,
             remote_path: &source,
         },

@@ -398,6 +398,13 @@ export type TransferItem = {
 	direction: Direction,
 	remotePath: string,
 	localPath: string,
-	/**  A directory, which becomes a folder job the walker fills in. */
+	/**
+	 *  A directory, which becomes a folder job the walker fills in.
+	 * 
+	 *  Authoritative for a download, where only the caller has seen the listing.
+	 *  Ignored for an upload: the engine can see the local side itself, and a syscall
+	 *  beats a guess — the operating system's drag-and-drop hands over paths with no
+	 *  indication of what they are.
+	 */
 	isDir: boolean,
 };
