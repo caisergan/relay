@@ -179,6 +179,10 @@
   min-height: 0;
   width: 100%;
   overflow-y: auto;
+  /* A hairline between the mark and the servers. Stacked without it, the logo and the
+     first avatar are two rounded squares of the same size and read as a pair. */
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -196,19 +200,39 @@
   align-items: center;
   justify-content: center;
   color: var(--ink-faint);
+  position: relative;
 }
 .rail__item:hover {
   background: var(--line-2);
   color: var(--ink);
 }
-/* The rail has no room for an edge marker beside a 30px avatar, so the selection is a
-   ring around the whole target instead. */
-.rail__item--active {
-  background: var(--signal-soft);
-  box-shadow: inset 0 0 0 1.5px var(--signal);
+
+/* Selection is a marker on the rail's edge, not a ring around the icon.
+   
+   The ring put a blue outline around a blue avatar on a blue-tinted background —
+   three blues at three strengths inside 38px, which read as a smudge rather than as a
+   state, and the avatar's own live dot collided with it. An earlier note here claimed
+   the rail had no room for an edge marker; it does. The rail is 52px around a 38px
+   target, so there are 7px of margin on each side and the marker sits in them,
+   touching nothing.
+   
+   It is also the marker the expanded sidebar already uses. Collapsing the sidebar now
+   changes the size of the selection, not its language. */
+.rail__item--active::before {
+  content: '';
+  position: absolute;
+  left: -7px;
+  top: 50%;
+  width: 3px;
+  height: 20px;
+  transform: translateY(-50%);
+  border-radius: 0 3px 3px 0;
+  background: var(--signal);
 }
-.rail__item--active:hover {
-  background: var(--signal-soft-hi);
+/* No background of its own: the avatar carries the colour, and anything behind it
+   competes. Hover still lands, so a selected item answers the cursor like any other. */
+.rail__item--active {
+  color: var(--ink);
 }
 
 /* ---------------------------------------------------------------- sidebar */
