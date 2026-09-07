@@ -30,6 +30,9 @@
   /* Transit: in-flight transfers and unsaved state. */
   --transit: #e8a03c;
   --transit-soft: #fbf1de;
+  /* Readable amber text on `--transit-soft`. `--transit` itself is a fill colour and
+     fails contrast as body text on its own tint. */
+  --transit-ink: #8a5a12;
   --ok: #2e9e5b;
   --ok-soft: #e6f4ec;
   --danger: #d6453c;
@@ -57,7 +60,18 @@
   --radius-lg: 10px;
 
   --titlebar-h: 40px;
-  --gutter-w: 56px;
+  /* The gutter is 52px in the design and reads as a channel between the panes, not
+     as a third column. Anything wider starts to look like an empty pane. */
+  --gutter-w: 52px;
+  --sidebar-w: 244px;
+  --session-h: 52px;
+
+  /* File-type tints for the row icons. The design hard-codes hexes; these route
+     through the palette so the dark theme is not stuck with light-theme values. */
+  --type-code: var(--signal);
+  --type-data: var(--transit);
+  --type-plain: var(--ink-faint);
+  --type-php: #8892bf;
 
   color-scheme: light;
 }
@@ -75,6 +89,7 @@
   --signal-soft: #1d2a47;
   --transit: #eba94a;
   --transit-soft: #3a2e19;
+  --transit-ink: #f0c583;
   --ok: #43b877;
   --ok-soft: #17301f;
   --danger: #e5655c;

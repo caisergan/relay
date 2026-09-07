@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 
+import type { Sort } from '@/components/FileList'
 import type { ListingSnapshot, LocalEntry, Session, SessionState } from '@/ipc/gen'
 
 /** Per-tab view state. Purely local: the engine owns everything else. */
@@ -11,6 +12,14 @@ export interface PaneState {
   remoteFilter: string
   localFilter: string
   remoteLoading: boolean
+  /** Sort is per pane and per tab: the local side is usually a project directory and
+   * the remote side a deploy target, and they rarely want the same order. */
+  localSort: Sort
+  remoteSort: Sort
+  /** The focused row's name, or null. Single-select for now; the design's multi-select
+   * (⌘-click, shift-range) lands with the batch queue in phase 2. */
+  localSelected: string | null
+  remoteSelected: string | null
 }
 
 const emptyPane: PaneState = {
@@ -21,6 +30,10 @@ const emptyPane: PaneState = {
   remoteFilter: '',
   localFilter: '',
   remoteLoading: false,
+  localSort: { key: 'name', dir: 1 },
+  remoteSort: { key: 'name', dir: 1 },
+  localSelected: null,
+  remoteSelected: null,
 }
 
 interface SessionsState {

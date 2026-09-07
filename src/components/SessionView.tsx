@@ -1,14 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { commands } from '@/ipc/commands'
-import type { LocalEntry, LogLine, RemoteEntry } from '@/ipc/gen'
+import type { LocalEntry, LogLine, RemoteEntry, ServerConfig } from '@/ipc/gen'
 import { crumbs, joinPath, parentPath } from '@/lib/format'
 import { useOrderedJobs } from '@/state/queueStore'
+import { useServersStore } from '@/state/serversStore'
 import { emptyPane, useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
 
-import { FileList, type FileRow } from './FileList'
+import { FileList, sortRows, type FileRow, type Sort, type SortKey } from './FileList'
 import { FlowGutter } from './FlowGutter'
+import {
+  IconActivity,
+  IconChevronLeft,
+  IconFolderPlus,
+  IconMonitor,
+  IconRefresh,
+  IconSearch,
+  IconServer,
+  IconWarning,
+} from './Icons'
+import { avatarFor, tintFor } from './TitleBar'
 
 interface Props {
   sessionId: string
@@ -54,12 +66,20 @@ export function SessionView({ sessionId }: Props) {
   }, [pane.localPath, loadLocal])
 
   const remoteRows = useMemo(
-    () => (listing?.entries ?? []).map(remoteRow).filter(matching(pane.remoteFilter)),
-    [listing, pane.remoteFilter],
+    () =>
+      sortRows(
+        (listing?.entries ?? []).map(remoteRow).filter(matching(pane.remoteFilter)),
+        pane.remoteSort,
+      ),
+    [listing, pane.remoteFilter, pane.remoteSort],
   )
   const localRows = useMemo(
-    () => pane.localEntries.map(localRow).filter(matching(pane.localFilter)),
-    [pane.localEntries, pane.localFilter],
+    () =>
+      sortRows(
+        pane.localEntries.map(localRow).filter(matching(pane.localFilter)),
+        pane.localSort,
+      ),
+    [pane.localEntries, pane.localFilter, pane.localSort],
   )
 
   if (!session) return null
@@ -75,8 +95,8 @@ export function SessionView({ sessionId }: Props) {
     })
   }
 
-  const transfer = (direction: 'up' | 'down') => (row: FileRow) => {
-    if (row.isDir) {
+  const enqueue = (direction: 'up' | 'down', name: string, isDir: boolean) => {
+    if (isDir) {
       toast('info', 'Folder transfers arrive with the phase 2 queue.')
       return
     }
@@ -85,13 +105,22 @@ export function SessionView({ sessionId }: Props) {
         sessionId,
         session.serverId,
         direction,
-        joinPath(remotePath, row.name),
-        joinPath(pane.localPath, row.name),
+        joinPath(remotePath, name),
+        joinPath(pane.localPath, name),
       )
       .catch((error: unknown) => toast('error', String(error)))
   }
-  const download = transfer('down')
-  const upload = transfer('up')
+
+  const transfer = (direction: 'up' | 'down') => (row: FileRow) =>
+    enqueue(direction, row.name, row.isDir)
+
+  /// A drag names files, not rows: the source pane's row objects are not in scope by
+  /// the time the drop lands, so the destination looks them up in its own listing.
+  const dropped = (direction: 'up' | 'down', from: FileRow[]) => (names: string[]) => {
+    for (const name of names) {
+      enqueue(direction, name, from.find((row) => row.name === name)?.isDir ?? false)
+    }
+  }
 
   /// Refresh after a change, because SFTP has no directory notifications: what the
   /// pane shows is whatever the last listing said.
@@ -131,17 +160,28 @@ export function SessionView({ sessionId }: Props) {
       .catch((error: unknown) => toast('error', `Could not delete: ${String(error)}`))
   }
 
+  /// Clicking the same column again reverses it, which is the behaviour every file
+  /// manager has trained people to expect.
+  const cycle = (current: Sort, key: SortKey): Sort =>
+    current.key === key ? { key, dir: current.dir === 1 ? -1 : 1 } : { key, dir: 1 }
+
   return (
     <>
-      <SessionHeader sessionId={sessionId} onToggleLog={() => setLogOpen((v) => !v)} />
+      <SessionHeader
+        sessionId={sessionId}
+        logOpen={logOpen}
+        onToggleLog={() => setLogOpen((v) => !v)}
+      />
       <div className="panes">
-        <div className="pane">
+        <div className="pane pane--local">
           <PaneHeader
+            kind="local"
+            title="This Mac"
             path={pane.localPath || '/'}
             filter={pane.localFilter}
+            filterLabel="Filter"
             onFilter={(localFilter) => patchPane(sessionId, { localFilter })}
             onNavigate={(path) => void loadLocal(path)}
-            label="This Mac"
           />
           {pane.localError ? (
             <div className="empty">
@@ -150,29 +190,38 @@ export function SessionView({ sessionId }: Props) {
             </div>
           ) : (
             <FileList
+              pane="local"
               rows={localRows}
               loading={pane.localLoading}
               emptyTitle="Nothing here"
               emptyBody="This folder is empty."
-              actionLabel="Upload →"
+              direction="up"
+              sort={pane.localSort}
+              onSort={(key) => patchPane(sessionId, { localSort: cycle(pane.localSort, key) })}
+              selected={pane.localSelected}
+              onSelect={(localSelected) => patchPane(sessionId, { localSelected })}
               onOpen={(row) => row.isDir && void loadLocal(joinPath(pane.localPath, row.name))}
-              onAction={upload}
+              onAction={transfer('up')}
+              {...(connected ? { onDropRows: dropped('down', remoteRows) } : {})}
             />
           )}
         </div>
 
         <FlowGutter jobs={sessionJobs} />
 
-        <div className="pane">
+        <div className="pane pane--remote">
           {/* Spread rather than `onNewFolder={connected ? fn : undefined}`:
               `exactOptionalPropertyTypes` forbids an explicit undefined for an
               optional prop, so the prop is either present or absent. */}
           <PaneHeader
+            kind="remote"
+            title={session.name}
             path={remotePath}
             filter={pane.remoteFilter}
+            filterLabel="Filter this folder"
             onFilter={(remoteFilter) => patchPane(sessionId, { remoteFilter })}
             onNavigate={navigateRemote}
-            label={session.name}
+            onRefresh={refreshRemote}
             {...(connected ? { onNewFolder: newFolder } : {})}
           />
           {!connected ? (
@@ -188,15 +237,23 @@ export function SessionView({ sessionId }: Props) {
             </div>
           ) : (
             <FileList
+              pane="remote"
               rows={remoteRows}
               loading={pane.remoteLoading}
               emptyTitle="Empty directory"
               emptyBody="Nothing on the server at this path."
-              actionLabel="↓ Download"
+              direction="down"
+              sort={pane.remoteSort}
+              onSort={(key) =>
+                patchPane(sessionId, { remoteSort: cycle(pane.remoteSort, key) })
+              }
+              selected={pane.remoteSelected}
+              onSelect={(remoteSelected) => patchPane(sessionId, { remoteSelected })}
               onOpen={(row) => row.isDir && navigateRemote(joinPath(remotePath, row.name))}
-              onAction={download}
+              onAction={transfer('down')}
               onRename={renameRemote}
               onDelete={confirmDelete}
+              onDropRows={dropped('up', localRows)}
               showPerms
             />
           )}
@@ -227,46 +284,113 @@ export function SessionView({ sessionId }: Props) {
   )
 }
 
+/** The design's session header: who you are, where, over what, and how far away.
+ *
+ * `user@host:port` is the load-bearing part. Two panes of dotfiles look identical
+ * whichever account produced them, and the name at the top is whatever the server was
+ * called in the sidebar — it does not say which login is looking. */
 function SessionHeader({
   sessionId,
+  logOpen,
   onToggleLog,
 }: {
   sessionId: string
+  logOpen: boolean
   onToggleLog: () => void
 }) {
   const session = useSessionsStore((s) => s.sessions[sessionId])
+  const servers = useServersStore((s) => s.servers)
+  const toast = useUiStore((s) => s.toast)
   if (!session) return null
 
-  const dot =
-    session.state.kind === 'connected'
-      ? 'dot--ok'
-      : session.state.kind === 'disconnected'
-        ? 'dot--down'
-        : 'dot--busy'
+  const server: ServerConfig | undefined = servers.find((s) => s.id === session.serverId)
+  const state = session.state
 
-  const detail =
-    session.state.kind === 'connected'
-      ? (session.state.info.cipher ?? 'encrypted')
-      : session.state.kind === 'reconnecting'
-        ? `Reconnecting, attempt ${session.state.attempt}`
-        : session.state.kind === 'disconnected'
-          ? session.state.reason
-          : 'Connecting…'
+  const conn =
+    state.kind === 'connected'
+      ? { label: 'Connected', dot: 'dot--ok', tone: 'var(--ok)' }
+      : state.kind === 'connecting'
+        ? { label: 'Connecting', dot: 'dot--busy', tone: 'var(--transit)' }
+        : state.kind === 'reconnecting'
+          ? {
+              label: `Reconnecting (${state.attempt})`,
+              dot: 'dot--busy',
+              tone: 'var(--transit)',
+            }
+          : { label: 'Disconnected', dot: 'dot--down', tone: 'var(--danger)' }
+
+  const lost = state.kind === 'reconnecting'
 
   return (
-    <div className="session-header">
-      <span className={`dot ${dot}`} />
-      <strong style={{ fontFamily: 'var(--font-display)', fontSize: 13 }}>
-        {session.name}
-      </strong>
-      <span style={{ color: 'var(--ink-faint)' }}>{detail}</span>
-      {session.latencyMs !== null && (
-        <span className="sidebar__meta">{session.latencyMs} ms</span>
+    <div className="session">
+      {lost && (
+        <div className="session__lost" role="status">
+          <span className="spinner spinner--transit" />
+          <span style={{ flex: 1 }}>
+            <b>Connection lost.</b> Retrying in {state.retryInSecs}s — the queue is safe and
+            resumes on its own.
+          </span>
+        </div>
       )}
-      <span style={{ flex: 1 }} />
-      <button className="iconbtn" title="Session log" onClick={onToggleLog}>
-        Log
-      </button>
+      <div className="session__bar">
+        <span
+          className="session__avatar"
+          style={{ background: server?.color ?? tintFor(session.name) }}
+        >
+          {avatarFor(session.name)}
+        </span>
+        <div className="session__id">
+          <div className="session__line">
+            <span className="session__name">{session.name}</span>
+            {session.proto !== 'sftp' && (
+              <span className="session__insecure">
+                <IconWarning size={11} />
+                Unencrypted
+              </span>
+            )}
+          </div>
+          <div className="session__meta">
+            <span className={`dot ${conn.dot}`} />
+            <span style={{ color: conn.tone, fontWeight: 500 }}>{conn.label}</span>
+            <span>·</span>
+            <span>
+              {server ? `${server.username}@${server.host}:${server.port}` : session.name}
+            </span>
+            {state.kind === 'connected' && session.latencyMs !== null && (
+              <>
+                <span>·</span>
+                <span>{session.latencyMs} ms</span>
+              </>
+            )}
+            {state.kind === 'connected' && state.info.cipher && (
+              <>
+                <span>·</span>
+                <span>{state.info.cipher}</span>
+              </>
+            )}
+          </div>
+        </div>
+        <div style={{ flex: 1 }} />
+        <button
+          className={`pillbtn${logOpen ? ' pillbtn--on' : ''}`}
+          title="Session log"
+          onClick={onToggleLog}
+        >
+          <IconActivity size={14} />
+          Activity
+        </button>
+        <button
+          className="pillbtn pillbtn--danger"
+          title="Close this session"
+          onClick={() => {
+            commands.sessionClose(sessionId).catch((error: unknown) => {
+              toast('error', `Could not disconnect: ${String(error)}`)
+            })
+          }}
+        >
+          Disconnect
+        </button>
+      </div>
     </div>
   )
 }
@@ -318,7 +442,7 @@ function LogPanel({ sessionId, onClose }: { sessionId: string; onClose: () => vo
         </button>
       </div>
       <div className="logpanel__body">
-        {lines.length === 0 && <span className="sidebar__meta">Nothing logged yet.</span>}
+        {lines.length === 0 && <span className="row__size">Nothing logged yet.</span>}
         {lines.map((line, index) => (
           <div key={`${line.at}-${index}`} className={`logline logline--${line.kind}`}>
             <span className="logline__at">{line.at.slice(11, 19)}</span>
@@ -330,59 +454,90 @@ function LogPanel({ sessionId, onClose }: { sessionId: string; onClose: () => vo
   )
 }
 
+/** Three rows, as designed: who this pane is, where it is, and how to narrow it.
+ *
+ * The single strip this replaces put an anonymous breadcrumb next to an anonymous
+ * filter box, so the two panes were told apart only by their contents. */
 function PaneHeader({
+  kind,
+  title,
   path,
   filter,
+  filterLabel,
   onFilter,
   onNavigate,
-  label,
+  onRefresh,
   onNewFolder,
 }: {
+  kind: 'local' | 'remote'
+  title: string
   path: string
   filter: string
+  filterLabel: string
   onFilter: (value: string) => void
   onNavigate: (path: string) => void
-  label: string
+  onRefresh?: () => void
   onNewFolder?: () => void
 }) {
   return (
     <div className="pane-header">
-      <button
-        className="iconbtn"
-        title="Parent directory"
-        aria-label="Parent directory"
-        onClick={() => onNavigate(parentPath(path))}
-      >
-        ↑
-      </button>
-      <div className="crumbs" title={`${label} — ${path}`}>
-        {crumbs(path).map((crumb, index, all) => (
+      <div className="pane-header__id">
+        {kind === 'local' ? (
+          <IconMonitor size={15} className="pane-header__glyph" />
+        ) : (
+          <IconServer size={15} className="pane-header__glyph pane-header__glyph--signal" />
+        )}
+        <span className="pane-header__title">{title}</span>
+        {kind === 'remote' && <span className="pane-header__tag">remote</span>}
+        <div style={{ flex: 1 }} />
+        {onNewFolder && (
           <button
-            key={crumb.path}
-            className={`crumb${index === all.length - 1 ? ' crumb--last' : ''}`}
-            onClick={() => onNavigate(crumb.path)}
+            className="ghostbtn"
+            title="New folder"
+            aria-label="New folder"
+            onClick={onNewFolder}
           >
-            {crumb.label}
+            <IconFolderPlus size={14} />
           </button>
+        )}
+        {onRefresh && (
+          <button className="ghostbtn" title="Refresh" aria-label="Refresh" onClick={onRefresh}>
+            <IconRefresh size={14} />
+          </button>
+        )}
+        <button
+          className="ghostbtn"
+          title="Parent directory"
+          aria-label="Parent directory"
+          onClick={() => onNavigate(parentPath(path))}
+        >
+          <IconChevronLeft size={14} />
+        </button>
+      </div>
+
+      <div className="crumbs" title={`${title} — ${path}`}>
+        {crumbs(path).map((crumb, index, all) => (
+          <span key={crumb.path} className="crumbs__seg">
+            <button
+              className={`crumb${index === all.length - 1 ? ' crumb--last' : ''}`}
+              onClick={() => onNavigate(crumb.path)}
+            >
+              {crumb.label}
+            </button>
+            {index < all.length - 1 && index > 0 && <span className="crumbs__sep">/</span>}
+          </span>
         ))}
       </div>
-      <input
-        className="filter"
-        placeholder="Filter"
-        value={filter}
-        aria-label={`Filter ${label}`}
-        onChange={(e) => onFilter(e.currentTarget.value)}
-      />
-      {onNewFolder && (
-        <button
-          className="iconbtn"
-          title="New folder"
-          aria-label="New folder"
-          onClick={onNewFolder}
-        >
-          ＋
-        </button>
-      )}
+
+      <div className="searchbox searchbox--pane">
+        <IconSearch size={12} className="searchbox__icon" />
+        <input
+          placeholder={filterLabel}
+          value={filter}
+          aria-label={`${filterLabel} — ${title}`}
+          onChange={(e) => onFilter(e.currentTarget.value)}
+        />
+      </div>
     </div>
   )
 }

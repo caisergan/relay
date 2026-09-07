@@ -122,6 +122,33 @@
   border: 1px solid var(--line);
   background: var(--panel-2);
 }
+.iconbtn--bordered:hover {
+  border-color: var(--ink-faint);
+  background: var(--panel-2);
+}
+.kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+/* The new-tab button sits on the tab strip's baseline, not centred in the bar. */
+.tab__new {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-soft);
+  margin: 0 4px 5px;
+  align-self: flex-end;
+}
+.tab__new:hover {
+  background: var(--line-2);
+  color: var(--ink);
+}
 
 /* ---------------------------------------------------------------- body */
 
@@ -131,44 +158,234 @@
   min-height: 0;
 }
 
+/* ---------------------------------------------------------------- sidebar */
+
 .sidebar {
-  width: 216px;
+  width: var(--sidebar-w);
   flex: none;
   background: var(--panel);
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
-  padding: 10px 8px;
-  gap: 2px;
+  gap: 10px;
+  padding: 12px 12px 8px;
+  overflow: hidden;
 }
-.sidebar__group {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-  padding: 12px 8px 4px;
-}
-.sidebar__item {
+
+.sidebar__brand {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 30px;
-  padding: 0 8px;
-  border-radius: var(--radius);
-  color: var(--ink);
-  width: 100%;
-  text-align: left;
+  flex: none;
 }
-.sidebar__item:hover {
+.sidebar__mark {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius);
+  background: var(--signal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgb(36 86 230 / 35%);
+}
+.sidebar__wordmark {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+}
+
+/* The search field, shared with the pane filters — same control, two sizes. */
+.searchbox {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 7px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  flex: none;
+}
+.searchbox:focus-within {
+  border-color: var(--signal);
+}
+.searchbox__icon {
+  flex: none;
+  color: var(--ink-faint);
+}
+.searchbox input {
+  border: none;
+  background: none;
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.searchbox--pane {
+  height: 26px;
+  padding: 0 8px;
+  gap: 6px;
+  border-radius: var(--radius);
+}
+.searchbox--pane input {
+  font-size: 12px;
+}
+
+.sidebar__list {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  margin: 0 -6px;
+  padding: 0 6px;
+}
+.sidebar__section {
+  margin-bottom: 14px;
+}
+.sidebar__group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  margin-bottom: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.sidebar__rule {
+  flex: 1;
+  height: 1px;
   background: var(--line-2);
 }
-.sidebar__meta {
-  margin-left: auto;
+
+.srv {
+  display: flex;
+  align-items: center;
+  border-radius: 9px;
+  margin-bottom: 1px;
+}
+.srv:hover {
+  background: var(--line-2);
+}
+.srv__hit {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 7px;
+  text-align: left;
+  border-radius: 9px;
+}
+.srv__avatar {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-weight: 700;
   font-size: 11px;
-  color: var(--ink-faint);
+  color: #fff;
+  position: relative;
+}
+.srv__live {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ok);
+  border: 2px solid var(--panel);
+}
+.srv__text {
+  flex: 1;
+  min-width: 0;
+  display: block;
+}
+.srv__line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.srv__name {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.srv__chip {
   font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.02em;
+  background: var(--line-2);
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  flex: none;
+}
+.srv__chip--insecure {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.srv__host {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.srv__kebab {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-faint);
+  opacity: 0;
+  margin-right: 4px;
+}
+.srv:hover .srv__kebab,
+.srv__kebab:focus-visible {
+  opacity: 1;
+}
+.srv__kebab:hover {
+  background: var(--line);
+  color: var(--ink);
+}
+
+/* Pinned to the bottom, so "add a server" is a destination rather than a `+` to
+ * hunt for in a header. */
+.newserver {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 34px;
+  flex: none;
+  border-radius: 8px;
+  border: 1px dashed var(--line);
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.newserver:hover {
+  border-color: var(--signal);
+  color: var(--signal);
+  background: var(--signal-soft);
 }
 
 .main {
@@ -184,16 +401,81 @@
 
 /* ---------------------------------------------------------------- session */
 
-.session-header {
-  height: 38px;
+.session {
   flex: none;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.session__lost {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel-2);
+  padding: 7px 16px;
+  background: var(--transit-soft);
+  border-bottom: 1px solid var(--transit);
+  color: var(--transit-ink);
+  font-size: 12.5px;
 }
+.session__lost b {
+  font-family: var(--font-display);
+}
+.session__bar {
+  height: var(--session-h);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 16px;
+}
+.session__avatar {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 12px;
+  color: #fff;
+}
+.session__id {
+  min-width: 0;
+}
+.session__line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.session__name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 15px;
+}
+.session__insecure {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.session__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  margin-top: 1px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
 .dot {
   width: 8px;
   height: 8px;
@@ -212,92 +494,240 @@
   background: var(--danger);
 }
 
+/* The bordered action button used across the session bar. */
+.pillbtn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  flex: none;
+  padding: 0 11px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.pillbtn:hover {
+  border-color: var(--ink-faint);
+  color: var(--ink);
+}
+.pillbtn--on {
+  border-color: var(--signal);
+  color: var(--signal);
+  background: var(--signal-soft);
+}
+.pillbtn--danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* ---------------------------------------------------------------- panes */
+
 .panes {
   flex: 1;
   display: flex;
   min-height: 0;
 }
 .pane {
-  flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
   background: var(--panel);
 }
-.pane + .pane {
-  border-left: 1px solid var(--line);
+/* Asymmetric on purpose, per the design: the local pane is a shelf you pick from
+   and the remote pane is the thing you are working in. */
+.pane--local {
+  width: 37%;
+  min-width: 258px;
+  flex: none;
+  border-right: 1px solid var(--line);
+}
+.pane--remote {
+  flex: 1;
 }
 
 .pane-header {
   flex: none;
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 12px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.pane-header__id {
+  display: flex;
   align-items: center;
   gap: 8px;
-  height: 34px;
-  padding: 0 10px;
-  border-bottom: 1px solid var(--line-2);
 }
+.pane-header__glyph {
+  color: var(--ink-soft);
+  flex: none;
+}
+.pane-header__glyph--signal {
+  color: var(--signal);
+}
+.pane-header__title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pane-header__tag {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  flex: none;
+}
+
+.ghostbtn {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-faint);
+}
+.ghostbtn:hover {
+  background: var(--line);
+  color: var(--ink);
+}
+
 .crumbs {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: auto;
   font-family: var(--font-mono);
   font-size: 11.5px;
 }
+.crumbs::-webkit-scrollbar {
+  height: 0;
+}
+.crumbs__seg {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.crumbs__sep {
+  color: var(--ink-faint);
+  padding: 0 1px;
+}
 .crumb {
-  padding: 2px 5px;
-  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  border-radius: 5px;
   color: var(--ink-soft);
   white-space: nowrap;
 }
 .crumb:hover {
-  background: var(--line-2);
-  color: var(--ink);
+  background: var(--signal-soft);
+  color: var(--signal);
 }
 .crumb--last {
   color: var(--ink);
   font-weight: 500;
 }
 
-.filter {
-  margin-left: auto;
-  height: 24px;
-  width: 130px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel-2);
-  color: var(--ink);
-  padding: 0 8px;
-  font-size: 12px;
+/* ---------------------------------------------------------------- rows */
+
+/* The column header. Outside the scroll container rather than sticky inside it,
+   because the virtualizer offsets rows from the top of its scroll element and a
+   sticky first child would sit on top of row zero. */
+.cols {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line-2);
+  background: var(--panel);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
 }
-.filter:focus {
-  border-color: var(--signal);
+.cols .cols__label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+}
+.cols .cols__label:hover {
+  color: var(--ink);
+}
+.cols .cols__label--on {
+  color: var(--ink);
+}
+.cols .cols__label.row__size,
+.cols .cols__label.row__when,
+.cols .cols__label.row__perms {
+  flex: none;
+  justify-content: flex-end;
+}
+.cols__arrow {
+  font-size: 9px;
 }
 
 .rows {
   flex: 1;
   overflow: auto;
   position: relative;
+  background: var(--panel);
 }
+/* An empty listing should sit in the middle of the pane, not at the top of a tall
+   scroll container. */
+.rows:has(> .empty) {
+  display: flex;
+}
+.rows--dropping {
+  box-shadow: inset 0 0 0 2px var(--signal);
+  background: var(--signal-soft);
+}
+
 .row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 10px;
+  padding: 0 12px;
   height: var(--row);
   border-bottom: 1px solid var(--line-2);
   cursor: default;
 }
 .row:hover {
-  background: var(--panel-2);
+  background: var(--line-2);
 }
-.row--selected {
+.row--selected,
+.row--selected:hover {
   background: var(--signal-soft);
+  box-shadow: inset 2px 0 0 var(--signal);
 }
-.row--hidden {
-  opacity: 0.5;
+/* Dotfiles recede by name, not by dimming the whole row: the size and date of a
+   hidden file are exactly as true as any other row's. */
+.row--hidden .row__name {
+  color: var(--ink-soft);
+}
+.row__icon {
+  width: 20px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .row__name {
   flex: 1;
@@ -305,40 +735,83 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12.5px;
 }
-.row__meta {
-  flex: none;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--ink-faint);
-  text-align: right;
+.row__name--dir {
+  font-weight: 500;
 }
 .row__size {
-  width: 74px;
+  width: 56px;
+  flex: none;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-soft);
 }
 .row__when {
-  width: 128px;
+  width: 100px;
+  flex: none;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
 }
 .row__perms {
-  width: 88px;
-}
-.row__pill {
+  width: 78px;
   flex: none;
-  height: 22px;
-  padding: 0 8px;
-  border-radius: 11px;
-  border: 1px solid var(--line);
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+}
+
+/* Floating, so hovering a row does not shove its size and date sideways. */
+.acts {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 3px;
+  border-radius: 9px;
   background: var(--panel);
-  color: var(--ink-soft);
-  font-size: 11px;
+  box-shadow: var(--elev);
+  border: 1px solid var(--line);
   opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
 }
-.row:hover .row__pill {
+.row:hover .acts,
+.row:focus-within .acts {
   opacity: 1;
+  pointer-events: auto;
 }
-.row__pill:hover {
-  border-color: var(--signal);
+.acts__btn {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-soft);
+}
+.acts__btn:hover {
+  background: var(--line-2);
+  color: var(--ink);
+}
+.acts__btn--go {
   color: var(--signal);
+}
+.acts__btn--go:hover {
+  background: var(--signal-soft);
+  color: var(--signal);
+}
+.acts__btn--danger:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .skeleton {
@@ -370,25 +843,46 @@
 .gutter {
   width: var(--gutter-w);
   flex: none;
-  background: var(--panel-2);
-  border-left: 1px solid var(--line);
-  border-right: 1px solid var(--line);
+  background: var(--surface);
   position: relative;
   overflow: hidden;
 }
-.gutter__track {
+/* One dashed line down the middle, inset from both ends. Drawn full-width it stops
+   reading as a channel between the panes and starts reading as a third pane. */
+.gutter__spine {
+  position: absolute;
+  left: 50%;
+  top: 14px;
+  bottom: 14px;
+  width: 2px;
+  transform: translateX(-50%);
+  background: repeating-linear-gradient(to bottom, var(--line) 0 5px, transparent 5px 9px);
+  animation: rl-flow 1s linear infinite;
+}
+.gutter--idle .gutter__spine {
+  animation: none;
+}
+.gutter__count {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--ink-faint);
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--elev);
+}
+.gutter__pills {
   position: absolute;
   inset: 0;
-  background-image: repeating-linear-gradient(
-    to bottom,
-    var(--line-2) 0 1px,
-    transparent 1px 18px
-  );
-  animation: rl-flow 1.4s linear infinite;
-  opacity: 0.7;
-}
-.gutter--idle .gutter__track {
-  animation: none;
+  pointer-events: none;
 }
 .pill {
   position: absolute;
@@ -413,64 +907,219 @@
 
 /* ---------------------------------------------------------------- drawer */
 
+/* Collapsed, this is one 36px line. An idle queue should cost a line, not a third
+   of the window. */
 .drawer {
   flex: none;
-  border-top: 1px solid var(--line);
+  height: 36px;
   background: var(--panel);
+  border-top: 1px solid var(--line);
   display: flex;
   flex-direction: column;
-  max-height: 40vh;
+  overflow: hidden;
+  transition: height 0.22s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.drawer__tabs {
+.drawer--open {
+  height: 300px;
+}
+.drawer__bar {
+  height: 36px;
+  flex: none;
   display: flex;
   align-items: center;
-  gap: 4px;
-  height: 34px;
-  padding: 0 10px;
+  gap: 12px;
+  padding: 0 14px;
+  width: 100%;
+}
+.drawer--open .drawer__bar {
+  border-bottom: 1px solid var(--line);
+}
+.drawer__chevron {
+  color: var(--ink-soft);
+  flex: none;
+  transform: rotate(-90deg);
+  transition: transform 0.2s;
+}
+.drawer--open .drawer__chevron {
+  transform: rotate(0deg);
+}
+.drawer__title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 12.5px;
+}
+.drawer__agg {
+  width: 120px;
+  height: 6px;
+  flex: none;
+  border-radius: 4px;
+  background: var(--line-2);
+  overflow: hidden;
+}
+.drawer__agg-fill {
+  display: block;
+  height: 100%;
+  background: var(--transit);
+  border-radius: 4px;
+  transition: width 0.4s;
+}
+.drawer__speed {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--transit);
+  font-weight: 600;
+}
+.drawer__summary {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.drawer__panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.drawer__tabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--line-2);
 }
 .drawer__tab {
-  height: 24px;
-  padding: 0 10px;
-  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 7px;
   font-size: 12px;
+  font-weight: 500;
   color: var(--ink-soft);
 }
+.drawer__tab:hover {
+  color: var(--ink);
+}
+/* Neutral, not blue. Signal is reserved for direction and selection; a blue tab
+   competes with the transfers it is labelling. */
 .drawer__tab--active {
-  background: var(--signal-soft);
-  color: var(--signal);
-  font-weight: 500;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 600;
+}
+.drawer__badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  background: var(--line-2);
+  color: var(--ink-soft);
+}
+.drawer__badge--bad {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 .drawer__list {
-  overflow: auto;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
 }
+.drawer__empty {
+  padding: 36px;
+  text-align: center;
+  color: var(--ink-faint);
+  font-size: 12.5px;
+}
+
 .job {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 34px;
-  padding: 0 12px;
+  padding: 9px 14px;
   border-bottom: 1px solid var(--line-2);
+}
+.job__dir {
+  width: 22px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--transit);
+}
+.job__dir--down {
+  color: var(--signal);
+}
+.job__body {
+  flex: 1;
+  min-width: 0;
+}
+.job__line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.job__name {
+  font-family: var(--font-mono);
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.job__status {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--line-2);
+  color: var(--ink-soft);
+}
+.job__status--transit {
+  background: var(--transit-soft);
+  color: var(--transit);
+}
+.job__status--ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.job__status--bad {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 .job__bar {
-  flex: 1;
   height: 4px;
-  border-radius: 2px;
+  border-radius: 3px;
   background: var(--line-2);
+  margin-top: 4px;
   overflow: hidden;
-  min-width: 60px;
 }
 .job__fill {
   height: 100%;
   background: var(--transit);
-  transition: width 0.2s linear;
+  border-radius: 3px;
+  transition: width 0.4s;
 }
 .job__fill--done {
   background: var(--ok);
 }
 .job__fill--failed {
   background: var(--danger);
+}
+.job__meta {
+  width: 80px;
+  flex: none;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
 }
 
 /* ---------------------------------------------------------------- overlays */
@@ -687,28 +1336,6 @@
   margin: 0 0 16px;
   white-space: pre-wrap;
   overflow-x: auto;
-}
-
-/* ---------------------------------------------------------------- row actions */
-.row__action {
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-sm);
-  color: var(--ink-faint);
-  opacity: 0;
-  flex: none;
-}
-.row:hover .row__action,
-.row:focus-within .row__action {
-  opacity: 1;
-}
-.row__action:hover {
-  background: var(--line-2);
-  color: var(--ink);
-}
-.row__action--danger:hover {
-  background: var(--danger-soft);
-  color: var(--danger);
 }
 
 /* ---------------------------------------------------------------- session log */
@@ -998,6 +1625,10 @@
   background: var(--danger-soft);
   border-color: var(--danger);
 }
+.spinner--transit {
+  border-color: var(--transit);
+  border-top-color: transparent;
+}
 .spinner {
   width: 13px;
   height: 13px;
@@ -1027,23 +1658,4 @@
 .test--failed {
   background: var(--danger-soft);
   color: var(--danger);
-}
-
-/* The edit affordance sits beside the server, not inside its button. */
-.sidebar__top {
-  display: flex;
-  align-items: center;
-  padding: 4px 4px 0 8px;
-}
-.sidebar__row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-.sidebar__edit {
-  opacity: 0;
-}
-.sidebar__row:hover .sidebar__edit,
-.sidebar__edit:focus-visible {
-  opacity: 1;
 }

@@ -22,7 +22,7 @@ export function App() {
   const activeId = useSessionsStore((s) => s.activeId)
   const connected = useUiStore((s) => s.connected)
   const toggleDrawer = useUiStore((s) => s.toggleDrawer)
-  const togglePalette = useUiStore((s) => s.togglePalette)
+  const toast = useUiStore((s) => s.toast)
 
   useEffect(() => {
     void engineBridge.start()
@@ -37,7 +37,8 @@ export function App() {
       const accel = event.metaKey || event.ctrlKey
       if (accel && event.key.toLowerCase() === 'k') {
         event.preventDefault()
-        togglePalette()
+        // The palette is 4.4. Saying so beats a shortcut that silently does nothing.
+        toast('info', 'The command palette arrives in phase 4.')
       }
       if (accel && event.key.toLowerCase() === 'j') {
         event.preventDefault()
@@ -46,7 +47,7 @@ export function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [togglePalette, toggleDrawer])
+  }, [toast, toggleDrawer])
 
   return (
     <div className="shell">

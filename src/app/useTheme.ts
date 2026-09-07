@@ -9,6 +9,7 @@ import { useUiStore } from '@/state/uiStore'
 export function useTheme(): void {
   const theme = useUiStore((s) => s.theme)
   const density = useUiStore((s) => s.density)
+  const setResolved = useUiStore((s) => s.setResolved)
 
   useEffect(() => {
     const root = document.documentElement
@@ -17,13 +18,16 @@ export function useTheme(): void {
     const apply = () => {
       const resolved = theme === 'system' ? (media.matches ? 'dark' : 'light') : theme
       root.dataset.theme = resolved
+      // Mirrored into the store because components need to know which theme is
+      // actually showing — `system` is not an answer the theme toggle can act on.
+      setResolved(resolved)
     }
 
     apply()
     if (theme !== 'system') return
     media.addEventListener('change', apply)
     return () => media.removeEventListener('change', apply)
-  }, [theme])
+  }, [theme, setResolved])
 
   useEffect(() => {
     document.documentElement.dataset.density = density

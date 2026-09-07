@@ -12,6 +12,8 @@ export interface Toast {
 
 interface UiState {
   theme: Theme
+  /** `theme` with `system` already resolved against the OS. What the icons read. */
+  resolved: 'light' | 'dark'
   density: Density
   paletteOpen: boolean
   drawerOpen: boolean
@@ -24,6 +26,7 @@ interface UiState {
   connected: boolean
 
   setTheme: (theme: Theme) => void
+  setResolved: (resolved: 'light' | 'dark') => void
   setDensity: (density: Density) => void
   togglePalette: (open?: boolean) => void
   toggleDrawer: (open?: boolean) => void
@@ -39,6 +42,7 @@ interface UiState {
 
 export const useUiStore = create<UiState>((set) => ({
   theme: 'system',
+  resolved: 'light',
   density: 'comfortable',
   paletteOpen: false,
   drawerOpen: true,
@@ -49,6 +53,7 @@ export const useUiStore = create<UiState>((set) => ({
   connected: false,
 
   setTheme: (theme) => set({ theme }),
+  setResolved: (resolved) => set({ resolved }),
   setDensity: (density) => set({ density }),
   togglePalette: (open) => set((s) => ({ paletteOpen: open ?? !s.paletteOpen })),
   toggleDrawer: (open) => set((s) => ({ drawerOpen: open ?? !s.drawerOpen })),
