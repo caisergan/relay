@@ -16,6 +16,8 @@ import type {
   PromptReply,
   QueueOp,
   RemoteEntry,
+  SecretKind,
+  SecretStatus,
   ServerConfig,
   ServerInfo,
   Settings,
@@ -30,8 +32,21 @@ export const commands = {
   serversDelete: (id: string) => invoke<Unit>('servers_delete', { id }),
 
   sessionOpen: (serverId: string) => invoke<string>('session_open', { serverId }),
-  /** Connect, report what the peer said, hang up. Uses the real host-key sheet. */
-  sessionTest: (config: ServerConfig) => invoke<ServerInfo>('session_test', { config }),
+  /** Connect, report what the peer said, hang up. Uses the real host-key sheet.
+   * `password`/`passphrase` are what is typed but not yet saved, so a credential can
+   * be checked without committing it to the keychain first. */
+  sessionTest: (config: ServerConfig, password?: string, passphrase?: string) =>
+    invoke<ServerInfo>('session_test', {
+      config,
+      password: password ?? null,
+      passphrase: passphrase ?? null,
+    }),
+
+  secretsStatus: (id: string) => invoke<SecretStatus>('secrets_status', { id }),
+  /** An empty value clears the entry. */
+  secretsSet: (id: string, kind: SecretKind, value: string) =>
+    invoke<Unit>('secrets_set', { id, kind, value }),
+  secretsClear: (id: string, kind: SecretKind) => invoke<Unit>('secrets_clear', { id, kind }),
   sessionClose: (id: string) => invoke<Unit>('session_close', { id }),
   sessionListDir: (id: string, path: string) =>
     invoke<RemoteEntry[]>('session_list_dir', { id, path }),

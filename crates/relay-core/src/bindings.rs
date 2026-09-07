@@ -41,6 +41,8 @@ pub fn type_collection() -> Types {
         .register::<crate::model::Session>()
         .register::<crate::model::SessionState>()
         .register::<crate::settings::Density>()
+        .register::<crate::secrets::SecretKind>()
+        .register::<crate::secrets::SecretStatus>()
         .register::<crate::settings::Settings>()
         .register::<crate::settings::Theme>()
         .register::<crate::wire::Bytes>()

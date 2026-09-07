@@ -496,13 +496,33 @@ async fn authenticate(
     };
 
     if result {
-        Ok(())
-    } else {
-        // Never include the credential, or anything derived from it, in this message.
-        Err(EngineError::Auth {
-            message: "the server rejected these credentials".into(),
-        })
+        return Ok(());
     }
+
+    // Name the method that was actually tried. "The server rejected these credentials"
+    // is true of every failure and useful for none of them: with four auth methods, the
+    // first thing a person needs to know is which one Relay used.
+    //
+    // Never the credential itself, or anything derived from it.
+    Err(EngineError::Auth {
+        message: match &cfg.auth {
+            AuthMethod::Agent => format!(
+                "{user}@{}: the server accepted none of the identities your SSH agent \
+                 offered. Add the right key with `ssh-add`, or switch this server to a \
+                 key file.",
+                cfg.host
+            ),
+            AuthMethod::KeyFile { path } => format!(
+                "{user}@{}: the server rejected the key at {}. Check that its public half \
+                 is in the account's authorized_keys.",
+                cfg.host,
+                path.display()
+            ),
+            AuthMethod::Password | AuthMethod::Ask => {
+                format!("{user}@{}: the server rejected that password.", cfg.host)
+            }
+        },
+    })
 }
 
 async fn password_auth(
@@ -1176,6 +1196,31 @@ mod tests {
         sort_entries(&mut entries);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["Apple", "archive", "beta.txt", "zebra.txt"]);
+    }
+
+    #[test]
+    fn putty_ppk_keys_reach_puttys_parser() {
+        // The editor tells people `.ppk` files work, so something has to hold that
+        // claim up. A real ppk needs `puttygen` to produce, which is not a dependency
+        // worth taking for one test — but *which parser russh chose* is observable
+        // from the error alone, and that is the part that could silently regress.
+        let ppk = russh::keys::decode_secret_key(
+            "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\n",
+            None,
+        )
+        .expect_err("a headers-only ppk cannot decode");
+        assert!(
+            format!("{ppk:?}").contains("Ppk"),
+            "a PuTTY header must reach the ppk parser, not the generic one: {ppk:?}"
+        );
+
+        // The contrast is what makes the assertion above mean something.
+        let other = russh::keys::decode_secret_key("not a key at all", None)
+            .expect_err("garbage cannot decode");
+        assert!(
+            !format!("{other:?}").contains("Ppk"),
+            "only a PuTTY header should take that path: {other:?}"
+        );
     }
 
     #[test]

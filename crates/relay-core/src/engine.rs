@@ -23,7 +23,7 @@ use crate::model::{
     Direction, JobId, Proto, RemoteEntry, ServerConfig, ServerId, ServerInfo, SessionId,
 };
 use crate::protocol::{Protocol, SecretSource};
-use crate::secrets::KeyringSecrets;
+use crate::secrets::{Credentials, KeyringSecrets, Overlay};
 use crate::servers::ServerStore;
 use crate::session::{SessionContext, SessionHandle, TransferOrder};
 use crate::settings::Settings;
@@ -186,11 +186,20 @@ impl Engine {
     /// Runs on a throwaway session id so its host-key prompt still reaches the UI
     /// through the ordinary path — testing a connection is exactly when a first-contact
     /// fingerprint matters most.
-    pub async fn test_connection(&self, cfg: ServerConfig) -> Result<ServerInfo> {
+    ///
+    /// `draft` carries credentials typed into the form but not yet saved, so testing a
+    /// password does not require committing it to the keychain first. They live for the
+    /// duration of this call and are never written anywhere.
+    pub async fn test_connection(
+        &self,
+        cfg: ServerConfig,
+        draft: Credentials,
+    ) -> Result<ServerInfo> {
         let id = Uuid::new_v4();
         let mut backend = self.factory.build(id, &cfg)?;
         let interact = Arc::clone(self.hub.prompts()) as Arc<_>;
-        let result = backend.connect(&cfg, self.secrets.as_ref(), interact).await;
+        let secrets = Overlay::new(draft, Arc::clone(&self.secrets));
+        let result = backend.connect(&cfg, &secrets, interact).await;
         backend.disconnect().await;
         self.hub.prompts().deny_session(id);
         result

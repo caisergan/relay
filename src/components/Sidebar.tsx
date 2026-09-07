@@ -74,7 +74,12 @@ export function Sidebar() {
         )}
       </nav>
       {editing && (
-        <ServerEditor key={editing.id} server={editing} onClose={() => setEditing(null)} />
+        <ServerEditor
+          key={editing.id}
+          server={editing}
+          isNew={!servers.some((s) => s.id === editing.id)}
+          onClose={() => setEditing(null)}
+        />
       )}
     </>
   )

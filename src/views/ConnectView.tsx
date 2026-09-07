@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react'
 
-import { commands } from '@/ipc/commands'
+import type { ServerConfig } from '@/ipc/gen'
 import { parseTarget } from '@/lib/url'
-import { useServersStore } from '@/state/serversStore'
-import { useUiStore } from '@/state/uiStore'
+
+import { ServerEditor, blankServer } from '@/components/ServerEditor'
 
 /** The connect screen: one field, parsed as you type.
  *
@@ -11,34 +11,30 @@ import { useUiStore } from '@/state/uiStore'
  * anything, which is how a mistyped port stops being a mysterious timeout. */
 export function ConnectView() {
   const [text, setText] = useState('')
-  const toast = useUiStore((s) => s.toast)
-  const save = useServersStore((s) => s.save)
+  const [editing, setEditing] = useState<ServerConfig | null>(null)
 
   const target = useMemo(() => parseTarget(text), [text])
   const ready = target !== null && target.error === null && target.unavailable === null
 
-  const connect = async () => {
+  /// Hand off to the editor rather than dialling.
+  ///
+  /// An address is not a set of credentials. This used to assume the SSH agent and
+  /// connect immediately, which meant anyone whose server wanted a key file or a
+  /// password got "the server rejected these credentials" and no field to fix it in.
+  /// One field cannot express an auth method, so it stops at the point where it would
+  /// have to guess.
+  const proceed = () => {
     if (!target || !ready) return
-    const config = {
-      id: crypto.randomUUID(),
-      name: target.host,
-      host: target.host,
-      port: target.port,
-      proto: target.proto,
-      username: target.username ?? '',
-      auth: { kind: 'agent' } as const,
-      color: null,
-      group: null,
-      bookmarks: [],
-      initialRemotePath: target.path,
-    }
-    try {
-      await save(config)
-      await commands.sessionOpen(config.id)
-      setText('')
-    } catch (error) {
-      toast('error', `Could not connect: ${String(error)}`)
-    }
+    setEditing(
+      blankServer({
+        name: target.host,
+        host: target.host,
+        port: target.port,
+        proto: target.proto,
+        username: target.username ?? '',
+        initialRemotePath: target.path,
+      }),
+    )
   }
 
   return (
@@ -48,7 +44,7 @@ export function ConnectView() {
           Connect
         </h1>
         <p style={{ color: 'var(--ink-soft)', margin: '0 0 16px' }}>
-          Type an address, or pick a saved server from the sidebar.
+          Type an address to fill in the details, or pick a saved server from the sidebar.
         </p>
         <input
           className="connect__field"
@@ -58,7 +54,7 @@ export function ConnectView() {
           value={text}
           onChange={(e) => setText(e.currentTarget.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') void connect()
+            if (e.key === 'Enter') proceed()
           }}
           aria-label="Server address"
         />
@@ -86,11 +82,23 @@ export function ConnectView() {
         )}
 
         <div style={{ marginTop: 18 }}>
-          <button className="btn btn--primary" disabled={!ready} onClick={() => void connect()}>
-            Connect
+          <button className="btn btn--primary" disabled={!ready} onClick={proceed}>
+            Continue
           </button>
         </div>
       </div>
+      {editing && (
+        <ServerEditor
+          key={editing.id}
+          server={editing}
+          isNew
+          connectOnSave
+          onClose={() => {
+            setEditing(null)
+            setText('')
+          }}
+        />
+      )}
     </div>
   )
 }

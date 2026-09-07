@@ -267,6 +267,20 @@ export type ResolveError =
 /**  The reply does not answer this kind of prompt. */
 { kind: "mismatched" };
 
+/**  Which secret an entry holds. The account key is `{server uuid}:{kind}`. */
+export type SecretKind = "password" | "passphrase";
+
+/**
+ *  Whether a secret exists, without revealing it.
+ * 
+ *  The editor needs to show "a password is saved" without ever reading one back into
+ *  the webview. A boolean is the whole of what the interface is entitled to know.
+ */
+export type SecretStatus = {
+	password: boolean,
+	passphrase: boolean,
+};
+
 /**  Persisted in `servers.json`. Secrets live in the OS keychain, never here. */
 export type ServerConfig = {
 	id: string,

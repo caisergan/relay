@@ -9,7 +9,11 @@
 //! synchronous C APIs that can also show a system prompt. They run on a blocking
 //! worker, never on the async runtime.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use specta::Type;
 
 use crate::model::ServerConfig;
 use crate::protocol::SecretSource;
@@ -19,7 +23,8 @@ use crate::protocol::SecretSource;
 pub const SERVICE: &str = "Relay";
 
 /// Which secret an entry holds. The account key is `{server uuid}:{kind}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub enum SecretKind {
     Password,
     Passphrase,
@@ -36,6 +41,66 @@ impl SecretKind {
 
 pub fn account(server: uuid::Uuid, kind: SecretKind) -> String {
     format!("{server}:{}", kind.suffix())
+}
+
+/// Whether a secret exists, without revealing it.
+///
+/// The editor needs to show "a password is saved" without ever reading one back into
+/// the webview. A boolean is the whole of what the interface is entitled to know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretStatus {
+    pub password: bool,
+    pub passphrase: bool,
+}
+
+/// Credentials typed into a form and not yet saved.
+///
+/// "Test connection" has to work before "Save", or the only way to check a password is
+/// to commit it to the keychain first. These take precedence over the stored ones and
+/// are dropped when the test ends.
+#[derive(Debug, Clone, Default)]
+pub struct Credentials {
+    pub password: Option<String>,
+    pub passphrase: Option<String>,
+}
+
+impl Credentials {
+    pub fn is_empty(&self) -> bool {
+        self.password.is_none() && self.passphrase.is_none()
+    }
+}
+
+/// Draft credentials in front of a stored source.
+///
+/// A field left blank in the editor means "keep using what is saved", not "there is no
+/// secret" — so an absent draft value falls through rather than overriding with `None`.
+pub struct Overlay {
+    draft: Credentials,
+    base: Arc<dyn SecretSource>,
+}
+
+impl Overlay {
+    pub fn new(draft: Credentials, base: Arc<dyn SecretSource>) -> Self {
+        Self { draft, base }
+    }
+}
+
+#[async_trait]
+impl SecretSource for Overlay {
+    async fn password(&self, server: &ServerConfig) -> Option<String> {
+        match &self.draft.password {
+            Some(value) => Some(value.clone()),
+            None => self.base.password(server).await,
+        }
+    }
+
+    async fn passphrase(&self, server: &ServerConfig) -> Option<String> {
+        match &self.draft.passphrase {
+            Some(value) => Some(value.clone()),
+            None => self.base.passphrase(server).await,
+        }
+    }
 }
 
 /// The real thing: macOS Keychain, Windows Credential Manager, Secret Service on Linux.
@@ -65,6 +130,14 @@ impl KeyringSecrets {
         match outcome {
             Ok(()) | Err(keyring::Error::NoEntry) => {}
             Err(err) => tracing::warn!(%err, "could not remove a stored credential"),
+        }
+    }
+
+    /// Which secrets exist for a server. Never returns the values themselves.
+    pub async fn status(server: uuid::Uuid) -> SecretStatus {
+        SecretStatus {
+            password: Self::read(server, SecretKind::Password).await.is_some(),
+            passphrase: Self::read(server, SecretKind::Passphrase).await.is_some(),
         }
     }
 

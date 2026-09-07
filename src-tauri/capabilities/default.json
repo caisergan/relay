@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Baseline shell permissions. Every capability is added deliberately: the engine, not the webview, owns filesystem and network access.",
+  "description": "Baseline shell permissions. Every capability is added deliberately: the engine, not the webview, owns filesystem and network access. `dialog:allow-open` is the key-file picker and nothing else \u2014 there is no save, message, or confirm permission.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-start-dragging"]
+  "permissions": ["core:default", "core:window:allow-start-dragging", "dialog:allow-open"]
 }

@@ -15,7 +15,7 @@ use relay_core::job::QueueOp;
 use relay_core::model::{
     Direction, JobId, LocalEntry, RemoteEntry, ServerConfig, ServerId, ServerInfo, SessionId,
 };
-use relay_core::secrets::{KeyringSecrets, SecretKind};
+use relay_core::secrets::{Credentials, KeyringSecrets, SecretKind, SecretStatus};
 use relay_core::settings::Settings;
 use tauri::State;
 use tauri::ipc::Channel;
@@ -69,10 +69,53 @@ pub async fn session_open(state: State<'_, AppState>, server_id: ServerId) -> Re
 }
 
 /// The server editor's "Test connection": connect, report what the peer said, hang up.
+///
 /// Uses the real prompt path, so a first-contact fingerprint still reaches the sheet.
+/// `password` and `passphrase` carry what is typed into the form but not yet saved, so
+/// a credential can be checked before it is committed to the keychain.
 #[tauri::command]
-pub async fn session_test(state: State<'_, AppState>, config: ServerConfig) -> Result<ServerInfo> {
-    state.engine.test_connection(config).await
+pub async fn session_test(
+    state: State<'_, AppState>,
+    config: ServerConfig,
+    password: Option<String>,
+    passphrase: Option<String>,
+) -> Result<ServerInfo> {
+    let draft = Credentials {
+        password: password.filter(|v| !v.is_empty()),
+        passphrase: passphrase.filter(|v| !v.is_empty()),
+    };
+    state.engine.test_connection(config, draft).await
+}
+
+// ---------------------------------------------------------------- secrets
+
+/// Which secrets a server has. Never the values: the webview has no business holding
+/// a password it did not just receive from the person typing it.
+#[tauri::command]
+pub async fn secrets_status(id: ServerId) -> Result<SecretStatus> {
+    Ok(KeyringSecrets::status(id).await)
+}
+
+/// Save one secret to the OS keychain. An empty value clears it instead, so emptying
+/// the field in the editor means what it looks like it means.
+#[tauri::command]
+pub async fn secrets_set(id: ServerId, kind: SecretKind, value: String) -> Result<()> {
+    if value.is_empty() {
+        KeyringSecrets::forget(id, kind).await;
+        return Ok(());
+    }
+    KeyringSecrets::store(id, kind, value)
+        .await
+        .map_err(|err| EngineError::LocalIo {
+            path: "keychain".into(),
+            message: err.to_string(),
+        })
+}
+
+#[tauri::command]
+pub async fn secrets_clear(id: ServerId, kind: SecretKind) -> Result<()> {
+    KeyringSecrets::forget(id, kind).await;
+    Ok(())
 }
 
 #[tauri::command]

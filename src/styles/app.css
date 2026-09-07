@@ -689,83 +689,6 @@
   overflow-x: auto;
 }
 
-/* ---------------------------------------------------------------- server editor */
-.sheet--wide {
-  width: min(620px, calc(100vw - 48px));
-}
-.sheet__note {
-  color: var(--ink-faint);
-  font-size: 11.5px;
-  margin: 4px 0 14px;
-}
-.form {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px 14px;
-  margin-bottom: 6px;
-}
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.field__label {
-  font-size: 11px;
-  color: var(--ink-soft);
-}
-.input {
-  height: 30px;
-  padding: 0 10px;
-  border-radius: var(--radius);
-  border: 1px solid var(--line);
-  background: var(--panel-2);
-  color: var(--ink);
-  font: inherit;
-}
-.input:focus-visible {
-  outline: 2px solid var(--signal);
-  outline-offset: -1px;
-}
-.test {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  border-radius: var(--radius);
-  padding: 8px 10px;
-  margin: 0 0 14px;
-  overflow-wrap: anywhere;
-}
-.test--testing {
-  background: var(--surface);
-  color: var(--ink-soft);
-}
-.test--ok {
-  background: var(--ok-soft);
-  color: var(--ok);
-}
-.test--failed {
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
-/* The edit affordance sits beside the server, not inside its button. */
-.sidebar__top {
-  display: flex;
-  align-items: center;
-  padding: 4px 4px 0 8px;
-}
-.sidebar__row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-.sidebar__edit {
-  opacity: 0;
-}
-.sidebar__row:hover .sidebar__edit,
-.sidebar__edit:focus-visible {
-  opacity: 1;
-}
-
 /* ---------------------------------------------------------------- row actions */
 .row__action {
   width: 22px;
@@ -835,4 +758,292 @@
 }
 .logline--response {
   color: var(--ink-soft);
+}
+
+/* ---------------------------------------------------------------- server editor */
+/* Transcribed from the design's server-editor sheet: a fixed-width modal with a
+   scrolling body between a pinned header and footer, so a long form never pushes
+   Save off the screen. */
+.editor {
+  width: 520px;
+  max-width: 94vw;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-lg);
+  animation: rl-sheet 0.18s ease-out;
+}
+.editor__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+}
+.editor__badge {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.editor__title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 16px;
+}
+.editor__subtitle {
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.editor__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.editor__foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+}
+.editor__split {
+  display: flex;
+  gap: 10px;
+}
+.editor__split .field:first-child {
+  flex: 1;
+  min-width: 0;
+}
+.editor__rule {
+  height: 1px;
+  border: 0;
+  background: var(--line-2);
+  margin: 2px 0;
+}
+.editor__section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.editor__browse {
+  display: flex;
+  gap: 8px;
+}
+.editor__browse .input {
+  flex: 1;
+  min-width: 0;
+}
+.editor__hint {
+  margin: -8px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+.editor__hint code {
+  font-family: var(--font-mono);
+}
+.editor__note {
+  margin: 0;
+  padding: 11px 13px;
+  border-radius: 9px;
+  background: var(--signal-soft);
+  font-size: 12px;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+.editor__where {
+  margin: 0;
+  padding: 11px 13px;
+  border-radius: 9px;
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+.editor__where b {
+  color: var(--ink);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.field__label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+.input {
+  height: 34px;
+  padding: 0 11px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+}
+.input--mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.input:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: -1px;
+}
+/* A field with buttons inside it: the border belongs to the group, not the input. */
+.input--group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 11px;
+}
+.input__inner {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.input__inner:focus-visible {
+  outline: none;
+}
+.input--group:focus-within {
+  outline: 2px solid var(--signal);
+  outline-offset: -1px;
+}
+
+/* Segmented control, per the design: a recessed track with one raised option. */
+.seg {
+  display: flex;
+  gap: 3px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 3px;
+}
+.seg__opt {
+  flex: 1;
+  height: 30px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-soft);
+}
+.seg__opt--on {
+  background: var(--panel);
+  color: var(--signal);
+  font-weight: 600;
+  box-shadow: var(--elev);
+}
+.seg__opt:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.swatches {
+  display: flex;
+  gap: 9px;
+}
+.swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 2px solid transparent;
+  box-shadow: 0 0 0 1px var(--line);
+}
+.swatch--on {
+  border-color: var(--ink);
+}
+
+/* The test button carries its own result, so the outcome sits where the action was. */
+.btn--test {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.btn--test-testing {
+  color: var(--transit);
+  background: var(--transit-soft);
+  border-color: var(--transit);
+}
+.btn--test-ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: var(--ok);
+}
+.btn--test-failed {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger);
+}
+.spinner {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: rl-spin 0.8s linear infinite;
+}
+.test {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.test--testing {
+  background: var(--surface);
+  color: var(--ink-soft);
+}
+.test--ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.test--failed {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* The edit affordance sits beside the server, not inside its button. */
+.sidebar__top {
+  display: flex;
+  align-items: center;
+  padding: 4px 4px 0 8px;
+}
+.sidebar__row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.sidebar__edit {
+  opacity: 0;
+}
+.sidebar__row:hover .sidebar__edit,
+.sidebar__edit:focus-visible {
+  opacity: 1;
 }

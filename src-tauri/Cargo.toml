@@ -24,6 +24,9 @@ serde_json.workspace = true
 # No feature is enabled speculatively: Tauri's build script requires every one to
 # have matching configuration, and an unused capability is attack surface anyway.
 tauri = { version = "2.11.5", features = [] }
+# The native "Browse…" file picker in the server editor. A webview file input cannot
+# give us a real path, and the engine needs one to read the key.
+tauri-plugin-dialog = "2.7.3"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 tracing.workspace = true

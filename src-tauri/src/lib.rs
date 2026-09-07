@@ -24,6 +24,7 @@ pub fn run() {
     }));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             app.manage(AppState::start(app.handle()));
 
@@ -40,6 +41,9 @@ pub fn run() {
             commands::servers_delete,
             commands::session_open,
             commands::session_test,
+            commands::secrets_status,
+            commands::secrets_set,
+            commands::secrets_clear,
             commands::session_close,
             commands::session_list_dir,
             commands::session_mkdir,
