@@ -25,6 +25,26 @@ export type ConflictAction = "overwrite" | "skip" | "keepBoth" |
 
 export type Density = "comfortable" | "compact";
 
+/**
+ *  What a folder adds up to, once something has walked it.
+ * 
+ *  A directory's own `size` is the size of its record — 4096 on most filesystems, and
+ *  nothing to do with what is inside. The only way to answer "how big is this folder"
+ *  is to walk it, which is what [`crate::local::measure`] and
+ *  [`crate::engine::Engine::measure`] do.
+ */
+export type DirSize = {
+	bytes: number,
+	files: number,
+	folders: number,
+	/**
+	 *  The walk stopped at a limit rather than at the bottom of the tree, so every
+	 *  number above is a floor and not a total. The UI has to say so: a understated
+	 *  size presented as exact is worse than no size at all.
+	 */
+	truncated: boolean,
+};
+
 export type Direction = "up" | "down";
 
 /**

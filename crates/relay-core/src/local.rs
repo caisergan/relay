@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 
 use crate::error::{EngineError, Result};
-use crate::model::{FileKind, LocalEntry};
+use crate::model::{DirSize, FileKind, LocalEntry, MEASURE_MAX_DEPTH, MEASURE_MAX_ENTRIES};
 use crate::wire::Bytes;
 
 /// Where a new session's local pane starts.
@@ -110,6 +110,68 @@ pub fn list_dir(path: &Path) -> Result<Vec<LocalEntry>> {
     Ok(entries)
 }
 
+/// What a folder adds up to.
+///
+/// Breadth-first with an explicit stack rather than recursion, so a deep tree cannot
+/// overflow the stack, and bounded by [`MEASURE_MAX_DEPTH`] and [`MEASURE_MAX_ENTRIES`]
+/// so a right-click on `/` is a wait and not a hang.
+///
+/// **Symlinks are counted, not followed.** `du` behaves the same way, and for the same
+/// two reasons: a link into a parent makes the walk infinite, and a link to a 40 GB
+/// file elsewhere on the disk would be counted as if this folder held it.
+///
+/// Note that [`crate::walk`] — the walk behind a recursive *transfer* — does follow a
+/// symlinked directory, so a folder full of links will transfer more than it measures.
+/// The two are deliberately different: a measurement is an answer to "how much is in
+/// here", where counting a link to `/usr` would be a lie, and a transfer is an
+/// instruction to copy what the user pointed at.
+///
+/// **An unreadable subdirectory is skipped, not fatal.** A folder with one
+/// permission-denied child still has a size worth reporting, and the alternative — an
+/// error where a number should be — tells the user nothing about the other 99%. The
+/// total is a floor either way, which is what `truncated` is for.
+pub fn measure(root: &Path) -> Result<DirSize> {
+    // The root itself has to be readable. Anything below it may not be.
+    let read = std::fs::read_dir(root).map_err(|e| EngineError::from_io(root, &e))?;
+
+    let mut out = DirSize::default();
+    let mut seen: u32 = 0;
+    let mut stack: Vec<(std::fs::ReadDir, usize)> = vec![(read, 0)];
+
+    while let Some((mut dir, depth)) = stack.pop() {
+        let mut deeper = Vec::new();
+        for entry in dir.by_ref() {
+            let Ok(entry) = entry else { continue };
+            if seen >= MEASURE_MAX_ENTRIES {
+                out.truncated = true;
+                return Ok(out);
+            }
+            seen += 1;
+
+            // `symlink_metadata`, so a link is measured as the link it is.
+            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if meta.is_dir() {
+                out.folders += 1;
+                if depth + 1 >= MEASURE_MAX_DEPTH {
+                    out.truncated = true;
+                } else if let Ok(next) = std::fs::read_dir(entry.path()) {
+                    deeper.push((next, depth + 1));
+                } else {
+                    // Permission denied, or it went away while we walked.
+                    out.truncated = true;
+                }
+            } else {
+                out.files += 1;
+                out.bytes = Bytes(out.bytes.0 + meta.len());
+            }
+        }
+        stack.extend(deeper);
+    }
+    Ok(out)
+}
+
 fn kind_of(is_dir: bool) -> FileKind {
     if is_dir {
         FileKind::Dir
@@ -137,6 +199,94 @@ fn is_hidden(name: &str, meta: &std::fs::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write(path: &Path, bytes: usize) {
+        std::fs::write(path, vec![b'x'; bytes]).unwrap();
+    }
+
+    #[test]
+    fn measure_totals_a_tree_and_counts_what_is_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.bin"), 100);
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        write(&dir.path().join("nested/b.bin"), 200);
+        std::fs::create_dir(dir.path().join("nested/deeper")).unwrap();
+        write(&dir.path().join("nested/deeper/c.bin"), 300);
+
+        let out = measure(dir.path()).unwrap();
+        assert_eq!(out.bytes.0, 600);
+        assert_eq!(out.files, 3);
+        assert_eq!(out.folders, 2);
+        assert!(!out.truncated);
+    }
+
+    #[test]
+    fn measure_of_an_empty_folder_is_zero_rather_than_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = measure(dir.path()).unwrap();
+        assert_eq!(out.bytes.0, 0);
+        assert_eq!(out.files, 0);
+        assert_eq!(out.folders, 0);
+        assert!(!out.truncated);
+    }
+
+    /// The folder asked about has to exist; that is the caller's error, not a zero.
+    #[test]
+    fn measure_of_a_missing_folder_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(measure(&dir.path().join("nope")).is_err());
+    }
+
+    /// A link into its own parent makes a followed walk infinite. Counting the link
+    /// without descending it is what `du` does, and it terminates.
+    #[cfg(unix)]
+    #[test]
+    fn measure_counts_a_symlink_without_following_it() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("real.bin"), 50);
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        // A loop: sub/back points at the root that contains it.
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("sub/back")).unwrap();
+
+        // Terminating at all is the assertion: following the link would recurse into
+        // the directory that contains it, for ever.
+        let out = measure(dir.path()).unwrap();
+        // The link is an entry in its own right — `symlink_metadata` calls it a file,
+        // and its few bytes are the path it holds, not the tree it points at.
+        assert_eq!(
+            out.files, 2,
+            "the real file, and the link counted as an entry"
+        );
+        assert_eq!(out.folders, 1, "sub, but not the link inside it");
+        assert!(
+            out.bytes.0 >= 50 && out.bytes.0 < 1_000,
+            "the real file plus the link's own few bytes, not the tree again: {}",
+            out.bytes.0
+        );
+        assert!(!out.truncated);
+    }
+
+    /// A link to something huge elsewhere must not be billed to this folder.
+    #[cfg(unix)]
+    #[test]
+    fn measure_does_not_bill_a_linked_file_to_this_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        write(&elsewhere.path().join("big.bin"), 10_000);
+        std::os::unix::fs::symlink(
+            elsewhere.path().join("big.bin"),
+            dir.path().join("link.bin"),
+        )
+        .unwrap();
+
+        let out = measure(dir.path()).unwrap();
+        assert!(
+            out.bytes.0 < 10_000,
+            "counted the link, not the 10 KB it points at, but got {}",
+            out.bytes.0
+        );
+        assert_eq!(out.files, 1);
+    }
 
     #[test]
     fn lists_directories_before_files_and_marks_dotfiles() {

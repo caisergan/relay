@@ -187,6 +187,10 @@ interface Props {
    * "remove this" depending on which keyboard someone learned. */
   onDelete?: (row: FileRow) => void
   showPerms?: boolean
+  /** A right-click on a row, with the pointer position to anchor the panel to. Absent
+   * leaves the engine's own menu in place, which is the right fallback: a pane with
+   * nothing to inspect should not swallow the gesture. */
+  onInspect?: (row: FileRow, at: { x: number; y: number }) => void
   /** Whether this pane can take rows dragged from the other one. Absent while it
    * cannot — the local pane with no connection to download from, say. */
   canReceive?: boolean
@@ -224,6 +228,7 @@ export function FileList({
   onRename,
   onDelete,
   showPerms = false,
+  onInspect,
   canReceive = false,
   onDragStart,
   drag = null,
@@ -352,6 +357,15 @@ export function FileList({
                 }}
                 {...{ [ROW_NAME_ATTR]: row.name, [ROW_DIR_ATTR]: String(row.isDir) }}
                 onPointerDown={press(row)}
+                onContextMenu={(e) => {
+                  if (!onInspect) return
+                  e.preventDefault()
+                  // Selecting says which row the panel is about, the way every file
+                  // manager does — the panel floats free of the listing and would
+                  // otherwise be the only thing that knew.
+                  onSelect(row.name)
+                  onInspect(row, { x: e.clientX, y: e.clientY })
+                }}
                 onClick={() => onSelect(row.name)}
                 onDoubleClick={() => onOpen(row)}
                 tabIndex={0}

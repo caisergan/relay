@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { commands } from '@/ipc/commands'
 import type { LocalEntry, LogLine, RemoteEntry, ServerConfig, TransferItem } from '@/ipc/gen'
 import { faultText, toFault } from '@/lib/errors'
+import { localProperties, remoteProperties } from '@/lib/properties'
 import { baseName, crumbs, joinPath, parentPath } from '@/lib/format'
 import { transferPaths } from '@/lib/transfer'
 import { canGoBack, canGoForward, peek, push, type History } from '@/lib/history'
@@ -29,6 +30,7 @@ import {
   IconWarning,
 } from './Icons'
 import { PaneFault, PaneMessage } from './PaneMessage'
+import { Properties, useProperties, type Point } from './Properties'
 import { PaneSplitter } from './PaneSplitter'
 import { loadRoots, RootMenu, type Root } from './RootMenu'
 import { ServerAvatar } from './ServerAvatar'
@@ -274,6 +276,10 @@ export function SessionView({ sessionId }: Props) {
   const lift = (from: 'local' | 'remote') => (row: FileRow, e: React.PointerEvent) =>
     begin({ from, entries: [{ name: row.name, isDir: row.isDir }] }, e)
 
+  /// The inspector a right-click opens. Its state lives above the early return because
+  /// it is a hook; the two lookups that fill it are below, where the listings are.
+  const properties = useProperties()
+
   if (!session) return null
 
   const remotePath = listing?.path ?? session.remotePath ?? '/'
@@ -325,6 +331,30 @@ export function SessionView({ sessionId }: Props) {
 
   const transfer = (direction: 'up' | 'down') => (row: FileRow) =>
     enqueue(direction, [{ name: row.name, isDir: row.isDir }])
+
+  /// A row knows only what the listing draws — a name, a size, a date. The entry
+  /// behind it knows the rest, so the inspector is filled from that rather than from
+  /// the row, and a row whose entry has since gone opens nothing at all.
+  const inspectLocal = (row: FileRow, at: Point) => {
+    const entry = pane.localEntries.find((item) => item.name === row.name)
+    if (!entry) return
+    const facts = localProperties(entry)
+    // A folder has no size until something walks it; a file already told us its own.
+    properties.show(facts, at, facts.isDir ? () => commands.localMeasure(entry.path) : null)
+  }
+  /// A remote listing names its entries but not their paths, so the directory they were
+  /// read from is handed in to answer "Where".
+  const inspectRemote = (row: FileRow, at: Point) => {
+    const entry = (listing?.entries ?? []).find((item) => item.name === row.name)
+    if (!entry) return
+    const facts = remoteProperties(entry, remotePath)
+    const path = joinPath(remotePath, entry.name)
+    properties.show(
+      facts,
+      at,
+      facts.isDir ? () => commands.sessionMeasure(sessionId, path) : null,
+    )
+  }
 
   /// Refresh after a change, because SFTP has no directory notifications: what the
   /// pane shows is whatever the last listing said.
@@ -418,6 +448,7 @@ export function SessionView({ sessionId }: Props) {
               onSelect={(localSelected) => patchPane(sessionId, { localSelected })}
               onOpen={(row) => row.isDir && void loadLocal(joinPath(pane.localPath, row.name))}
               onAction={transfer('up')}
+              onInspect={inspectLocal}
               {...(connected ? { canReceive: true, onDragStart: lift('local') } : {})}
               drag={drag}
               over={over}
@@ -486,6 +517,7 @@ export function SessionView({ sessionId }: Props) {
               onAction={transfer('down')}
               onRename={renameRemote}
               onDelete={confirmDelete}
+              onInspect={inspectRemote}
               canReceive
               onDragStart={lift('remote')}
               drag={drag}
@@ -497,6 +529,17 @@ export function SessionView({ sessionId }: Props) {
         </div>
       </div>
       {logOpen && <LogPanel sessionId={sessionId} onClose={() => setLogOpen(false)} />}
+      {properties.open && (
+        <Properties
+          // A fresh panel per opening, so right-clicking a second row starts its
+          // measurement from scratch rather than inheriting the previous row's.
+          key={properties.open.seq}
+          facts={properties.open.facts}
+          at={properties.open.at}
+          measure={properties.open.measure}
+          onClose={properties.close}
+        />
+      )}
       {/* The row being carried, following the pointer. In the body rather than in the
           pane, so no ancestor's transform can turn "fixed" into "relative to me". */}
       {drag &&

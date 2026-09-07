@@ -14,7 +14,7 @@ use relay_core::events::LogLine;
 use relay_core::interact::{PromptReply, ResolveError};
 use relay_core::job::QueueOp;
 use relay_core::model::{
-    JobId, LocalEntry, RemoteEntry, ServerConfig, ServerId, ServerInfo, SessionId,
+    DirSize, JobId, LocalEntry, RemoteEntry, ServerConfig, ServerId, ServerInfo, SessionId,
 };
 use relay_core::secrets::{Credentials, KeyringSecrets, SecretKind, SecretStatus};
 use relay_core::settings::Settings;
@@ -140,6 +140,19 @@ pub async fn session_list_dir(
     state.engine.list_dir(id, &path).await
 }
 
+/// What a remote folder adds up to, walked on demand.
+///
+/// Slow by nature — one listing per directory — so the caller shows a pending state
+/// and drops the answer if the user has moved on.
+#[tauri::command]
+pub async fn session_measure(
+    state: State<'_, AppState>,
+    id: SessionId,
+    path: String,
+) -> Result<DirSize> {
+    state.engine.measure(id, &path).await
+}
+
 #[tauri::command]
 pub async fn session_mkdir(state: State<'_, AppState>, id: SessionId, path: String) -> Result<()> {
     state.engine.mkdir(id, &path).await
@@ -182,6 +195,15 @@ pub async fn local_list_dir(path: PathBuf) -> Result<Vec<LocalEntry>> {
     tauri::async_runtime::spawn_blocking(move || relay_core::local::list_dir(&path))
         .await
         .map_err(|e| EngineError::protocol(format!("local listing task failed: {e}")))?
+}
+
+/// The same for a folder on this Mac. Enumeration blocks, so it runs on a blocking
+/// worker like the listing beside it.
+#[tauri::command]
+pub async fn local_measure(path: PathBuf) -> Result<DirSize> {
+    tauri::async_runtime::spawn_blocking(move || relay_core::local::measure(&path))
+        .await
+        .map_err(|e| EngineError::protocol(format!("local measurement task failed: {e}")))?
 }
 
 #[tauri::command]

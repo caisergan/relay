@@ -20,7 +20,8 @@ use crate::error::{EngineError, Result};
 use crate::hub::EngineHub;
 use crate::job::{JobKind, QueueOp};
 use crate::model::{
-    Direction, JobId, Proto, RemoteEntry, ServerConfig, ServerId, ServerInfo, SessionId,
+    DirSize, Direction, FileKind, JobId, MEASURE_MAX_DEPTH, MEASURE_MAX_ENTRIES, Proto,
+    RemoteEntry, ServerConfig, ServerId, ServerInfo, SessionId,
 };
 use crate::protocol::{Protocol, SecretSource};
 use crate::queue::{BatchId, JobSpec};
@@ -314,6 +315,65 @@ impl Engine {
         self.session(id)?.stat(path).await
     }
 
+    /// What a remote folder adds up to.
+    ///
+    /// Breadth-first, and deliberately one directory at a time: every listing goes
+    /// through the session's single command queue, so a measurement running over a
+    /// large tree interleaves with whatever the user does next instead of putting
+    /// their following directory a thousand places back in the line. It uses the
+    /// quiet listing, so none of the directories it passes through is drawn in the
+    /// pane.
+    ///
+    /// **Symlinks are counted, not followed**, as `du` does — a link into a parent
+    /// makes the walk infinite, and a link to something huge elsewhere on the server
+    /// would be billed to this folder.
+    ///
+    /// **The folder asked about must be readable; anything below it need not be.** A
+    /// tree with one permission-denied subdirectory still has a size worth reporting,
+    /// and the caveat rides along in `truncated`.
+    pub async fn measure(&self, id: SessionId, path: &str) -> Result<DirSize> {
+        let session = self.session(id)?;
+        let mut out = DirSize::default();
+        let mut seen: u32 = 0;
+        // The root is listed before the loop so its failure is the caller's error
+        // rather than a silent zero.
+        let mut queue = std::collections::VecDeque::from([(
+            path.to_string(),
+            session.list_quiet(path).await?,
+            0usize,
+        )]);
+
+        while let Some((dir, entries, depth)) = queue.pop_front() {
+            for entry in entries {
+                if seen >= MEASURE_MAX_ENTRIES {
+                    out.truncated = true;
+                    return Ok(out);
+                }
+                seen += 1;
+
+                // `kind`, not `is_dir()`: the latter resolves a symlink to its target,
+                // and a symlinked directory is exactly what must not be descended.
+                if entry.kind != FileKind::Dir {
+                    out.files += 1;
+                    out.bytes = crate::wire::Bytes(out.bytes.0 + entry.size.0);
+                    continue;
+                }
+                out.folders += 1;
+                if depth + 1 >= MEASURE_MAX_DEPTH {
+                    out.truncated = true;
+                    continue;
+                }
+                let child = join_remote(&dir, &entry.name);
+                match session.list_quiet(&child).await {
+                    Ok(listing) => queue.push_back((child, listing, depth + 1)),
+                    // Unreadable, or gone since the parent was listed.
+                    Err(_) => out.truncated = true,
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn mkdir(&self, id: SessionId, path: &str) -> Result<()> {
         self.session(id)?.mkdir(path).await
     }
@@ -445,4 +505,9 @@ impl Engine {
             .get(id)
             .ok_or_else(|| EngineError::protocol(format!("no such session {id}")))
     }
+}
+
+/// Remote paths are `/`-separated whatever the host platform spells its own with.
+fn join_remote(parent: &str, name: &str) -> String {
+    format!("{}/{}", parent.trim_end_matches('/'), name)
 }

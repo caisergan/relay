@@ -6,6 +6,7 @@
 
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type {
+  DirSize,
   EngineEnvelope,
   EngineSnapshot,
   JobSnapshot,
@@ -51,6 +52,9 @@ export const commands = {
   sessionReconnect: (id: string) => invoke<Unit>('session_reconnect', { id }),
   sessionListDir: (id: string, path: string) =>
     invoke<RemoteEntry[]>('session_list_dir', { id, path }),
+  /** Walks a remote folder to total it up. Slow by nature: one listing per directory. */
+  sessionMeasure: (id: string, path: string) =>
+    invoke<DirSize>('session_measure', { id, path }),
   sessionMkdir: (id: string, path: string) => invoke<Unit>('session_mkdir', { id, path }),
   sessionRename: (id: string, from: string, to: string) =>
     invoke<Unit>('session_rename', { id, from, to }),
@@ -59,6 +63,7 @@ export const commands = {
   sessionLogs: (id: string, limit = 200) => invoke<LogLine[]>('session_logs', { id, limit }),
 
   localListDir: (path: string) => invoke<LocalEntry[]>('local_list_dir', { path }),
+  localMeasure: (path: string) => invoke<DirSize>('local_measure', { path }),
   localDefaultDir: () => invoke<string>('local_default_dir'),
   localRoots: () => invoke<string[]>('local_roots'),
 

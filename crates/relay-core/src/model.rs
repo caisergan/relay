@@ -106,6 +106,36 @@ pub enum FileKind {
     Symlink,
 }
 
+/// What a folder adds up to, once something has walked it.
+///
+/// A directory's own `size` is the size of its record — 4096 on most filesystems, and
+/// nothing to do with what is inside. The only way to answer "how big is this folder"
+/// is to walk it, which is what [`crate::local::measure`] and
+/// [`crate::engine::Engine::measure`] do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DirSize {
+    pub bytes: Bytes,
+    // `u32`, not `u64`: the walk stops at `MEASURE_MAX_ENTRIES` long before four
+    // billion, and specta refuses to export a 64-bit integer to TypeScript because
+    // `number` would silently round it.
+    pub files: u32,
+    pub folders: u32,
+    /// The walk stopped at a limit rather than at the bottom of the tree, so every
+    /// number above is a floor and not a total. The UI has to say so: a understated
+    /// size presented as exact is worse than no size at all.
+    pub truncated: bool,
+}
+
+/// How deep a measurement goes, and how many entries it will look at.
+///
+/// A measurement is a courtesy, not a transfer: it must not turn into thousands of
+/// round trips against someone's server because they right-clicked the wrong folder.
+/// Both limits set `truncated` rather than failing, because a floor with a caveat is
+/// more useful than an error.
+pub const MEASURE_MAX_DEPTH: usize = 32;
+pub const MEASURE_MAX_ENTRIES: u32 = 50_000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteEntry {

@@ -1146,6 +1146,89 @@ body.dragging--ok,
 body.dragging--ok * {
   cursor: copy !important;
 }
+/* The inspector: what Relay knows about one entry, floated beside the pointer that
+   asked for it. Portalled to the body, so it is placed against the window and no
+   pane's `overflow` can clip it. */
+.props {
+  position: fixed;
+  z-index: 50;
+  width: 300px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  /* The raised panel shade, not the flat one. A pane is already `--panel`, so a popover
+     painted in it is the same colour as the thing it floats over — and the elevation
+     shadow is a dark shadow, which does nothing on a dark background. In the dark theme
+     `--panel-2` is a step lighter and does the lifting the shadow cannot; in the light
+     theme it is imperceptible and the shadow lifts it instead. */
+  background: var(--panel-2);
+  box-shadow: var(--elev-lg);
+  animation: rl-in 0.12s ease-out;
+}
+.props__head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line-2);
+}
+.props__icon {
+  flex: none;
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+}
+.props__ident {
+  min-width: 0;
+}
+/* The name wraps rather than ellipsizing. It is the one thing in the panel worth
+   reading in full, and a panel that grows downward costs nothing. */
+.props__name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.props__kind {
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+/* Labels in a column of their own, so the values line up and a long path pushes
+   nothing sideways. The conflict sheet's cards are laid out the same way. */
+.props__facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 12px;
+  margin: 0;
+}
+.props__facts dt {
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  align-self: baseline;
+}
+.props__val {
+  margin: 0;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+.props__val--mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+/* A fact nothing reported. Faint and italic so it cannot be read as a value in its own
+   right, matching how the conflict sheet draws a timestamp the server withheld. */
+.props__val--unknown {
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-style: italic;
+  color: var(--ink-faint);
+}
+
 /* Dotfiles recede by name, not by dimming the whole row: the size and date of a
    hidden file are exactly as true as any other row's. Directories are not exempt —
    a hidden directory is hidden. */

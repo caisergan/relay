@@ -33,6 +33,7 @@ pub fn type_collection() -> Types {
         .register::<crate::model::AuthMethod>()
         .register::<crate::model::Bookmark>()
         .register::<crate::model::Direction>()
+        .register::<crate::model::DirSize>()
         .register::<crate::model::FileFacts>()
         .register::<crate::model::FileKind>()
         .register::<crate::model::LocalEntry>()
