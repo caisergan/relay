@@ -65,3 +65,16 @@ export function parentPath(path: string): string {
 export function joinPath(base: string, name: string): string {
   return base === '/' ? `/${name}` : `${base}/${name}`
 }
+
+/** The last segment of a path, on either platform.
+ *
+ * Windows is the reason this splits on both separators: the operating system hands
+ * dragged-in paths over in its own spelling, and `C:\\Users\\ada\\notes.md` has no
+ * forward slash in it at all. Trailing separators are dropped first, so a dragged
+ * folder does not come through as an empty name.
+ */
+export function baseName(path: string): string {
+  const trimmed = path.replace(/[/\\]+$/, '')
+  const index = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  return index < 0 ? trimmed : trimmed.slice(index + 1)
+}

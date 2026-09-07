@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { formatBytes, formatWhen } from './format'
+import { baseName, formatBytes, formatWhen } from './format'
 
 describe('formatWhen', () => {
   // Fixed so "this year" is not whatever year the suite happens to run in.
@@ -38,5 +38,27 @@ describe('formatBytes', () => {
     expect(formatBytes(420)).toBe('420 B')
     expect(formatBytes(3789)).toBe('3.7 KB')
     expect(formatBytes(1024 * 1024 * 25)).toBe('25 MB')
+  })
+})
+
+describe('baseName', () => {
+  it('takes the last segment of a posix path', () => {
+    expect(baseName('/var/www/app.js')).toBe('app.js')
+    expect(baseName('app.js')).toBe('app.js')
+    expect(baseName('/')).toBe('')
+  })
+
+  /// The operating system hands dragged-in paths over in its own spelling, and a
+  /// Windows path has no forward slash in it at all.
+  it('takes the last segment of a windows path', () => {
+    expect(baseName('C:\\Users\\ada\\notes.md')).toBe('notes.md')
+    expect(baseName('\\\\server\\share\\report.pdf')).toBe('report.pdf')
+  })
+
+  /// A dragged folder arrives with a trailing separator on some platforms, and an
+  /// empty name would upload it to the directory itself.
+  it('ignores a trailing separator so a folder keeps its name', () => {
+    expect(baseName('/var/www/assets/')).toBe('assets')
+    expect(baseName('C:\\Users\\ada\\')).toBe('ada')
   })
 })

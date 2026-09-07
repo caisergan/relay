@@ -1,9 +1,10 @@
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { commands } from '@/ipc/commands'
 import type { LocalEntry, LogLine, RemoteEntry, ServerConfig, TransferItem } from '@/ipc/gen'
 import { faultText, toFault } from '@/lib/errors'
-import { crumbs, joinPath, parentPath } from '@/lib/format'
+import { baseName, crumbs, joinPath, parentPath } from '@/lib/format'
 import { canGoBack, canGoForward, peek, push, type History } from '@/lib/history'
 import { useOrderedJobs } from '@/state/queueStore'
 import { useServersStore } from '@/state/serversStore'
@@ -45,6 +46,8 @@ export function SessionView({ sessionId }: Props) {
   // rather than a `window.confirm` the user can dismiss by muscle memory.
   const [pendingDelete, setPendingDelete] = useState<FileRow | null>(null)
   const [logOpen, setLogOpen] = useState(false)
+  /** The remote pane's element, for hit-testing a drop from the operating system. */
+  const remotePane = useRef<HTMLDivElement | null>(null)
   /** The failed path is remembered separately from `listing.path`, which still names
    * the last directory that actually listed. The pane needs both: one to draw the
    * denied state about, one to go back to. */
@@ -147,6 +150,78 @@ export function SessionView({ sessionId }: Props) {
       ),
     [allLocalRows, pane.localFilter, pane.localSort, pane.localShowHidden],
   )
+
+  // Above the early return, because hooks must run in the same order every render.
+  // The values they need are read here rather than from the body below, which only
+  // exists once there is a session.
+  const serverId = session?.serverId ?? null
+  const intoPath = listing?.path ?? session?.remotePath ?? '/'
+  const ready = session?.state.kind === 'connected'
+
+  /// Files dragged in from Finder or Explorer, dropped on the remote pane.
+  ///
+  /// The operating system hands over paths and a position, and nothing else — not
+  /// which element was under the cursor, and not whether a path is a file or a
+  /// directory. The first is answered by hit-testing the pane's own rectangle; the
+  /// second is left to the engine, which can stat the path rather than guess.
+  const acceptOsDrop = useCallback(
+    (paths: string[], at: { x: number; y: number }) => {
+      if (!serverId || !intoPath) return
+      const box = remotePane.current?.getBoundingClientRect()
+      if (!box) return
+      // The position is in physical pixels; `getBoundingClientRect` is in CSS pixels.
+      // On any display with a scale factor other than 1 — which is most of them —
+      // comparing them directly puts every drop in the wrong pane.
+      const x = at.x / window.devicePixelRatio
+      const y = at.y / window.devicePixelRatio
+      if (x < box.left || x > box.right || y < box.top || y > box.bottom) return
+
+      const items: TransferItem[] = paths.map((path) => ({
+        session: sessionId,
+        serverId,
+        direction: 'up',
+        remotePath: joinPath(intoPath, baseName(path)),
+        localPath: path,
+        // The engine looks; see `TransferItem::is_dir`.
+        isDir: false,
+      }))
+      if (items.length === 0) return
+      void commands
+        .queueEnqueue(crypto.randomUUID(), items)
+        .catch((error: unknown) => toast('error', faultText(error)))
+    },
+    [sessionId, serverId, intoPath, toast],
+  )
+
+  useEffect(() => {
+    if (!ready) return
+    let stop: (() => void) | null = null
+    let cancelled = false
+    try {
+      // `getCurrentWebview()` throws synchronously when there is no Tauri webview
+      // behind it — a unit test, or a browser — so the whole call is guarded rather
+      // than only the promise. Dragging files in is not available there, and nothing
+      // else in this component depends on it.
+      void getCurrentWebview()
+        .onDragDropEvent((event) => {
+          if (event.payload.type === 'drop') {
+            acceptOsDrop(event.payload.paths, event.payload.position)
+          }
+        })
+        .then((unlisten) => {
+          // Registration is asynchronous, so an unmount can land before it returns.
+          if (cancelled) unlisten()
+          else stop = unlisten
+        })
+        .catch(() => undefined)
+    } catch {
+      return
+    }
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [acceptOsDrop, ready])
 
   if (!session) return null
 
@@ -331,7 +406,7 @@ export function SessionView({ sessionId }: Props) {
         <PaneSplitter areaRef={panesRef} />
         <FlowGutter jobs={sessionJobs} />
 
-        <div className="pane pane--remote">
+        <div className="pane pane--remote" ref={remotePane}>
           {/* Spread rather than `onNewFolder={connected ? fn : undefined}`:
               `exactOptionalPropertyTypes` forbids an explicit undefined for an
               optional prop, so the prop is either present or absent. */}

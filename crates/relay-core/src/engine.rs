@@ -78,6 +78,11 @@ pub struct TransferItem {
     pub remote_path: String,
     pub local_path: PathBuf,
     /// A directory, which becomes a folder job the walker fills in.
+    ///
+    /// Authoritative for a download, where only the caller has seen the listing.
+    /// Ignored for an upload: the engine can see the local side itself, and a syscall
+    /// beats a guess — the operating system's drag-and-drop hands over paths with no
+    /// indication of what they are.
     pub is_dir: bool,
 }
 
@@ -356,16 +361,29 @@ impl Engine {
         for item in &items {
             self.session(item.session)?;
         }
+        let mut kinds = Vec::with_capacity(items.len());
+        for item in &items {
+            let folder = match item.direction {
+                Direction::Up => tokio::fs::metadata(&item.local_path)
+                    .await
+                    .map(|meta| meta.is_dir())
+                    .unwrap_or(item.is_dir),
+                Direction::Down => item.is_dir,
+            };
+            kinds.push(if folder {
+                JobKind::Folder
+            } else {
+                JobKind::File
+            });
+        }
+
         let specs: Vec<JobSpec> = items
             .iter()
-            .map(|item| JobSpec {
+            .zip(&kinds)
+            .map(|(item, kind)| JobSpec {
                 session: item.session,
                 server_id: item.server_id,
-                kind: if item.is_dir {
-                    JobKind::Folder
-                } else {
-                    JobKind::File
-                },
+                kind: *kind,
                 direction: item.direction,
                 // Stable within the batch, and the natural name for the thing being
                 // moved: asking for the same file in the same gesture is one job.
@@ -381,8 +399,8 @@ impl Engine {
 
         // A folder is queued before it is walked, so the drawer shows a row
         // immediately and the walk has a parent to hang its children on.
-        for (item, id) in items.iter().zip(&ids) {
-            if !item.is_dir {
+        for ((item, id), kind) in items.iter().zip(&ids).zip(&kinds) {
+            if *kind != JobKind::Folder {
                 continue;
             }
             let Ok(session) = self.session(item.session) else {
