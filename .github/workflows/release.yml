@@ -1,0 +1,130 @@
+name: Release
+
+# Pushing a tag such as v0.1.0-alpha.1 builds the macOS app and opens a draft
+# GitHub release with it attached. A draft is visible only to people with write
+# access, so nothing is public until someone presses Publish on it.
+#
+# Run by hand from the Actions tab, it builds and uploads the same files as an
+# artifact but creates no release: a way to watch the build go green before
+# spending a tag on it.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS (universal)
+    runs-on: macos-14
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      # rust-toolchain.toml pins the compiler and leaves these targets out on
+      # purpose, so they are added here — to the pinned toolchain, not to the
+      # stable one the step above installed.
+      - name: Add both macOS targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      # No build cache. Releases are rare, a universal LTO build would crowd CI's own
+      # caches out of the repository's quota, and a release should not depend on
+      # whatever an earlier run left behind.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # The app reports the version in tauri.conf.json, not the tag. A tag that
+      # disagrees would publish a build that calls itself something else, so fail
+      # here rather than after the compile.
+      - name: Name the build
+        run: |
+          app_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            label="${GITHUB_REF_NAME#v}"
+            if [[ "${label%%-*}" != "$app_version" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match version $app_version in tauri.conf.json"
+              exit 1
+            fi
+          else
+            label="$app_version-${GITHUB_SHA::7}"
+          fi
+          echo "LABEL=$label" >> "$GITHUB_ENV"
+
+      - run: pnpm install --frozen-lockfile
+
+      # Release profile, both architectures in one binary, ad-hoc signed by the
+      # bundler rather than by codesign afterwards so the app sealed inside the DMG
+      # is the signed one. With no signature at all, Apple Silicon reports a
+      # downloaded app as "damaged". Developer ID signing and notarisation replace
+      # the "-" in phase 5.
+      - name: Build
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+        run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg
+
+      # Check what was produced rather than trusting the bundler's exit code: a seal
+      # that verifies, and both architectures in the executable.
+      - name: Verify the bundle
+        run: |
+          app=target/universal-apple-darwin/release/bundle/macos/Relay.app
+          codesign --verify --deep --strict --verbose=2 "$app"
+          exe="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          archs="$(lipo -archs "$app/Contents/MacOS/$exe")"
+          echo "architectures: $archs"
+          if [[ "$archs" != *arm64* || "$archs" != *x86_64* ]]; then
+            echo "::error::expected a universal binary, got: $archs"
+            exit 1
+          fi
+
+      # Zip with ditto, as CI does: anything else flattens the bundle and drops the
+      # executable bit. Versioned names, because a release page lists every build.
+      - name: Package
+        run: |
+          bundle=target/universal-apple-darwin/release/bundle
+          mkdir -p out
+          (cd "$bundle/macos" && ditto -c -k --sequesterRsrc --keepParent Relay.app "$GITHUB_WORKSPACE/out/Relay_${LABEL}_macos_universal.zip")
+          cp "$bundle"/dmg/Relay_*_universal.dmg "out/Relay_${LABEL}_macos_universal.dmg"
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-${{ env.LABEL }}-macos-universal
+          path: out/
+          if-no-files-found: error
+
+      # The notes lead with installing because that is the part that fails: an
+      # unnotarised download stalls silently, and the script is what gets it running.
+      # One line per paragraph: a release body turns every newline into a line break.
+      # A tag with a suffix (-alpha.1, -beta.2) is marked as a pre-release.
+      - name: Draft the GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sed -e "s|@TAG@|$GITHUB_REF_NAME|g" -e "s|@LABEL@|$LABEL|g" > notes.md <<'EOF'
+          **A test build.** Relay is still in development, and this build is neither signed with a Developer ID nor notarised. Both arrive with the first real release ([phase 5](https://github.com/caisergan/relay/blob/main/docs/phases/phase-5-ship.md)).
+
+          For macOS 11 or later, on Apple Silicon and Intel.
+
+          ## Installing
+
+          Double-clicking the downloaded app will usually just bounce the icon and stop — no dialog, no crash report. macOS blocks the unnotarised download, and clearing the quarantine flag on that copy does not lift the block. Install it with the script instead; it copies the app to `~/Applications`, signs the copy, and launches it:
+
+          ```sh
+          curl -fsSLO https://raw.githubusercontent.com/caisergan/relay/@TAG@/scripts/install-macos-build.sh
+          bash install-macos-build.sh ~/Downloads/Relay_@LABEL@_macos_universal.zip
+          ```
+
+          If you downloaded the DMG instead, open it and pass the `Relay.app` inside it to the script. The [README](https://github.com/caisergan/relay#running-a-ci-build-on-macos) explains why the double-click fails.
+          EOF
+          flags=(--draft --title "Relay $GITHUB_REF_NAME" --notes-file notes.md)
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" out/*
