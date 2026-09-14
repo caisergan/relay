@@ -175,6 +175,26 @@ describe('App', () => {
     expect(host.querySelector('.pane--local .rootmenu')).not.toBeNull()
     expect(host.querySelector('.pane--remote .rootmenu')).toBeNull()
   })
+
+  // It used to answer with a toast saying the palette was coming in a later phase.
+  it('opens the command palette on ⌘K, and the same keys close it again', async () => {
+    useUiStore.setState({ paletteOpen: false })
+    const { host } = await mount()
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true }))
+    })
+    const input = host.querySelector<HTMLInputElement>('.palette input')
+    expect(input).not.toBeNull()
+
+    act(() => {
+      input?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true }),
+      )
+    })
+    expect(host.querySelector('.palette')).toBeNull()
+    expect(useUiStore.getState().paletteOpen).toBe(false)
+  })
 })
 
 /** A job the gutter will draw, i.e. one actually moving bytes. */

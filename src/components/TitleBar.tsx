@@ -4,7 +4,7 @@ import { useServersStore } from '@/state/serversStore'
 import { useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
 
-import { IconClose, IconGear, IconMoon, IconPlus, IconSearch, IconSun } from './Icons'
+import { IconClose, IconGear, IconPlus, IconSearch } from './Icons'
 import { ServerAvatar } from './ServerAvatar'
 
 export function TitleBar() {
@@ -13,9 +13,7 @@ export function TitleBar() {
   const activeId = useSessionsStore((s) => s.activeId)
   const activate = useSessionsStore((s) => s.activate)
   const servers = useServersStore((s) => s.servers)
-  const resolved = useUiStore((s) => s.resolved)
-  const setTheme = useUiStore((s) => s.setTheme)
-  const toast = useUiStore((s) => s.toast)
+  const togglePalette = useUiStore((s) => s.togglePalette)
   const toggleSettings = useUiStore((s) => s.toggleSettings)
 
   // The tab avatar has to be the colour chosen in the editor, not a hash of the name:
@@ -24,8 +22,6 @@ export function TitleBar() {
   /// `ServerAvatar` falls back to the deterministic tint on its own, so a server that
   /// has not been given a colour reaches it as null rather than as a second hash here.
   const colourOf = (serverId: string) => servers.find((s) => s.id === serverId)?.color ?? null
-
-  const dark = resolved === 'dark'
 
   return (
     <div className="titlebar" data-tauri-drag-region>
@@ -77,21 +73,15 @@ export function TitleBar() {
         <button
           className="iconbtn iconbtn--bordered"
           title="Command palette (⌘K)"
-          // The palette itself is 4.4. The button is the design's and stays, but it
-          // says so rather than flipping a flag nothing renders.
-          onClick={() => toast('info', 'The command palette arrives in phase 4.')}
+          aria-label="Command palette"
+          onClick={() => togglePalette(true)}
         >
           <IconSearch size={13} />
           <span className="kbd">⌘K</span>
         </button>
-        <button
-          className="iconbtn"
-          title="Toggle theme"
-          aria-label="Toggle theme"
-          onClick={() => setTheme(dark ? 'light' : 'dark')}
-        >
-          {dark ? <IconSun size={16} /> : <IconMoon size={16} />}
-        </button>
+        {/* No theme toggle beside it. Settings holds the appearance choice, System
+            included, and a button that flipped between Light and Dark disagreed with
+            it — and was forgotten at the next launch, which the setting is not. */}
         <button
           className="iconbtn"
           title="Settings"

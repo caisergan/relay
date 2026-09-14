@@ -488,6 +488,7 @@ export function SessionView({ sessionId }: Props) {
         logOpen={logOpen}
         onToggleLog={() => setLogOpen((v) => !v)}
       />
+      <PendingGo sessionId={sessionId} onGo={(side, text) => void goTo(side, text)} />
       <div className="panes" ref={panesRef}>
         <div className="pane pane--local" style={{ width: `${localPercent}%` }}>
           <PaneHeader
@@ -1039,6 +1040,29 @@ function deleteWarning(rows: FileRow[]): string {
     .join(', ')
   const more = rows.length > 5 ? ` and ${rows.length - 5} more` : ''
   return `${shown}${more}. ${warning}`
+}
+
+/** Takes a path sent from outside the pane — the command palette — and goes there.
+ *
+ * A component of its own because the going lives below the view's early return, where
+ * no effect can be, and an effect is what has to notice the request. It reads the store
+ * again before acting: React runs a mount effect twice in development, and the first run
+ * has already taken the request by then. */
+function PendingGo({
+  sessionId,
+  onGo,
+}: {
+  sessionId: string
+  onGo: (side: 'local' | 'remote', text: string) => void
+}) {
+  const pending = useUiStore((s) => s.pendingGo)
+  useEffect(() => {
+    const request = useUiStore.getState().pendingGo
+    if (!request || request !== pending || request.sessionId !== sessionId) return
+    useUiStore.getState().clearGo()
+    onGo(request.side, request.text)
+  }, [pending, sessionId, onGo])
+  return null
 }
 
 /** Hidden files are shown by default, as the design draws them. Hiding is the opt-in,

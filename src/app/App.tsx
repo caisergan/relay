@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 
 import { commands } from '@/ipc/commands'
 import { faultText } from '@/lib/errors'
+import { CommandPalette } from '@/components/CommandPalette'
 import { PromptSheets } from '@/components/PromptSheets'
 import { QueueDrawer } from '@/components/QueueDrawer'
 import { SessionView } from '@/components/SessionView'
@@ -30,6 +31,7 @@ export function App() {
   const activeId = useSessionsStore((s) => s.activeId)
   const connected = useUiStore((s) => s.connected)
   const toggleDrawer = useUiStore((s) => s.toggleDrawer)
+  const togglePalette = useUiStore((s) => s.togglePalette)
   const toast = useUiStore((s) => s.toast)
 
   const setTheme = useUiStore((s) => s.setTheme)
@@ -125,8 +127,9 @@ export function App() {
       const accel = event.metaKey || event.ctrlKey
       if (accel && event.key.toLowerCase() === 'k') {
         event.preventDefault()
-        // The palette is 4.4. Saying so beats a shortcut that silently does nothing.
-        toast('info', 'The command palette arrives in phase 4.')
+        // Opens only. While the palette is open its input has the focus, and it takes
+        // the same keys itself to close.
+        togglePalette(true)
       }
       if (accel && event.key.toLowerCase() === 'j') {
         event.preventDefault()
@@ -135,7 +138,7 @@ export function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [toast, toggleDrawer])
+  }, [togglePalette, toggleDrawer])
 
   return (
     <div className="shell">
@@ -153,6 +156,7 @@ export function App() {
         </div>
       </div>
       <SettingsSheet />
+      <CommandPalette />
       <PromptSheets />
       <Toasts />
     </div>

@@ -4,6 +4,13 @@ import type { Density, PromptRequest, Theme } from '@/ipc/gen'
 
 export type DrawerTab = 'active' | 'failed' | 'completed'
 
+/** A path to go to, sent from outside the pane that goes there — the command palette. */
+export interface GoRequest {
+  sessionId: string
+  side: 'local' | 'remote'
+  text: string
+}
+
 export interface Toast {
   id: string
   kind: 'info' | 'ok' | 'error'
@@ -20,6 +27,8 @@ interface UiState {
   resolved: 'light' | 'dark'
   density: Density
   paletteOpen: boolean
+  /** Waiting for the session's view to take it; see `GoRequest`. */
+  pendingGo: GoRequest | null
   drawerOpen: boolean
   drawerTab: DrawerTab
   activityOpen: boolean
@@ -40,6 +49,8 @@ interface UiState {
   setResolved: (resolved: 'light' | 'dark') => void
   setDensity: (density: Density) => void
   togglePalette: (open?: boolean) => void
+  requestGo: (request: GoRequest) => void
+  clearGo: () => void
   toggleDrawer: (open?: boolean) => void
   setDrawerTab: (tab: DrawerTab) => void
   toggleActivity: (open?: boolean) => void
@@ -65,6 +76,7 @@ export const useUiStore = create<UiState>((set) => ({
   resolved: 'light',
   density: 'comfortable',
   paletteOpen: false,
+  pendingGo: null,
   drawerOpen: true,
   drawerTab: 'active',
   activityOpen: false,
@@ -79,6 +91,8 @@ export const useUiStore = create<UiState>((set) => ({
   setResolved: (resolved) => set({ resolved }),
   setDensity: (density) => set({ density }),
   togglePalette: (open) => set((s) => ({ paletteOpen: open ?? !s.paletteOpen })),
+  requestGo: (pendingGo) => set({ pendingGo }),
+  clearGo: () => set({ pendingGo: null }),
   toggleDrawer: (open) => set((s) => ({ drawerOpen: open ?? !s.drawerOpen })),
   setDrawerTab: (drawerTab) => set({ drawerTab }),
   toggleActivity: (open) => set((s) => ({ activityOpen: open ?? !s.activityOpen })),
