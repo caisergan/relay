@@ -622,6 +622,21 @@ describe('the pane filter', () => {
     expect(inputs[1]?.getAttribute('aria-label')).toContain(session.name)
   })
 
+  // WebKit on macOS offered to capitalise the first letter typed into the filter, in a
+  // bubble under the caret. A filter matches names exactly; none of that belongs here.
+  it('keeps the system text services out of both filters', async () => {
+    useSessionsStore.getState().upsert(session)
+    const { host } = await mount()
+
+    for (const input of host.querySelectorAll<HTMLInputElement>('.searchbox--pane input')) {
+      expect(input.getAttribute('autocorrect')).toBe('off')
+      expect(input.getAttribute('autocapitalize')).toBe('off')
+      expect(input.getAttribute('autocomplete')).toBe('off')
+      expect(input.getAttribute('spellcheck')).toBe('false')
+      expect(input.getAttribute('writingsuggestions')).toBe('false')
+    }
+  })
+
   // Carried into the next directory a filter silently hides most of what is there,
   // and the box explaining why is a row above the listing, where nobody looks.
   it('clears when the pane is navigated somewhere else', async () => {

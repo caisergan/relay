@@ -9,6 +9,7 @@ import { localProperties, remoteProperties } from '@/lib/properties'
 import { baseName, crumbs, joinPath, parentPath } from '@/lib/format'
 import { transferPaths } from '@/lib/transfer'
 import { canGoBack, canGoForward, peek, push, type History } from '@/lib/history'
+import { exactText } from '@/lib/exactText'
 import { isPathQuery, resolvePath, splitPath } from '@/lib/goto'
 import { useOrderedJobs } from '@/state/queueStore'
 import { useServersStore } from '@/state/serversStore'
@@ -968,6 +969,7 @@ function PaneHeader({
         <div className="searchbox searchbox--pane">
           <IconSearch size={12} className="searchbox__icon" />
           <input
+            {...exactText}
             placeholder={filterLabel}
             value={filter}
             aria-label={`${filterLabel} — ${title}`}

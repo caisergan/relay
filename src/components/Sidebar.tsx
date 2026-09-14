@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 import { commands } from '@/ipc/commands'
 import type { ServerConfig } from '@/ipc/gen'
 import { faultText } from '@/lib/errors'
+import { exactText } from '@/lib/exactText'
 import { groupServers, useServersStore } from '@/state/serversStore'
 import { useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
@@ -175,7 +176,7 @@ export function Sidebar() {
               onChange={(e) => setQuery(e.currentTarget.value)}
               placeholder="Search servers"
               aria-label="Search servers"
-              spellCheck={false}
+              {...exactText}
             />
           </div>
 

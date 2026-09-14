@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { commands } from '@/ipc/commands'
 import type { AuthMethod, Proto, ServerConfig } from '@/ipc/gen'
 import { faultText } from '@/lib/errors'
+import { exactText } from '@/lib/exactText'
 import { useServersStore } from '@/state/serversStore'
 import { useUiStore } from '@/state/uiStore'
 
@@ -187,7 +188,7 @@ export function ServerEditor({ server, isNew, connectOnSave = false, onClose }: 
                 className="input input--mono"
                 value={draft.host}
                 placeholder="sftp.example.com"
-                spellCheck={false}
+                {...exactText}
                 onChange={(e) => patch({ host: e.currentTarget.value })}
               />
             </Field>
@@ -195,6 +196,7 @@ export function ServerEditor({ server, isNew, connectOnSave = false, onClose }: 
               <input
                 className="input input--mono"
                 inputMode="numeric"
+                {...exactText}
                 value={String(draft.port)}
                 onChange={(e) => patch({ port: Number(e.currentTarget.value) || 0 })}
               />
@@ -244,7 +246,7 @@ export function ServerEditor({ server, isNew, connectOnSave = false, onClose }: 
               className="input input--mono"
               value={draft.username}
               placeholder="deploy"
-              spellCheck={false}
+              {...exactText}
               onChange={(e) => patch({ username: e.currentTarget.value })}
             />
           </Field>
@@ -255,6 +257,8 @@ export function ServerEditor({ server, isNew, connectOnSave = false, onClose }: 
                 <input
                   className="input__inner"
                   type={showPassword ? 'text' : 'password'}
+                  // Shown, it is a text field, and the system would offer to correct it.
+                  {...exactText}
                   value={password}
                   placeholder={stored.password ? 'Saved in the keychain' : '••••••••'}
                   onChange={(e) => setPassword(e.currentTarget.value)}
@@ -288,7 +292,7 @@ export function ServerEditor({ server, isNew, connectOnSave = false, onClose }: 
                     className="input input--mono"
                     value={draft.auth.path}
                     placeholder="~/.ssh/id_ed25519"
-                    spellCheck={false}
+                    {...exactText}
                     onChange={(e) =>
                       patch({ auth: { kind: 'keyFile', path: e.currentTarget.value } })
                     }
@@ -338,7 +342,7 @@ export function ServerEditor({ server, isNew, connectOnSave = false, onClose }: 
               className="input input--mono"
               value={draft.initialRemotePath ?? ''}
               placeholder="the server’s home directory"
-              spellCheck={false}
+              {...exactText}
               onChange={(e) =>
                 patch({ initialRemotePath: e.currentTarget.value.trim() || null })
               }
