@@ -23,6 +23,36 @@ export function formatDuration(seconds: number | null): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 
+/** How long something took, precise where it is short. A small file moves in a few
+ * hundred milliseconds, and "0s" would say it took no time at all; a transfer that ran
+ * for an hour does not need its milliseconds. */
+export function formatElapsed(ms: number): string {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))} ms`
+  const seconds = ms / 1000
+  if (seconds < 10) return `${seconds.toFixed(1)}s`
+  if (seconds < 60) return `${Math.floor(seconds)}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${Math.floor(seconds % 60)}s`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
+/** When a transfer started. The clock for today — nearly every row in the drawer — down
+ * to the second, since transfers a few seconds apart are worth telling apart. The date
+ * alone for anything older: which day is what matters by then, and a date *with* a time
+ * does not fit the column in every locale ("Sep 12 at 02:24 AM" ran into the figure
+ * beside it). The row's tooltip carries the full timestamp either way. */
+export function formatStarted(iso: string, now: Date = new Date()): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toDateString() === now.toDateString()
+    ? date.toLocaleTimeString(undefined, {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    : date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+}
+
 /** The design's column is 84px of mono, sized for "Jul 14 22:39" — every date in the
  * design is from the current year. A real listing is full of older files, and adding
  * the year to a string that already carried a clock time overflowed the column and

@@ -68,6 +68,111 @@ beforeEach(() => {
   control.mockClear()
 })
 
+describe('the figures at the end of a row', () => {
+  const figures = (row: HTMLElement | undefined) =>
+    [...(row?.querySelectorAll<HTMLElement>('.job__meta') ?? [])].map((el) => ({
+      text: el.textContent,
+      title: el.getAttribute('title'),
+    }))
+
+  it('say how long a finished transfer took and when it started', () => {
+    const host = render(
+      [
+        job({
+          startedAt: '2026-09-14T10:00:00.000Z',
+          transferred: 1000,
+          state: { kind: 'done', at: '2026-09-14T10:00:03.400Z', skipped: false },
+        }),
+      ],
+      'completed',
+    )
+
+    const [size, took, started] = figures(rows(host)[0])
+    expect(size?.text).toBe('1000 B')
+    expect(took).toEqual({ text: '3.4s', title: 'Took 3.4s' })
+    expect(started?.text).toMatch(/\d{1,2}:\d{2}/)
+    expect(started?.title).toMatch(/^Started /)
+    // Each figure carries the icon that says which one it is.
+    expect(rows(host)[0]?.querySelectorAll('.job__meta svg')).toHaveLength(2)
+  })
+
+  // A folder never runs itself, so it has no start of its own to report.
+  it('time a folder by the files inside it', () => {
+    const host = render(
+      [
+        job({
+          id: 'folder',
+          kind: 'folder',
+          startedAt: null,
+          state: { kind: 'done', at: '2026-09-14T10:00:10.000Z', skipped: false },
+        }),
+        job({
+          id: 'later',
+          order: 2048,
+          parent: 'folder',
+          startedAt: '2026-09-14T10:00:05.000Z',
+          state: { kind: 'done', at: '2026-09-14T10:00:10.000Z', skipped: false },
+        }),
+        job({
+          id: 'first',
+          order: 3072,
+          parent: 'folder',
+          startedAt: '2026-09-14T10:00:02.000Z',
+          state: { kind: 'done', at: '2026-09-14T10:00:04.000Z', skipped: false },
+        }),
+      ],
+      'completed',
+    )
+
+    expect(figures(rows(host)[0])[1]?.text).toBe('8.0s')
+  })
+
+  it('show speed and time left while a transfer moves', () => {
+    const host = render([job()])
+    const [size, speed, left] = figures(rows(host)[0])
+    expect(size).toEqual({ text: '400 B', title: '400 B of 1000 B' })
+    expect(speed?.text).toBe('2.0 KB/s')
+    expect(left?.text).toBe('3s left')
+  })
+
+  // The complaint this follows: every finished row ended in two dashes.
+  it('leave out what a job does not have, rather than drawing dashes', () => {
+    const host = render([
+      job({
+        size: null,
+        transferred: 0,
+        speedBps: null,
+        etaSecs: null,
+        state: { kind: 'queued' },
+      }),
+    ])
+    expect(figures(rows(host)[0]).map((figure) => figure.text)).toEqual(['', '', ''])
+    expect(host.querySelector('.job')?.textContent).not.toContain('—')
+  })
+
+  // "0 B" beside a failure is a figure about nothing. When it started still says something.
+  it('give a failure that moved nothing its start time and no size', () => {
+    const host = render(
+      [
+        job({
+          transferred: 0,
+          startedAt: '2026-09-14T10:00:00.000Z',
+          state: {
+            kind: 'failed',
+            error: { kind: 'notFound', path: '/home/tester/app.tar' },
+            attempts: 1,
+          },
+        }),
+      ],
+      'failed',
+    )
+    const [size, took, started] = figures(rows(host)[0])
+    expect(size?.text).toBe('')
+    expect(took?.text).toBe('')
+    expect(started?.title).toMatch(/^Started /)
+  })
+})
+
 describe('the queue drawer', () => {
   it('offers the control that matches the state a job is actually in', () => {
     const moving = render([job()])

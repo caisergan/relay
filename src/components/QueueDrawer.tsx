@@ -3,7 +3,7 @@ import { useRef, useState } from 'react'
 import { commands } from '@/ipc/commands'
 import type { JobSnapshot, PauseReason, QueueOp } from '@/ipc/gen'
 import { faultText } from '@/lib/errors'
-import { formatBytes, formatSpeed } from '@/lib/format'
+import { formatBytes, formatElapsed, formatSpeed, formatStarted } from '@/lib/format'
 import { useOrderedJobs, useQueueStore } from '@/state/queueStore'
 import { useUiStore, type DrawerTab } from '@/state/uiStore'
 
@@ -11,10 +11,12 @@ import {
   IconArrowDown,
   IconArrowUp,
   IconChevronDown,
+  IconClock,
   IconClose,
   IconPause,
   IconPlay,
   IconRetry,
+  IconStopwatch,
 } from './Icons'
 
 const TABS: { id: DrawerTab; label: string }[] = [
@@ -215,11 +217,7 @@ export function QueueDrawer() {
                       />
                     </div>
                   </div>
-                  <span className="job__meta">
-                    {job.size === null ? '—' : formatBytes(job.transferred)}
-                  </span>
-                  <span className="job__meta">{formatSpeed(job.speedBps)}</span>
-                  <span className="job__meta">{formatEta(job.etaSecs)}</span>
+                  <Facts job={job} jobs={jobs} />
                   <div className="job__acts">
                     {job.state.kind === 'transferring' && (
                       <IconButton
@@ -263,6 +261,99 @@ export function QueueDrawer() {
       )}
     </div>
   )
+}
+
+/** The three figures at the end of a row, which depend on where the job is. While it
+ * moves: how much has arrived, how fast, and how long is left. Once it has stopped: how
+ * much, how long it took, and when it began.
+ *
+ * A figure that does not apply is left out rather than drawn as a dash. The row used to
+ * end in speed and ETA whatever state it was in, so every finished transfer closed on
+ * two dashes that said nothing about what had happened. */
+function Facts({ job, jobs }: { job: JobSnapshot; jobs: JobSnapshot[] }) {
+  const { started, ended } = timing(job, jobs)
+  const elapsed = started && ended ? Date.parse(ended) - Date.parse(started) : null
+  const size = sizeText(job)
+
+  if (job.state.kind === 'transferring') {
+    return (
+      <>
+        <span
+          className="job__meta"
+          title={job.size ? `${size} of ${formatBytes(job.size)}` : undefined}
+        >
+          {size}
+        </span>
+        <span className="job__meta" title={job.speedBps ? 'Current speed' : undefined}>
+          {job.speedBps ? formatSpeed(job.speedBps) : ''}
+        </span>
+        <span
+          className="job__meta job__meta--when"
+          title={job.etaSecs !== null ? 'Estimated time left' : undefined}
+        >
+          {job.etaSecs !== null ? `${formatEta(job.etaSecs)} left` : ''}
+        </span>
+      </>
+    )
+  }
+
+  return (
+    <>
+      <span className="job__meta" title={size ? `${size} transferred` : undefined}>
+        {size}
+      </span>
+      <span
+        className="job__meta"
+        title={elapsed !== null ? `Took ${formatElapsed(elapsed)}` : undefined}
+      >
+        {elapsed !== null && (
+          <>
+            <IconStopwatch size={11} />
+            {formatElapsed(elapsed)}
+          </>
+        )}
+      </span>
+      <span
+        className="job__meta job__meta--when"
+        title={started ? `Started ${new Date(started).toLocaleString()}` : undefined}
+      >
+        {started && (
+          <>
+            <IconClock size={11} />
+            {formatStarted(started)}
+          </>
+        )}
+      </span>
+    </>
+  )
+}
+
+/** When a job started, and when it stopped if it has. A folder never runs itself — its
+ * files do — so its start is the first of theirs; it stops when the last of them does,
+ * which is the moment the folder is marked done. */
+function timing(
+  job: JobSnapshot,
+  jobs: JobSnapshot[],
+): { started: string | null; ended: string | null } {
+  const ended =
+    job.state.kind === 'done' || job.state.kind === 'cancelled' ? job.state.at : null
+  if (job.kind !== 'folder') return { started: job.startedAt, ended }
+  const starts = jobs.flatMap((child) =>
+    child.parent === job.id && child.startedAt !== null ? [child.startedAt] : [],
+  )
+  const started = starts.reduce<string | null>(
+    (first, at) => (first === null || Date.parse(at) < Date.parse(first) ? at : first),
+    null,
+  )
+  return { started, ended }
+}
+
+/** Bytes moved, or nothing while there are none to speak of: a job that has not moved a
+ * byte yet — queued, or failed before it began — and a skip, which moved nothing on
+ * purpose. An empty file that arrived is still "0 B": that is its size, not an absence. */
+function sizeText(job: JobSnapshot): string {
+  if (job.state.kind === 'done') return job.state.skipped ? '' : formatBytes(job.transferred)
+  return job.transferred === 0 ? '' : formatBytes(job.transferred)
 }
 
 function IconButton({

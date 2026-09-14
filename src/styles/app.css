@@ -1769,10 +1769,23 @@ body.dragging--ok * {
 .job__meta {
   width: 80px;
   flex: none;
-  text-align: right;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--ink-faint);
+  white-space: nowrap;
+}
+/* The icon names the figure, so it is quieter than the figure. */
+.job__meta svg {
+  flex: none;
+  opacity: 0.75;
+}
+/* A start time from an earlier day carries its date, and needs the room. */
+.job__meta--when {
+  width: 108px;
 }
 
 /* An action in the drawer's tab strip — pause all, clear completed. Quieter than a

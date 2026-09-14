@@ -1,6 +1,46 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { baseName, formatBytes, formatWhen } from './format'
+import { baseName, formatBytes, formatElapsed, formatStarted, formatWhen } from './format'
+
+describe('formatElapsed', () => {
+  // A small file is done in a fraction of a second; rounding that to "0s" says it
+  // took no time, which is the one thing it did not do.
+  it('keeps milliseconds for what took under a second', () => {
+    expect(formatElapsed(340)).toBe('340 ms')
+    expect(formatElapsed(0)).toBe('0 ms')
+  })
+
+  it('keeps a tenth of a second under ten seconds, and drops it after', () => {
+    expect(formatElapsed(3400)).toBe('3.4s')
+    expect(formatElapsed(42_900)).toBe('42s')
+    expect(formatElapsed(59_900)).toBe('59s')
+  })
+
+  it('moves to minutes and hours without a sixtieth second', () => {
+    expect(formatElapsed(119_900)).toBe('1m 59s')
+    expect(formatElapsed(3_723_000)).toBe('1h 2m')
+  })
+})
+
+describe('formatStarted', () => {
+  const now = new Date(2026, 8, 14, 15, 0, 0)
+
+  it('gives today the clock, to the second', () => {
+    const text = formatStarted(new Date(2026, 8, 14, 14, 32, 5).toISOString(), now)
+    expect(text).toMatch(/\d{1,2}:\d{2}:\d{2}/)
+  })
+
+  // With a time as well it did not fit the column in every locale.
+  it('gives an older day its date and nothing else', () => {
+    const text = formatStarted(new Date(2026, 8, 12, 9, 5, 0).toISOString(), now)
+    expect(text).toMatch(/12/)
+    expect(text).not.toMatch(/\d{1,2}:\d{2}/)
+  })
+
+  it('says nothing about a time it cannot read', () => {
+    expect(formatStarted('not a date', now)).toBe('')
+  })
+})
 
 describe('formatWhen', () => {
   // Fixed so "this year" is not whatever year the suite happens to run in.

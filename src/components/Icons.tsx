@@ -95,6 +95,27 @@ export function IconRefresh(props: IconProps) {
   )
 }
 
+/** How long a transfer took. A stopwatch rather than a clock face, so that it does not
+ * read as the time of day beside it. Not the design's; it has no timing in its drawer. */
+export function IconStopwatch(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="14" r="7" />
+      <path d="M12 14v-3.5M10 3h4M12 3v4M18.5 7.5 20 6" />
+    </Svg>
+  )
+}
+
+/** When a transfer started. */
+export function IconClock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </Svg>
+  )
+}
+
 export function IconChevronDown(props: IconProps) {
   return (
     <Svg {...props}>
