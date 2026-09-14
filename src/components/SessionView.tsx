@@ -9,6 +9,7 @@ import { localProperties, remoteProperties } from '@/lib/properties'
 import { baseName, crumbs, joinPath, parentPath } from '@/lib/format'
 import { transferPaths } from '@/lib/transfer'
 import { canGoBack, canGoForward, peek, push, type History } from '@/lib/history'
+import { isPathQuery, resolvePath, splitPath } from '@/lib/goto'
 import { useOrderedJobs } from '@/state/queueStore'
 import { useServersStore } from '@/state/serversStore'
 import { emptyPane, useSessionsStore } from '@/state/sessionsStore'
@@ -40,6 +41,13 @@ interface Props {
   sessionId: string
 }
 
+/** How a pane moves. `select` lands with that row already selected — a typed path to a
+ * file opens the folder it is in, and the file is the reason for going. */
+interface Navigation {
+  record?: boolean
+  select?: string | null
+}
+
 export function SessionView({ sessionId }: Props) {
   const session = useSessionsStore((s) => s.sessions[sessionId])
   const listing = useSessionsStore((s) => s.listings[sessionId])
@@ -69,7 +77,7 @@ export function SessionView({ sessionId }: Props) {
   const loadLocal = useCallback(
     /// `record: false` is how back and forward replay a path without pushing it again,
     /// which would otherwise make the two buttons walk in circles.
-    async (path: string, record = true) => {
+    async (path: string, { record = true, select = null }: Navigation = {}) => {
       // A filter belongs to the directory it was typed in. Carried into the next one
       // it silently hides most of what is there, and the box that explains why is a
       // row above the listing where nobody looks. A refresh keeps it: same directory,
@@ -79,6 +87,7 @@ export function SessionView({ sessionId }: Props) {
         localLoading: true,
         localError: null,
         ...(path === before.localPath ? {} : { localFilter: '', localSelected: null }),
+        ...(select === null ? {} : { localSelected: select }),
       })
       try {
         const entries = await commands.localListDir(path)
@@ -142,7 +151,7 @@ export function SessionView({ sessionId }: Props) {
       sortRows(
         allRemoteRows
           .filter(visible(pane.remoteShowHidden))
-          .filter(matching(pane.remoteFilter)),
+          .filter(matching(pane.remoteFilter, 'remote')),
         pane.remoteSort,
       ),
     [allRemoteRows, pane.remoteFilter, pane.remoteSort, pane.remoteShowHidden],
@@ -150,7 +159,9 @@ export function SessionView({ sessionId }: Props) {
   const localRows = useMemo(
     () =>
       sortRows(
-        allLocalRows.filter(visible(pane.localShowHidden)).filter(matching(pane.localFilter)),
+        allLocalRows
+          .filter(visible(pane.localShowHidden))
+          .filter(matching(pane.localFilter, 'local')),
         pane.localSort,
       ),
     [allLocalRows, pane.localFilter, pane.localSort, pane.localShowHidden],
@@ -285,11 +296,12 @@ export function SessionView({ sessionId }: Props) {
   const remotePath = listing?.path ?? session.remotePath ?? '/'
   const connected = session.state.kind === 'connected'
 
-  const navigateRemote = (path: string, record = true) => {
+  const navigateRemote = (path: string, { record = true, select = null }: Navigation = {}) => {
     patchPane(sessionId, {
       remoteLoading: true,
       remoteError: null,
       ...(path === remotePath ? {} : { remoteFilter: '', remoteSelected: null }),
+      ...(select === null ? {} : { remoteSelected: select }),
     })
     setRemoteFailedPath(null)
     commands
@@ -317,7 +329,7 @@ export function SessionView({ sessionId }: Props) {
     patchPane(sessionId, {
       localHistory: { ...pane.localHistory, at: pane.localHistory.at + delta },
     })
-    void loadLocal(target, false)
+    void loadLocal(target, { record: false })
   }
 
   const stepRemote = (delta: number) => {
@@ -326,7 +338,50 @@ export function SessionView({ sessionId }: Props) {
     patchPane(sessionId, {
       remoteHistory: { ...pane.remoteHistory, at: pane.remoteHistory.at + delta },
     })
-    navigateRemote(target, false)
+    navigateRemote(target, { record: false })
+  }
+
+  /// Where the search box sends a typed path. It asks what is there before moving the
+  /// pane: a folder opens, a file opens the folder it is in with the file selected, and
+  /// nothing at all leaves the pane where it was with the path still in the box — a typo
+  /// should cost a keystroke, not the place you were in.
+  ///
+  /// `~` on the server is where the session landed: the account's home, unless the
+  /// server's settings name a starting folder. SFTP has no tilde of its own to ask.
+  const goTo = async (side: 'local' | 'remote', text: string) => {
+    try {
+      const home =
+        side === 'local'
+          ? await commands.localDefaultDir()
+          : session.state.kind === 'connected'
+            ? session.state.info.homePath
+            : '/'
+      const path = resolvePath(text, home)
+      const found =
+        side === 'local'
+          ? await commands.localStat(path)
+          : await commands.sessionStat(sessionId, path)
+      if (!found) {
+        toast('error', `Nothing at ${path}`)
+        return
+      }
+      const { parent, name } = splitPath(path)
+      const target =
+        found.kind === 'dir' || found.targetKind === 'dir'
+          ? { to: path, select: null }
+          : { to: parent, select: name }
+      // Cleared here as well as by the navigation, which keeps a filter when the
+      // destination is the folder already on show.
+      if (side === 'local') {
+        patchPane(sessionId, { localFilter: '' })
+        await loadLocal(target.to, { select: target.select })
+      } else {
+        patchPane(sessionId, { remoteFilter: '' })
+        navigateRemote(target.to, { select: target.select })
+      }
+    } catch (error) {
+      toast('error', faultText(error))
+    }
   }
 
   const transfer = (direction: 'up' | 'down') => (row: FileRow) =>
@@ -415,6 +470,7 @@ export function SessionView({ sessionId }: Props) {
             filter={pane.localFilter}
             filterLabel="Search"
             onFilter={(localFilter) => patchPane(sessionId, { localFilter })}
+            onGo={(text) => void goTo('local', text)}
             onNavigate={(path) => void loadLocal(path)}
             roots={roots}
             showHidden={pane.localShowHidden}
@@ -471,6 +527,7 @@ export function SessionView({ sessionId }: Props) {
             filter={pane.remoteFilter}
             filterLabel="Search"
             onFilter={(remoteFilter) => patchPane(sessionId, { remoteFilter })}
+            onGo={(text) => void goTo('remote', text)}
             onNavigate={navigateRemote}
             onRefresh={refreshRemote}
             showHidden={pane.remoteShowHidden}
@@ -775,6 +832,7 @@ function PaneHeader({
   filter,
   filterLabel,
   onFilter,
+  onGo,
   onNavigate,
   onRefresh,
   onNewFolder,
@@ -791,6 +849,8 @@ function PaneHeader({
   filter: string
   filterLabel: string
   onFilter: (value: string) => void
+  /** Return in the box, or its Go button, while what is typed is a path. */
+  onGo: (text: string) => void
   onNavigate: (path: string) => void
   onRefresh?: () => void
   onNewFolder?: () => void
@@ -804,6 +864,7 @@ function PaneHeader({
   /** -1 for back, +1 for forward. */
   onStep: (delta: number) => void
 }) {
+  const going = isPathQuery(filter, kind)
   return (
     <div className="pane-header">
       <div className="pane-header__id">
@@ -887,7 +948,21 @@ function PaneHeader({
             value={filter}
             aria-label={`${filterLabel} — ${title}`}
             onChange={(e) => onFilter(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              // Not mid-composition, where Return confirms the composed text instead.
+              if (e.key === 'Enter' && going && !e.nativeEvent.isComposing) onGo(filter)
+            }}
           />
+          {going && (
+            <button
+              className="searchbox__go"
+              title="Go to this path (Return)"
+              aria-label={`Go to this path — ${title}`}
+              onClick={() => onGo(filter)}
+            >
+              Go <span className="kbd">↵</span>
+            </button>
+          )}
         </div>
         <div className="segbtns">
           <button
@@ -920,7 +995,11 @@ function visible(showHidden: boolean) {
   return (row: FileRow) => showHidden || !row.hidden
 }
 
-function matching(filter: string) {
+/** A path is somewhere to go, not a name to look for — and as a name it could only match
+ * nothing, since no name contains a slash. While one is being typed the listing stays
+ * whole. */
+function matching(filter: string, side: 'local' | 'remote') {
+  if (isPathQuery(filter, side)) return () => true
   const needle = filter.trim().toLowerCase()
   return (row: FileRow) => needle === '' || row.name.toLowerCase().includes(needle)
 }

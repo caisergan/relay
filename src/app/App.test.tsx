@@ -35,7 +35,10 @@ const ANSWERS: Record<string, unknown> = {
 }
 
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn((command: string) => Promise.resolve(ANSWERS[command] ?? [])),
+  // `in` rather than `??`, so a command can answer null: a stat that found nothing.
+  invoke: vi.fn((command: string) =>
+    Promise.resolve(command in ANSWERS ? ANSWERS[command] : []),
+  ),
   Channel: class {
     onmessage: unknown = null
   },
@@ -661,6 +664,145 @@ describe('the pane filter', () => {
     act(() => refresh?.click())
 
     expect(useSessionsStore.getState().panes['session-1']?.remoteFilter).toBe('conf')
+  })
+})
+
+describe('a path typed into the search box', () => {
+  const entry = (name: string, kind: 'file' | 'dir') => ({
+    name,
+    kind,
+    targetKind: null,
+    size: 64,
+    modified: null,
+    perms: 'rw-r--r--',
+    mode: null,
+    owner: null,
+    group: null,
+  })
+
+  beforeEach(() => {
+    ANSWERS.servers_list = []
+    delete ANSWERS.session_stat
+    delete ANSWERS.local_stat
+    invoked.mockClear()
+    useSessionsStore.setState({
+      sessions: {},
+      order: [],
+      activeId: null,
+      listings: {},
+      panes: {},
+    })
+    useUiStore.setState({ toasts: [] })
+  })
+
+  /** Types into a pane's box and presses Return, then lets the stat and the navigation
+   * that follows it settle. */
+  async function goTo(host: HTMLElement, side: 'local' | 'remote', text: string) {
+    act(() => {
+      useSessionsStore
+        .getState()
+        .patchPane(
+          'session-1',
+          side === 'local' ? { localFilter: text } : { remoteFilter: text },
+        )
+    })
+    const input = host.querySelector<HTMLInputElement>(`.pane--${side} .searchbox--pane input`)
+    await act(async () => {
+      input?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+  }
+
+  const calls = (command: string) =>
+    invoked.mock.calls.filter(([name]) => name === command).map(([, args]) => args as unknown)
+
+  // The report this follows: the whole path, typed as a filter, matched no name and
+  // left a pane that said the folder was empty.
+  it('opens the folder a file is in, with the file selected', async () => {
+    useSessionsStore.getState().upsert(session)
+    ANSWERS.session_stat = entry('models.yml', 'file')
+    const { host } = await mount()
+
+    await goTo(host, 'remote', '/home/ada/.omp/agent/models.yml')
+
+    expect(calls('session_stat')).toEqual([
+      { id: 'session-1', path: '/home/ada/.omp/agent/models.yml' },
+    ])
+    expect(calls('session_list_dir')).toEqual([
+      { id: 'session-1', path: '/home/ada/.omp/agent' },
+    ])
+    const pane = useSessionsStore.getState().panes['session-1']
+    expect(pane?.remoteSelected).toBe('models.yml')
+    expect(pane?.remoteFilter).toBe('')
+  })
+
+  it('opens a folder itself, tidied and with ~ expanded to where the session landed', async () => {
+    useSessionsStore.getState().upsert(session)
+    ANSWERS.session_stat = entry('logs', 'dir')
+    const { host } = await mount()
+
+    await goTo(host, 'remote', '~/releases/../logs/')
+
+    expect(calls('session_list_dir')).toEqual([{ id: 'session-1', path: '/home/deploy/logs' }])
+    expect(useSessionsStore.getState().panes['session-1']?.remoteSelected).toBeNull()
+  })
+
+  it('does the same on this Mac', async () => {
+    useSessionsStore.getState().upsert(session)
+    ANSWERS.local_stat = { ...entry('app.json', 'file'), path: '/home/tester/app.json' }
+    const { host } = await mount()
+
+    await goTo(host, 'local', '~/projects/app.json')
+
+    expect(calls('local_stat')).toEqual([{ path: '/home/tester/projects/app.json' }])
+    expect(calls('local_list_dir')).toContainEqual({ path: '/home/tester/projects' })
+    const pane = useSessionsStore.getState().panes['session-1']
+    expect(pane?.localPath).toBe('/home/tester/projects')
+    expect(pane?.localSelected).toBe('app.json')
+  })
+
+  // A typo should cost a keystroke, not the place you were in.
+  it('stays put and keeps the text when nothing is there', async () => {
+    useSessionsStore.getState().upsert(session)
+    ANSWERS.session_stat = null
+    const { host } = await mount()
+
+    await goTo(host, 'remote', '/home/deploy/nope')
+
+    expect(calls('session_list_dir')).toEqual([])
+    expect(useSessionsStore.getState().panes['session-1']?.remoteFilter).toBe(
+      '/home/deploy/nope',
+    )
+    expect(useUiStore.getState().toasts.map((t) => t.text)).toEqual([
+      'Nothing at /home/deploy/nope',
+    ])
+  })
+
+  // No name contains a slash, so filtering by one only ever emptied the pane.
+  it('does not filter the listing while it is being typed', async () => {
+    useSessionsStore.getState().upsert(session)
+    useSessionsStore.getState().setListing({
+      session: 'session-1',
+      path: '/home/deploy',
+      request: 1,
+      at: '2026-09-07T12:00:00Z',
+      entries: [entry('README.md', 'file')],
+    })
+    const { host } = await mount()
+
+    act(() => {
+      useSessionsStore.getState().patchPane('session-1', { remoteFilter: '/home/de' })
+    })
+
+    // The column header is drawn only over rows; the empty state replaces it.
+    expect(host.querySelector('.pane--remote .cols')).not.toBeNull()
+    expect(host.querySelector('.pane--remote .searchbox__go')).not.toBeNull()
+
+    act(() => {
+      useSessionsStore.getState().patchPane('session-1', { remoteFilter: 'zzz' })
+    })
+    expect(host.querySelector('.pane--remote .cols')).toBeNull()
+    expect(host.querySelector('.pane--remote .searchbox__go')).toBeNull()
   })
 })
 

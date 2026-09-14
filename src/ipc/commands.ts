@@ -52,6 +52,9 @@ export const commands = {
   sessionReconnect: (id: string) => invoke<Unit>('session_reconnect', { id }),
   sessionListDir: (id: string, path: string) =>
     invoke<RemoteEntry[]>('session_list_dir', { id, path }),
+  /** What is at a path, following a link; null when nothing is. */
+  sessionStat: (id: string, path: string) =>
+    invoke<RemoteEntry | null>('session_stat', { id, path }),
   /** Walks a remote folder to total it up. Slow by nature: one listing per directory. */
   sessionMeasure: (id: string, path: string) =>
     invoke<DirSize>('session_measure', { id, path }),
@@ -63,6 +66,8 @@ export const commands = {
   sessionLogs: (id: string, limit = 200) => invoke<LogLine[]>('session_logs', { id, limit }),
 
   localListDir: (path: string) => invoke<LocalEntry[]>('local_list_dir', { path }),
+  /** A link is described as a link, with its target's kind; null when nothing is there. */
+  localStat: (path: string) => invoke<LocalEntry | null>('local_stat', { path }),
   localMeasure: (path: string) => invoke<DirSize>('local_measure', { path }),
   localDefaultDir: () => invoke<string>('local_default_dir'),
   localRoots: () => invoke<string[]>('local_roots'),

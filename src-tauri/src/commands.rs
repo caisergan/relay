@@ -140,6 +140,17 @@ pub async fn session_list_dir(
     state.engine.list_dir(id, &path).await
 }
 
+/// What is at a remote path, or nothing. The search box asks before it navigates, so a
+/// typed path to a file opens the folder it is in instead of failing to list.
+#[tauri::command]
+pub async fn session_stat(
+    state: State<'_, AppState>,
+    id: SessionId,
+    path: String,
+) -> Result<Option<RemoteEntry>> {
+    state.engine.stat(id, &path).await
+}
+
 /// What a remote folder adds up to, walked on demand.
 ///
 /// Slow by nature — one listing per directory — so the caller shows a pending state
@@ -195,6 +206,14 @@ pub async fn local_list_dir(path: PathBuf) -> Result<Vec<LocalEntry>> {
     tauri::async_runtime::spawn_blocking(move || relay_core::local::list_dir(&path))
         .await
         .map_err(|e| EngineError::protocol(format!("local listing task failed: {e}")))?
+}
+
+/// The same question as `session_stat`, asked of this Mac.
+#[tauri::command]
+pub async fn local_stat(path: PathBuf) -> Result<Option<LocalEntry>> {
+    tauri::async_runtime::spawn_blocking(move || relay_core::local::stat(&path))
+        .await
+        .map_err(|e| EngineError::protocol(format!("local stat task failed: {e}")))?
 }
 
 /// The same for a folder on this Mac. Enumeration blocks, so it runs on a blocking

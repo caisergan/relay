@@ -78,26 +78,7 @@ pub fn list_dir(path: &Path) -> Result<Vec<LocalEntry>> {
             Ok(meta) => meta,
             Err(_) => continue,
         };
-
-        let (kind, target_kind) = if meta.is_symlink() {
-            let target = std::fs::metadata(&entry_path)
-                .ok()
-                .map(|m| kind_of(m.is_dir()));
-            (FileKind::Symlink, target)
-        } else {
-            (kind_of(meta.is_dir()), None)
-        };
-
-        entries.push(LocalEntry {
-            name: name.clone(),
-            path: entry_path,
-            kind,
-            target_kind,
-            size: Bytes(if meta.is_dir() { 0 } else { meta.len() }),
-            modified: meta.modified().ok().map(DateTime::<Utc>::from),
-            hidden: is_hidden(&name, &meta),
-            readonly: meta.permissions().readonly(),
-        });
+        entries.push(describe(entry_path, name, &meta));
     }
 
     entries.sort_by(|a, b| {
@@ -108,6 +89,57 @@ pub fn list_dir(path: &Path) -> Result<Vec<LocalEntry>> {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(entries)
+}
+
+/// What is at `path`, or `None` when nothing is.
+///
+/// For the search box, which has to know whether a typed path is a folder to open or a
+/// file to open the folder of before it moves the pane anywhere. Described exactly as a
+/// listing describes it — a link as the link it is, with its target's kind beside it —
+/// so the pane asks the same question of either answer.
+///
+/// A path that runs *through* a file (`notes.md/more`) is nothing too: there is no such
+/// place, and "not a directory" is only a detail of how the lookup failed.
+pub fn stat(path: &Path) -> Result<Option<LocalEntry>> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(EngineError::from_io(path, &e)),
+    };
+    // A root has no final component, and is its own name.
+    let name = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned();
+    Ok(Some(describe(path.to_path_buf(), name, &meta)))
+}
+
+/// One entry, from metadata read without following a link.
+fn describe(path: PathBuf, name: String, meta: &std::fs::Metadata) -> LocalEntry {
+    let (kind, target_kind) = if meta.is_symlink() {
+        let target = std::fs::metadata(&path).ok().map(|m| kind_of(m.is_dir()));
+        (FileKind::Symlink, target)
+    } else {
+        (kind_of(meta.is_dir()), None)
+    };
+    LocalEntry {
+        hidden: is_hidden(&name, meta),
+        name,
+        path,
+        kind,
+        target_kind,
+        size: Bytes(if meta.is_dir() { 0 } else { meta.len() }),
+        modified: meta.modified().ok().map(DateTime::<Utc>::from),
+        readonly: meta.permissions().readonly(),
+    }
 }
 
 /// What a folder adds up to.
@@ -309,6 +341,42 @@ mod tests {
     fn a_missing_directory_maps_to_not_found_for_the_designed_pane_state() {
         let err = list_dir(Path::new("/definitely/not/here")).unwrap_err();
         assert!(matches!(err, EngineError::NotFound { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn stat_describes_a_file_and_a_folder_as_a_listing_would() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.md"), b"hello").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+
+        let file = stat(&dir.path().join("notes.md")).unwrap().unwrap();
+        assert_eq!(file.name, "notes.md");
+        assert_eq!(file.kind, FileKind::File);
+        assert_eq!(file.size, Bytes(5));
+        let folder = stat(&dir.path().join("sub")).unwrap().unwrap();
+        assert_eq!(folder.kind, FileKind::Dir);
+    }
+
+    /// A typo in the search box is an answer, not a fault: the pane stays where it was.
+    #[test]
+    fn stat_of_nothing_is_none_even_through_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.md"), b"x").unwrap();
+        assert_eq!(stat(&dir.path().join("nope")).unwrap(), None);
+        assert_eq!(stat(&dir.path().join("notes.md/more")).unwrap(), None);
+    }
+
+    /// The pane opens a linked folder, rather than selecting it as if it were a file.
+    #[cfg(unix)]
+    #[test]
+    fn stat_of_a_linked_folder_says_where_it_leads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+
+        let link = stat(&dir.path().join("link")).unwrap().unwrap();
+        assert_eq!(link.kind, FileKind::Symlink);
+        assert_eq!(link.target_kind, Some(FileKind::Dir));
     }
 
     /// The other half of the pair the breadcrumb's error panes switch on. The mapping

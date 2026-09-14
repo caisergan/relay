@@ -1,5 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 
 import { DefaultFolderIcon, FileIcon, getIconForFolder } from '@react-symbols/icons/utils'
 
@@ -254,6 +254,20 @@ export function FileList({
     estimateSize: () => rowHeight,
     overscan: 12,
   })
+
+  /** A new selection is scrolled into view. A path typed into the search box can select
+   * a file hundreds of rows down, and a selection nobody can see answers nothing. Once
+   * per selection, not on every change of rows: a refresh or a re-sort scrolling back
+   * to it would take the listing away from wherever it was being read. */
+  const revealed = useRef<string | null>(null)
+  useEffect(() => {
+    if (loading || selected === revealed.current) return
+    const index = selected === null ? -1 : rows.findIndex((row) => row.name === selected)
+    // Not listed yet — the listing it belongs to is still on its way.
+    if (selected !== null && index < 0) return
+    revealed.current = selected
+    if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' })
+  }, [loading, rows, selected, virtualizer])
 
   /** Rendered by both the populated and the empty listing: an empty directory is a
    * perfectly good destination, and is in fact the one most in need of being told it

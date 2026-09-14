@@ -359,6 +359,21 @@
 .searchbox--pane input {
   font-size: 12px;
 }
+/* Going to a typed path, for whoever reaches for the pointer rather than Return. Drawn
+   only while the box holds a path, so the filter looks the way it always has. */
+.searchbox__go {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--signal);
+  background: var(--signal-soft);
+}
 
 .sidebar__list {
   flex: 1;
