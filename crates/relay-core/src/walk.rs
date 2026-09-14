@@ -111,6 +111,12 @@ async fn enumerate(walk: &Walk) -> Result<u32> {
     }];
     let mut batch: Vec<JobSpec> = Vec::with_capacity(CHUNK);
 
+    // The folder itself, before anything inside it. Subdirectories are created as the
+    // walk reaches them, and creating one made the root along the way — but only for a
+    // folder that *has* a subdirectory. A folder holding nothing but files never got a
+    // directory of its own, and every file in it failed to open its partial there.
+    walk.make_dir(Path::new("")).await?;
+
     while let Some(dir) = frontier.pop() {
         if walk.cancel.is_cancelled() {
             return Err(EngineError::Cancelled);

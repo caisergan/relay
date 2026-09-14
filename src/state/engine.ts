@@ -75,15 +75,36 @@ function applyEvent(event: EngineEvent): void {
         // Folders only, and only when they carried something. One toast for a
         // directory is useful; one per file in it is what a queue drawer is for.
         if (now.kind === 'done' && !now.skipped && event.job.kind === 'folder') {
-          const at = event.job.localPath
-          ui.toast('ok', `${name} finished.`, {
-            label: 'Reveal',
-            run: () => {
-              commands
-                .revealInFolder(at)
-                .catch((error: unknown) => ui.toast('error', faultText(error)))
-            },
-          })
+          // A folder is done when every file in it has *stopped*, which is not the same
+          // as every file having arrived. Saying "finished" over failures — with a
+          // Reveal for a folder that may not exist — is what made them look like noise.
+          const children = Object.values(queue.jobs).filter(
+            (job) => job.parent === event.job.id,
+          )
+          const failed = children.filter((job) => job.state.kind === 'failed').length
+          if (failed > 0) {
+            ui.toast(
+              'error',
+              `${name}: ${failed} of ${children.length} ${children.length === 1 ? 'file' : 'files'} failed.`,
+              {
+                label: 'Show',
+                run: () => {
+                  ui.toggleDrawer(true)
+                  ui.setDrawerTab('failed')
+                },
+              },
+            )
+          } else {
+            const at = event.job.localPath
+            ui.toast('ok', `${name} finished.`, {
+              label: 'Reveal',
+              run: () => {
+                commands
+                  .revealInFolder(at)
+                  .catch((error: unknown) => ui.toast('error', faultText(error)))
+              },
+            })
+          }
         }
       }
       break

@@ -754,6 +754,121 @@ async fn a_folder_download_creates_directories_that_hold_no_files() {
     );
 }
 
+/// Queue one folder and wait for it to stop. Returns the folder's final state and the
+/// states of the files inside it.
+async fn transfer_folder(
+    h: &Harness,
+    direction: Direction,
+    remote_path: &str,
+    local_path: PathBuf,
+) -> (JobState, Vec<JobState>) {
+    let cfg = server();
+    let server_id = cfg.id;
+    let session = h.engine.open_session(cfg).expect("session opens");
+    let parent = h
+        .engine
+        .enqueue(
+            Uuid::new_v4(),
+            vec![TransferItem {
+                session,
+                server_id,
+                direction,
+                remote_path: remote_path.into(),
+                local_path,
+                is_dir: true,
+            }],
+        )
+        .await
+        .expect("accepted")[0];
+    let state = poll_job(h, parent, |state| state.is_terminal()).await;
+    let children = h
+        .engine
+        .queue()
+        .snapshot()
+        .await
+        .into_iter()
+        .filter(|j| j.parent == Some(parent))
+        .map(|j| j.state)
+        .collect();
+    (state, children)
+}
+
+/// A folder holding files and no subdirectory. Making a subdirectory was the only thing
+/// that ever created the destination root, so a flat folder had nowhere to put its
+/// files, and every one of them failed to open its partial with "does not exist".
+#[tokio::test]
+async fn a_folder_download_of_only_files_creates_the_folder_itself() {
+    let h = harness(MockOptions::default()).await;
+    h.fs.write_file("/srv/flat/index.html", b"<h1>flat</h1>".to_vec());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let destination = dir.path().join("flat");
+
+    let (state, children) =
+        transfer_folder(&h, Direction::Down, "/srv/flat", destination.clone()).await;
+
+    assert!(
+        matches!(state, JobState::Done { skipped: false, .. }),
+        "{state:?}"
+    );
+    assert_eq!(children.len(), 1);
+    assert!(
+        children
+            .iter()
+            .all(|c| matches!(c, JobState::Done { skipped: false, .. })),
+        "every file arrived: {children:?}"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("index.html")).expect("index.html"),
+        b"<h1>flat</h1>"
+    );
+}
+
+/// The same hole with nothing in it at all: the folder was reported finished, and
+/// nothing was ever made.
+#[tokio::test]
+async fn a_folder_download_of_an_empty_folder_still_creates_it() {
+    let h = harness(MockOptions::default()).await;
+    h.fs.mkdir_all("/srv/nothing");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let destination = dir.path().join("nothing");
+
+    transfer_folder(&h, Direction::Down, "/srv/nothing", destination.clone()).await;
+
+    assert!(
+        destination.is_dir(),
+        "the empty folder exists at the destination"
+    );
+}
+
+/// The upload direction had the same gap on the server side. Note what this can and
+/// cannot catch: the mock creates missing parents when a file is written, where a real
+/// SFTP server refuses, so this guards the outcome rather than reproducing the failure.
+#[tokio::test]
+async fn a_folder_upload_of_only_files_creates_the_folder_itself() {
+    let h = harness(MockOptions::default()).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("flat");
+    std::fs::create_dir_all(&source).expect("source");
+    std::fs::write(source.join("index.html"), b"<h1>up</h1>").expect("seed");
+
+    let (state, children) = transfer_folder(&h, Direction::Up, "/var/www/flat", source).await;
+
+    assert!(
+        matches!(state, JobState::Done { skipped: false, .. }),
+        "{state:?}"
+    );
+    assert!(
+        children
+            .iter()
+            .all(|c| matches!(c, JobState::Done { skipped: false, .. })),
+        "every file arrived: {children:?}"
+    );
+    assert_eq!(
+        h.fs.read_file("/var/www/flat/index.html").as_deref(),
+        Some(&b"<h1>up</h1>"[..]),
+    );
+}
+
 /// Poll one job until a condition holds. The queue's snapshot is asynchronous, so this
 /// cannot go through `until`.
 async fn poll_job(h: &Harness, job: Uuid, done: impl Fn(&JobState) -> bool) -> JobState {
