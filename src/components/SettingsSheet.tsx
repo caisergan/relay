@@ -2,7 +2,7 @@ import { open as openFolderDialog } from '@tauri-apps/plugin-dialog'
 import { useEffect, useState } from 'react'
 
 import { commands } from '@/ipc/commands'
-import type { ConflictAction, Density, Settings, Theme } from '@/ipc/gen'
+import type { ConflictAction, Density, LaunchMode, Settings, Theme } from '@/ipc/gen'
 import { faultText } from '@/lib/errors'
 import { useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
@@ -91,6 +91,21 @@ export function SettingsSheet() {
                   ['compact', 'Compact'],
                 ]}
                 onChange={(density) => save({ ...settings, density })}
+              />
+            </Row>
+
+            <Row
+              label="When Relay opens"
+              hint="Start fresh, or reopen the servers you had open, each pane in the folder you left it in."
+            >
+              <Choice<LaunchMode>
+                // Absent in a settings file written before the option existed.
+                value={settings.onLaunch ?? 'fresh'}
+                options={[
+                  ['fresh', 'Start fresh'],
+                  ['restore', 'Where I left off'],
+                ]}
+                onChange={(onLaunch) => save({ ...settings, onLaunch })}
               />
             </Row>
 

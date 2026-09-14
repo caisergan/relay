@@ -115,10 +115,19 @@ export function SessionView({ sessionId }: Props) {
     [patchPane, sessionId],
   )
 
+  /// Where the local pane starts: the folder a restored tab was in, while it is still a
+  /// folder, and home otherwise. A saved folder that has since gone opens home rather
+  /// than a pane announcing that something is missing.
+  const startServer = session?.serverId
   useEffect(() => {
-    if (pane.localPath) return
-    void commands.localDefaultDir().then(loadLocal)
-  }, [pane.localPath, loadLocal])
+    if (pane.localPath || !startServer) return
+    const saved = useSessionsStore.getState().claimLocalStart(sessionId, startServer)
+    void (async () => {
+      const found = saved ? await commands.localStat(saved).catch(() => null) : null
+      const stillThere = found !== null && (found.kind === 'dir' || found.targetKind === 'dir')
+      await loadLocal(saved && stillThere ? saved : await commands.localDefaultDir())
+    })()
+  }, [pane.localPath, loadLocal, sessionId, startServer])
 
   // Roots are per machine, not per session, but the menu belongs to a pane; fetching
   // once per mount keeps `local_roots` off the navigation path.
@@ -347,8 +356,7 @@ export function SessionView({ sessionId }: Props) {
   /// nothing at all leaves the pane where it was with the path still in the box — a typo
   /// should cost a keystroke, not the place you were in.
   ///
-  /// `~` on the server is where the session landed: the account's home, unless the
-  /// server's settings name a starting folder. SFTP has no tilde of its own to ask.
+  /// `~` on the server is the account's home, as the server resolved it on connect.
   const goTo = async (side: 'local' | 'remote', text: string) => {
     try {
       const home =

@@ -305,10 +305,10 @@ impl Protocol for SftpBackend {
             .await
             .map_err(sftp_error)?;
 
-        let home = match &cfg.initial_remote_path {
-            Some(path) => path.clone(),
-            None => sftp.canonicalize(".").await.map_err(sftp_error)?,
-        };
+        // The account's own home, whatever the server's settings name as a starting
+        // folder: a session lands in that folder but falls back here when it is gone,
+        // and the search box's `~` means this.
+        let home = sftp.canonicalize(".").await.map_err(sftp_error)?;
 
         self.handle = Some(handle);
         self.sftp = Some(sftp);

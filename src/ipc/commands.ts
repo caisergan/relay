@@ -22,6 +22,7 @@ import type {
   ServerInfo,
   Settings,
   TransferItem,
+  Workspace,
 } from './gen'
 
 /** Rust's `()` arrives as JSON `null`. */
@@ -32,7 +33,10 @@ export const commands = {
   serversSave: (config: ServerConfig) => invoke<ServerConfig>('servers_save', { config }),
   serversDelete: (id: string) => invoke<Unit>('servers_delete', { id }),
 
-  sessionOpen: (serverId: string) => invoke<string>('session_open', { serverId }),
+  /** `startPath` opens the remote pane somewhere other than the server's own starting
+   *  folder — a restored tab. The engine falls back to home when it is gone. */
+  sessionOpen: (serverId: string, startPath?: string | null) =>
+    invoke<string>('session_open', { serverId, startPath: startPath ?? null }),
   /** Connect, report what the peer said, hang up. Uses the real host-key sheet.
    * `password`/`passphrase` are what is typed but not yet saved, so a credential can
    * be checked without committing it to the keychain first. */
@@ -87,6 +91,9 @@ export const commands = {
 
   settingsGet: () => invoke<Settings>('settings_get'),
   settingsSet: (settings: Settings) => invoke<Settings>('settings_set', { settings }),
+
+  workspaceGet: () => invoke<Workspace>('workspace_get'),
+  workspaceSet: (workspace: Workspace) => invoke<Unit>('workspace_set', { workspace }),
 
   engineSubscribe: (channel: Channel<EngineEnvelope>) =>
     invoke<string>('engine_subscribe', { channel }),

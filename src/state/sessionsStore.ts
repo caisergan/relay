@@ -80,6 +80,13 @@ interface SessionsState {
   /** The dotfile setting, applied to panes opened from now on. A pane already on
    * screen keeps its own toggle: that is the person's more recent word about it. */
   showHiddenDefault: boolean
+  /** Local folders restored tabs open in, by server and in tab order. A server can have
+   * two tabs, and the second must not open in the first one's folder. */
+  localStarts: Record<string, (string | null)[]>
+  /** The folder each session was handed, so asking again gets the same answer: React
+   * runs a mount effect twice in development, and the second ask would otherwise take
+   * the next tab's folder. */
+  localClaims: Record<string, string | null>
 
   replaceAll: (sessions: Session[], listings: ListingSnapshot[]) => void
   upsert: (session: Session) => void
@@ -90,17 +97,39 @@ interface SessionsState {
   activate: (id: string | null) => void
   setShowHiddenDefault: (show: boolean) => void
   patchPane: (id: string, patch: Partial<PaneState>) => void
+  queueLocalStart: (serverId: string, path: string | null) => void
+  /** The local folder a new session of `serverId` should open in, or null for home. */
+  claimLocalStart: (sessionId: string, serverId: string) => string | null
 }
 
-export const useSessionsStore = create<SessionsState>((set) => ({
+export const useSessionsStore = create<SessionsState>((set, get) => ({
   sessions: {},
   order: [],
   activeId: null,
   listings: {},
   panes: {},
   showHiddenDefault: true,
+  localStarts: {},
+  localClaims: {},
 
   setShowHiddenDefault: (showHiddenDefault) => set({ showHiddenDefault }),
+
+  queueLocalStart: (serverId, path) =>
+    set((s) => ({
+      localStarts: { ...s.localStarts, [serverId]: [...(s.localStarts[serverId] ?? []), path] },
+    })),
+
+  claimLocalStart: (sessionId, serverId) => {
+    const s = get()
+    const claimed = s.localClaims[sessionId]
+    if (claimed !== undefined) return claimed
+    const [first = null, ...rest] = s.localStarts[serverId] ?? []
+    set({
+      localStarts: { ...s.localStarts, [serverId]: rest },
+      localClaims: { ...s.localClaims, [sessionId]: first },
+    })
+    return first
+  },
 
   replaceAll: (sessions, listings) =>
     set((s) => {

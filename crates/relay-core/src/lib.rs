@@ -48,6 +48,7 @@ pub mod store;
 pub mod trust;
 pub mod walk;
 pub mod wire;
+pub mod workspace;
 
 pub use coordinator::{Coordinator, EngineEnvelope, EngineSnapshot, Subscription};
 pub use engine::{Engine, EnginePaths};

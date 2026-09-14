@@ -196,6 +196,16 @@ skipped: boolean } |
  */
 { kind: "cancelled"; at: string };
 
+/**  What the app opens to. */
+export type LaunchMode = 
+/**  The first saved server, in its own starting folders — the app as it always opened. */
+"fresh" | 
+/**
+ *  The tabs that were open when the app last closed, each pane in the folder it was
+ *  in. See [`crate::workspace`].
+ */
+"restore";
+
 /**  A directory listing as currently known for a session's remote pane. */
 export type ListingSnapshot = {
 	session: string,
@@ -364,7 +374,10 @@ export type ServerInfo = {
 	mac: string | null,
 	hostKeyAlgo: string | null,
 	hostKeySha256: string | null,
-	/**  Directory the session landed in. */
+	/**
+	 *  The account's home directory. A session lands here unless it was asked to start
+	 *  somewhere else, and falls back here when that folder cannot be opened.
+	 */
 	homePath: string,
 };
 
@@ -394,6 +407,12 @@ export type Settings = {
 	downloadDir: string | null,
 	/**  Show dotfiles and Windows-hidden files in both panes. */
 	showHidden: boolean,
+	/**
+	 *  What a launch opens. Defaulted when absent, because every settings file written
+	 *  before this existed lacks it — and a file that fails to parse loses *every*
+	 *  setting, not only the new one.
+	 */
+	onLaunch?: LaunchMode,
 };
 
 export type SnapshotError = 
@@ -427,4 +446,19 @@ export type TransferItem = {
 	 *  indication of what they are.
 	 */
 	isDir: boolean,
+};
+
+export type Workspace = {
+	/**  In tab order. */
+	tabs: WorkspaceTab[],
+};
+
+export type WorkspaceTab = {
+	serverId: string,
+	/**  The local pane's folder; `None` if it had not listed one yet. */
+	localPath: string | null,
+	/**  The remote pane's folder; `None` if the session had not landed yet. */
+	remotePath: string | null,
+	/**  The tab that was showing. */
+	active: boolean,
 };

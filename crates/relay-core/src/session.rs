@@ -641,10 +641,10 @@ impl SessionActor {
             }
         };
 
-        let home = cfg
-            .initial_remote_path
-            .clone()
-            .unwrap_or_else(|| info.home_path.clone());
+        let home = info.home_path.clone();
+        // Where the tab asked to start: the server's own starting folder, or the folder a
+        // restored tab was in. Home is the fallback below.
+        let wanted = cfg.initial_remote_path.clone().filter(|path| *path != home);
         let max_lanes = MAX_SESSION_LANES.min(self.backend.capabilities().max_lanes.max(1));
         self.out.log(LogKind::Response, "Authenticated.").await;
         self.out
@@ -658,9 +658,31 @@ impl SessionActor {
 
         // The landing directory, so a fresh tab is not empty while the user waits, and
         // a reconnected one comes back where it was rather than blank.
+        //
+        // The folder asked for first, then home. A folder deleted or renamed since it was
+        // saved used to land the pane on no listing at all: a tab that showed nothing and
+        // said nothing about why.
         let cancel = self.cancel.clone();
-        if let Ok(entries) =
-            with_deadline(self.backend.list(&home), "list", OP_DEADLINE, &cancel).await
+        let mut landed = false;
+        if let Some(path) = wanted {
+            match with_deadline(self.backend.list(&path), "list", OP_DEADLINE, &cancel).await {
+                Ok(entries) => {
+                    self.out.listing(&path, entries).await;
+                    landed = true;
+                }
+                Err(err) => {
+                    self.out
+                        .log(
+                            LogKind::Status,
+                            format!("Could not open {path} ({err}); starting in {home}."),
+                        )
+                        .await;
+                }
+            }
+        }
+        if !landed
+            && let Ok(entries) =
+                with_deadline(self.backend.list(&home), "list", OP_DEADLINE, &cancel).await
         {
             self.out.listing(&home, entries).await;
         }

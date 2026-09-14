@@ -1,6 +1,6 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { JobSnapshot, Session } from '@/ipc/gen'
 import { emptyStats, useQueueStore } from '@/state/queueStore'
@@ -31,7 +31,11 @@ const ANSWERS: Record<string, unknown> = {
     defaultConflict: null,
     downloadDir: null,
     showHidden: true,
+    onLaunch: 'fresh',
   },
+  workspace_get: { tabs: [] },
+  // A session id, where the catch-all would hand back an array for something to activate.
+  session_open: 'session-opened',
 }
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -419,9 +423,13 @@ describe('pane history', () => {
 })
 
 describe('what the app opens on launch', () => {
+  const settings = ANSWERS.settings_get as Record<string, unknown>
+
   beforeEach(() => {
     invoked.mockClear()
     ANSWERS.servers_list = []
+    ANSWERS.settings_get = { ...settings, onLaunch: 'fresh' }
+    ANSWERS.workspace_get = { tabs: [] }
     useServersStore.setState({ servers: [], loading: false, loaded: false })
     useSessionsStore.setState({
       sessions: {},
@@ -429,24 +437,53 @@ describe('what the app opens on launch', () => {
       activeId: null,
       listings: {},
       panes: {},
+      localStarts: {},
+      localClaims: {},
     })
   })
+
+  // A restore queues local folders for sessions that never mount here, and the roots
+  // `mount` leaves behind would claim them in whichever describe runs next.
+  afterEach(() => {
+    ANSWERS.settings_get = { ...settings, onLaunch: 'fresh' }
+    ANSWERS.workspace_get = { tabs: [] }
+    useSessionsStore.setState({ localStarts: {}, localClaims: {} })
+  })
+
+  /** The launch reads the settings and the saved workspace before it opens anything. */
+  const settle = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+  const opened = () => invoked.mock.calls.filter(([command]) => command === 'session_open')
+
+  const saved = {
+    tabs: [
+      {
+        serverId: 'server-1',
+        localPath: '/home/tester/site',
+        remotePath: '/var/www',
+        active: true,
+      },
+    ],
+  }
 
   it('opens the saved server rather than the connect form', async () => {
     ANSWERS.servers_list = [savedServer()]
 
     const { host } = await mount()
+    await settle()
 
-    expect(invoked.mock.calls.filter(([command]) => command === 'session_open')).toEqual([
-      ['session_open', { serverId: 'server-1' }],
-    ])
+    expect(opened()).toEqual([['session_open', { serverId: 'server-1', startPath: null }]])
     expect(host.querySelector('.sidebar')).not.toBeNull()
   })
 
   it('still shows the connect form when nothing is saved', async () => {
     const { host } = await mount()
+    await settle()
 
-    expect(invoked.mock.calls.some(([command]) => command === 'session_open')).toBe(false)
+    expect(opened()).toEqual([])
     expect(host.querySelector('.connect')).not.toBeNull()
   })
 
@@ -457,8 +494,51 @@ describe('what the app opens on launch', () => {
     useSessionsStore.getState().upsert(session)
 
     await mount()
+    await settle()
 
-    expect(invoked.mock.calls.some(([command]) => command === 'session_open')).toBe(false)
+    expect(opened()).toEqual([])
+  })
+
+  it('reopens the tabs that were open, in their folders, when set to continue', async () => {
+    ANSWERS.servers_list = [savedServer()]
+    ANSWERS.settings_get = { ...settings, onLaunch: 'restore' }
+    ANSWERS.workspace_get = saved
+
+    await mount()
+    await settle()
+
+    expect(opened()).toEqual([
+      ['session_open', { serverId: 'server-1', startPath: '/var/www' }],
+    ])
+    // The local folder is waiting for the session's pane, however early it mounts.
+    expect(useSessionsStore.getState().claimLocalStart('restored', 'server-1')).toBe(
+      '/home/tester/site',
+    )
+  })
+
+  it('starts fresh when set to, whatever was left open', async () => {
+    ANSWERS.servers_list = [savedServer()]
+    ANSWERS.workspace_get = saved
+
+    await mount()
+    await settle()
+
+    expect(opened()).toEqual([['session_open', { serverId: 'server-1', startPath: null }]])
+  })
+
+  // Recording starts with an empty tab strip. Before the launch has opened anything, that
+  // empty strip would be written over the workspace it was about to restore.
+  it('records nothing until the launch has opened what it is going to', async () => {
+    ANSWERS.servers_list = [savedServer()]
+    ANSWERS.settings_get = { ...settings, onLaunch: 'restore' }
+    ANSWERS.workspace_get = saved
+
+    await mount()
+    await settle()
+
+    const commands = invoked.mock.calls.map(([command]) => command as string)
+    expect(commands).toContain('workspace_set')
+    expect(commands.indexOf('workspace_set')).toBeGreaterThan(commands.indexOf('session_open'))
   })
 })
 
@@ -538,7 +618,7 @@ describe('clicking a server card', () => {
     act(() => card?.click())
 
     expect(invoked.mock.calls.filter(([command]) => command === 'session_open')).toEqual([
-      ['session_open', { serverId: 'server-1' }],
+      ['session_open', { serverId: 'server-1', startPath: null }],
     ])
   })
 
@@ -558,7 +638,7 @@ describe('clicking a server card', () => {
     })
 
     expect(invoked.mock.calls.filter(([command]) => command === 'session_open')).toEqual([
-      ['session_open', { serverId: 'server-1' }],
+      ['session_open', { serverId: 'server-1', startPath: null }],
     ])
   })
 

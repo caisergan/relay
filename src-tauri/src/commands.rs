@@ -18,6 +18,7 @@ use relay_core::model::{
 };
 use relay_core::secrets::{Credentials, KeyringSecrets, SecretKind, SecretStatus};
 use relay_core::settings::Settings;
+use relay_core::workspace::Workspace;
 use tauri::State;
 use tauri::ipc::Channel;
 use uuid::Uuid;
@@ -59,14 +60,25 @@ pub async fn servers_delete(state: State<'_, AppState>, id: ServerId) -> Result<
 // ---------------------------------------------------------------- sessions
 
 #[tauri::command]
-pub async fn session_open(state: State<'_, AppState>, server_id: ServerId) -> Result<SessionId> {
-    let config = state
-        .engine
-        .servers()
-        .get(server_id)
-        .ok_or_else(|| EngineError::NotFound {
-            path: server_id.to_string(),
-        })?;
+/// Open a session. `start_path` lands the remote pane somewhere other than the server's
+/// own starting folder, which is how a restored tab comes back where it was; the session
+/// falls back to the account's home when that folder is gone.
+pub async fn session_open(
+    state: State<'_, AppState>,
+    server_id: ServerId,
+    start_path: Option<String>,
+) -> Result<SessionId> {
+    let mut config =
+        state
+            .engine
+            .servers()
+            .get(server_id)
+            .ok_or_else(|| EngineError::NotFound {
+                path: server_id.to_string(),
+            })?;
+    if let Some(path) = start_path {
+        config.initial_remote_path = Some(path);
+    }
     state.engine.open_session(config)
 }
 
@@ -291,6 +303,19 @@ pub async fn settings_get(state: State<'_, AppState>) -> Result<Settings> {
 #[tauri::command]
 pub async fn settings_set(state: State<'_, AppState>, settings: Settings) -> Result<Settings> {
     state.engine.set_settings(settings).await
+}
+
+// ---------------------------------------------------------------- workspace
+
+#[tauri::command]
+pub async fn workspace_get(state: State<'_, AppState>) -> Result<Workspace> {
+    Ok(state.workspace.get())
+}
+
+/// Recorded as the interface changes rather than at exit; see `relay_core::workspace`.
+#[tauri::command]
+pub async fn workspace_set(state: State<'_, AppState>, workspace: Workspace) -> Result<()> {
+    state.workspace.set(workspace)
 }
 
 // ---------------------------------------------------------------- engine stream

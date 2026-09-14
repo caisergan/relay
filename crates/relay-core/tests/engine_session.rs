@@ -869,6 +869,37 @@ async fn a_folder_upload_of_only_files_creates_the_folder_itself() {
     );
 }
 
+/// The folder a session lands in, from the first listing it announces.
+async fn landing(h: &Harness, starting_folder: &str) -> String {
+    let sub = h.hub.subscribe();
+    let cfg = ServerConfig {
+        initial_remote_path: Some(starting_folder.into()),
+        ..server()
+    };
+    h.engine.open_session(cfg).expect("session opens");
+    until("the landing listing", || {
+        snapshot(&h.hub, &sub).listings.into_iter().next()
+    })
+    .await
+    .path
+}
+
+/// A tab reopened in a folder that has gone since — deleted, or renamed — lands in the
+/// account's home, where it used to land on no listing at all. The same holds for a
+/// server whose own starting folder no longer exists.
+#[tokio::test]
+async fn a_starting_folder_that_is_gone_lands_in_home_instead() {
+    let h = harness(MockOptions::default()).await;
+    assert_eq!(landing(&h, "/srv/deleted-since").await, "/home/deploy");
+}
+
+/// The fallback must not turn every restored tab into a tab in home.
+#[tokio::test]
+async fn a_starting_folder_that_exists_is_where_the_session_lands() {
+    let h = harness(MockOptions::default()).await;
+    assert_eq!(landing(&h, "/var/www").await, "/var/www");
+}
+
 /// Poll one job until a condition holds. The queue's snapshot is asynchronous, so this
 /// cannot go through `until`.
 async fn poll_job(h: &Harness, job: Uuid, done: impl Fn(&JobState) -> bool) -> JobState {

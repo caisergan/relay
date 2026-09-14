@@ -192,7 +192,8 @@ pub struct ServerInfo {
     pub mac: Option<String>,
     pub host_key_algo: Option<String>,
     pub host_key_sha256: Option<String>,
-    /// Directory the session landed in.
+    /// The account's home directory. A session lands here unless it was asked to start
+    /// somewhere else, and falls back here when that folder cannot be opened.
     pub home_path: String,
 }
 

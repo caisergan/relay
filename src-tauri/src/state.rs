@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use relay_core::engine::{Engine, EnginePaths};
 use relay_core::hub::EngineHub;
+use relay_core::workspace::WorkspaceStore;
 use tauri::Manager;
 use tauri::async_runtime::JoinHandle;
 use tokio::sync::RwLock;
@@ -19,6 +20,10 @@ pub struct AppState {
     /// Tauri's `JoinHandle`, not tokio's: they are distinct types and the shell spawns
     /// through Tauri's runtime.
     pub forwarders: RwLock<HashMap<Uuid, JoinHandle<()>>>,
+    /// The open tabs and their folders, for the "continue where I left off" launch.
+    /// The shell's rather than the engine's: the engine knows sessions, but not which
+    /// folder the local pane was in or which tab was showing.
+    pub workspace: WorkspaceStore,
 }
 
 impl AppState {
@@ -36,12 +41,16 @@ impl AppState {
             hub,
             engine,
             forwarders: RwLock::new(HashMap::new()),
+            workspace: WorkspaceStore::load(data_dir(app).join("workspace.json")),
         })
     }
 
     /// Stop every forwarder, close every session, and let the engine drain. Called on
     /// window close, before the process goes away.
     pub async fn shutdown(&self) {
+        // First, before anything closes: every session this is about to end would
+        // otherwise be reported as a closed tab, and recorded as the place to return to.
+        self.workspace.freeze();
         let handles: Vec<JoinHandle<()>> = self
             .forwarders
             .write()
@@ -62,14 +71,18 @@ impl AppState {
 /// missing app-data directory is an unusual environment, not a reason to make the app
 /// unusable. Both stores tolerate a path they cannot write, and say so in the log.
 fn paths(app: &tauri::AppHandle) -> EnginePaths {
-    let dir = app.path().app_data_dir().unwrap_or_else(|err| {
-        tracing::warn!(%err, "no app data directory; falling back to the working directory");
-        std::path::PathBuf::from(".")
-    });
+    let dir = data_dir(app);
     EnginePaths {
         servers: dir.join("servers.json"),
         trust: dir.join("trust.json"),
         queue: dir.join("relay.sqlite"),
         settings: dir.join("settings.json"),
     }
+}
+
+fn data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    app.path().app_data_dir().unwrap_or_else(|err| {
+        tracing::warn!(%err, "no app data directory; falling back to the working directory");
+        std::path::PathBuf::from(".")
+    })
 }

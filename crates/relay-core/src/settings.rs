@@ -40,6 +40,18 @@ pub enum Density {
 /// What to do when a transfer's destination already exists. `None` means ask.
 pub type DefaultConflict = Option<ConflictAction>;
 
+/// What the app opens to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum LaunchMode {
+    /// The first saved server, in its own starting folders — the app as it always opened.
+    #[default]
+    Fresh,
+    /// The tabs that were open when the app last closed, each pane in the folder it was
+    /// in. See [`crate::workspace`].
+    Restore,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -52,6 +64,11 @@ pub struct Settings {
     pub download_dir: Option<PathBuf>,
     /// Show dotfiles and Windows-hidden files in both panes.
     pub show_hidden: bool,
+    /// What a launch opens. Defaulted when absent, because every settings file written
+    /// before this existed lacks it — and a file that fails to parse loses *every*
+    /// setting, not only the new one.
+    #[serde(default)]
+    pub on_launch: LaunchMode,
 }
 
 impl Default for Settings {
@@ -63,6 +80,7 @@ impl Default for Settings {
             default_conflict: None,
             download_dir: None,
             show_hidden: false,
+            on_launch: LaunchMode::Fresh,
         }
     }
 }
@@ -207,6 +225,26 @@ mod tests {
             MAX_CONCURRENCY,
             "a file cannot ask for more connections than the slider allows"
         );
+    }
+
+    /// Every existing install has a settings file without the launch setting. Adding a
+    /// field must not turn that file unreadable and quietly reset the rest of it.
+    #[test]
+    fn a_file_from_before_the_launch_setting_keeps_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            br#"{"theme":"dark","density":"compact","concurrency":5,
+                 "defaultConflict":"skip","downloadDir":null,"showHidden":true}"#,
+        )
+        .unwrap();
+
+        let settings = SettingsStore::load(path).get();
+        assert_eq!(settings.theme, Theme::Dark);
+        assert_eq!(settings.concurrency, 5);
+        assert!(settings.show_hidden);
+        assert_eq!(settings.on_launch, LaunchMode::Fresh);
     }
 
     #[test]

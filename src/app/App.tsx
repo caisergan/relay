@@ -13,6 +13,7 @@ import { engineBridge } from '@/state/engine'
 import { useServersStore } from '@/state/serversStore'
 import { useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
+import { recordWorkspace, restoreWorkspace } from '@/state/workspace'
 import { ConnectView } from '@/views/ConnectView'
 import '@/styles/app.css'
 
@@ -56,30 +57,52 @@ export function App() {
     }
   }, [loadServers, setTheme, setDensity, setShowHiddenDefault])
 
-  /** Open the saved server on launch instead of the connect form.
+  /** What a launch opens: the tabs that were open last time, when the setting says to
+   * continue where the person left off, and otherwise the first saved server.
    *
-   * The connect form is for servers Relay does not know yet. Once one is saved, being
-   * asked to type an address that is already in the sidebar is a step with no purpose.
+   * The first saved server rather than the connect form, because the connect form is
+   * for servers Relay does not know yet; being asked to type an address that is already
+   * in the sidebar is a step with no purpose.
    *
    * Fires at most once per run, and the guard is set even when it decides *not* to
    * open: without that, closing the session would immediately reopen it, which is a
    * window you cannot get out of. Adding a first server later does not trigger it
    * either — that flow opens its own session. */
   const launched = useRef(false)
+  const stopRecording = useRef<(() => void) | null>(null)
   useEffect(() => {
     if (launched.current || !serversLoaded) return
     launched.current = true
-    // Something is already open — a restored session — so the pane is not empty and
-    // there is nothing to fill.
-    if (sessionCount > 0) return
-    const first = servers[0]
-    if (!first) return
-    commands.sessionOpen(first.id).catch((error: unknown) => {
-      // A failure lands the user on the connect form, which is where they would have
-      // been anyway; the toast says why rather than leaving it unexplained.
-      toast('error', `Could not open ${first.name}: ${faultText(error)}`)
-    })
+    // Something is already open — the window reloaded over a running engine — so the
+    // pane is not empty and there is nothing to fill.
+    if (sessionCount > 0) {
+      stopRecording.current = recordWorkspace()
+      return
+    }
+    void (async () => {
+      const [settings, workspace] = await Promise.all([
+        commands.settingsGet().catch(() => null),
+        commands.workspaceGet().catch(() => null),
+      ])
+      const restored =
+        settings?.onLaunch === 'restore' &&
+        workspace !== null &&
+        (await restoreWorkspace(workspace, servers))
+      const first = servers[0]
+      if (!restored && first) {
+        await commands.sessionOpen(first.id).catch((error: unknown) => {
+          // A failure lands the user on the connect form, which is where they would
+          // have been anyway; the toast says why rather than leaving it unexplained.
+          toast('error', `Could not open ${first.name}: ${faultText(error)}`)
+        })
+      }
+      // Only now. Until the launch has opened what it is going to, the tab strip is the
+      // empty one every run starts with, and recording it would erase what was just
+      // restored — or what the next launch would have restored.
+      stopRecording.current = recordWorkspace()
+    })()
   }, [serversLoaded, servers, sessionCount, toast])
+  useEffect(() => () => stopRecording.current?.(), [])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

@@ -381,10 +381,7 @@ impl Protocol for MockBackend {
             mac: Some("hmac-sha2-256-etm@openssh.com".into()),
             host_key_algo: Some("ssh-ed25519".into()),
             host_key_sha256: Some("SHA256:mockmockmockmockmockmockmockmockmockmockmoc".into()),
-            home_path: cfg
-                .initial_remote_path
-                .clone()
-                .unwrap_or_else(|| "/home/deploy".into()),
+            home_path: "/home/deploy".into(),
         })
     }
 

@@ -69,6 +69,8 @@ pub fn run() {
             commands::resolve_prompt,
             commands::settings_get,
             commands::settings_set,
+            commands::workspace_get,
+            commands::workspace_set,
             commands::engine_subscribe,
             commands::engine_unsubscribe,
             commands::engine_snapshot,
