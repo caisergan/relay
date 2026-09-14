@@ -1,25 +1,16 @@
 //! Where the person left off: which servers were open, and which folder each pane was in.
 //!
-//! Recorded as it changes rather than at exit, because an exit is not something to rely
-//! on reaching — a force quit, a crash or a power cut runs no shutdown hook. And frozen
-//! at the start of a clean exit, because the exit itself closes every session: left
-//! open, the store would faithfully record a workspace with nothing in it, and that
-//! would be the last thing written.
-//!
 //! Read back only when the launch setting asks for it, but recorded either way, so that
 //! turning the setting on restores the session that just ended rather than the next one.
-//! Like the settings, a missing or unreadable file is an empty workspace and never a
-//! reason not to start.
+//! How it is recorded, and why it is frozen at exit, is [`crate::recorded`].
 
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use crate::error::{EngineError, Result};
 use crate::model::ServerId;
+use crate::recorded::Recorded;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -40,79 +31,8 @@ pub struct WorkspaceTab {
     pub active: bool,
 }
 
-/// `workspace.json`, with the last recorded workspace in front of it.
-pub struct WorkspaceStore {
-    path: PathBuf,
-    current: Mutex<Workspace>,
-    frozen: AtomicBool,
-}
-
-impl WorkspaceStore {
-    pub fn load(path: PathBuf) -> Self {
-        let workspace = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<Workspace>(&bytes).unwrap_or_else(|err| {
-                tracing::warn!(?path, %err, "the workspace is unreadable; starting empty");
-                Workspace::default()
-            }),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Workspace::default(),
-            Err(err) => {
-                tracing::warn!(?path, %err, "the workspace could not be read; starting empty");
-                Workspace::default()
-            }
-        };
-        Self {
-            path,
-            current: Mutex::new(workspace),
-            frozen: AtomicBool::new(false),
-        }
-    }
-
-    /// In-memory only, for tests.
-    pub fn ephemeral() -> Self {
-        Self::load(PathBuf::new())
-    }
-
-    pub fn get(&self) -> Workspace {
-        self.current.lock().expect("workspace poisoned").clone()
-    }
-
-    /// Record the workspace, unless the app is on its way out.
-    ///
-    /// An unchanged workspace is not rewritten: this is called on every navigation, and
-    /// most of those change something other than where the panes are. The lock is held
-    /// across the write so two calls cannot interleave on the temporary file.
-    pub fn set(&self, workspace: Workspace) -> Result<()> {
-        if self.frozen.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        let mut current = self.current.lock().expect("workspace poisoned");
-        if *current == workspace {
-            return Ok(());
-        }
-        self.persist(&workspace)?;
-        *current = workspace;
-        Ok(())
-    }
-
-    /// Stop recording. Called as a clean exit begins; see the module docs.
-    pub fn freeze(&self) {
-        self.frozen.store(true, Ordering::SeqCst);
-    }
-
-    fn persist(&self, workspace: &Workspace) -> Result<()> {
-        if self.path.as_os_str().is_empty() {
-            return Ok(());
-        }
-        let json = serde_json::to_vec_pretty(workspace)
-            .map_err(|e| EngineError::protocol(format!("serialising the workspace: {e}")))?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| EngineError::from_io(parent, &e))?;
-        }
-        let temp = self.path.with_extension("json.tmp");
-        std::fs::write(&temp, &json).map_err(|e| EngineError::from_io(&temp, &e))?;
-        std::fs::rename(&temp, &self.path).map_err(|e| EngineError::from_io(&self.path, &e))
-    }
-}
+/// `workspace.json`.
+pub type WorkspaceStore = Recorded<Workspace>;
 
 #[cfg(test)]
 mod tests {

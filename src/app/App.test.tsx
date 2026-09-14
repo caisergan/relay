@@ -34,6 +34,7 @@ const ANSWERS: Record<string, unknown> = {
     onLaunch: 'fresh',
   },
   workspace_get: { tabs: [] },
+  layout_get: {},
   // A session id, where the catch-all would hand back an array for something to activate.
   session_open: 'session-opened',
 }

@@ -9,6 +9,7 @@ import type {
   DirSize,
   EngineEnvelope,
   EngineSnapshot,
+  InterfaceLayout,
   JobSnapshot,
   ListingSnapshot,
   LocalEntry,
@@ -91,6 +92,9 @@ export const commands = {
 
   settingsGet: () => invoke<Settings>('settings_get'),
   settingsSet: (settings: Settings) => invoke<Settings>('settings_set', { settings }),
+
+  layoutGet: () => invoke<InterfaceLayout>('layout_get'),
+  layoutSet: (layout: InterfaceLayout) => invoke<Unit>('layout_set', { layout }),
 
   workspaceGet: () => invoke<Workspace>('workspace_get'),
   workspaceSet: (workspace: Workspace) => invoke<Unit>('workspace_set', { workspace }),

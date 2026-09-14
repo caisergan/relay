@@ -13,6 +13,7 @@ import { engineBridge } from '@/state/engine'
 import { useServersStore } from '@/state/serversStore'
 import { useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
+import { recordLayout, restoreLayout } from '@/state/layout'
 import { recordWorkspace, restoreWorkspace } from '@/state/workspace'
 import { ConnectView } from '@/views/ConnectView'
 import '@/styles/app.css'
@@ -56,6 +57,21 @@ export function App() {
       void engineBridge.stop()
     }
   }, [loadServers, setTheme, setDensity, setShowHiddenDefault])
+
+  /** The split, the drawer and the sidebar as they were left, then recorded from there.
+   * The order matters for the same reason it does for the workspace below: recording
+   * first would write this launch's defaults over the layout about to be put back. */
+  useEffect(() => {
+    let live = true
+    let stop: (() => void) | null = null
+    void restoreLayout().then(() => {
+      if (live) stop = recordLayout()
+    })
+    return () => {
+      live = false
+      stop?.()
+    }
+  }, [])
 
   /** What a launch opens: the tabs that were open last time, when the setting says to
    * continue where the person left off, and otherwise the first saved server.

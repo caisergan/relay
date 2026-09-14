@@ -13,6 +13,7 @@ use relay_core::error::EngineError;
 use relay_core::events::LogLine;
 use relay_core::interact::{PromptReply, ResolveError};
 use relay_core::job::QueueOp;
+use relay_core::layout::InterfaceLayout;
 use relay_core::model::{
     DirSize, JobId, LocalEntry, RemoteEntry, ServerConfig, ServerId, ServerInfo, SessionId,
 };
@@ -316,6 +317,20 @@ pub async fn workspace_get(state: State<'_, AppState>) -> Result<Workspace> {
 #[tauri::command]
 pub async fn workspace_set(state: State<'_, AppState>, workspace: Workspace) -> Result<()> {
     state.workspace.set(workspace)
+}
+
+// ---------------------------------------------------------------- layout
+
+#[tauri::command]
+pub async fn layout_get(state: State<'_, AppState>) -> Result<InterfaceLayout> {
+    Ok(state.layout.get().interface)
+}
+
+/// The interface's half of the layout. The window's own half is read from the window by
+/// the shell, and this leaves it as it is.
+#[tauri::command]
+pub async fn layout_set(state: State<'_, AppState>, layout: InterfaceLayout) -> Result<()> {
+    state.layout.update(|saved| saved.interface = layout)
 }
 
 // ---------------------------------------------------------------- engine stream

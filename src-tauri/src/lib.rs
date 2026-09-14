@@ -26,6 +26,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)
+            ) && let Some(state) = window.try_state::<AppState>()
+            {
+                state.note_window(window);
+            }
+        })
         .setup(|app| {
             // The queue database is opened here, so a failure to open it stops the app
             // with a real error rather than starting an app whose queue silently does
@@ -36,6 +45,7 @@ pub fn run() {
             // The window is created hidden so the first paint is themed rather than a
             // white flash; the frontend reveals it once tokens are applied.
             if let Some(window) = app.get_webview_window("main") {
+                app.state::<AppState>().restore_window(&window);
                 window.show()?;
             }
             Ok(())
@@ -71,6 +81,8 @@ pub fn run() {
             commands::settings_set,
             commands::workspace_get,
             commands::workspace_set,
+            commands::layout_get,
+            commands::layout_set,
             commands::engine_subscribe,
             commands::engine_unsubscribe,
             commands::engine_snapshot,

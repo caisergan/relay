@@ -47,6 +47,8 @@ export type DirSize = {
 
 export type Direction = "up" | "down";
 
+export type DrawerTab = "active" | "failed" | "completed";
+
 /**
  *  One sequenced update. `epoch` changes whenever the engine restarts, which
  *  invalidates every watermark a client is holding.
@@ -133,6 +135,20 @@ export type FileKind = "file" | "dir" |
  *  `None` means the target could not be stat'd (broken or permission-denied).
  */
 "symlink";
+
+/**
+ *  The half only the interface can see.
+ * 
+ *  Every field is optional, so a file written before a field existed puts the rest back
+ *  and leaves that one at the interface's own default.
+ */
+export type InterfaceLayout = {
+	/**  The local pane's share of the pane area, as a percentage. */
+	localPanePercent?: number | null,
+	drawerOpen?: boolean | null,
+	drawerTab?: DrawerTab | null,
+	sidebarCollapsed?: boolean | null,
+};
 
 /**  Whether a job moves bytes itself or owns others that do. */
 export type JobKind = "file" | 

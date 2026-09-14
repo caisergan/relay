@@ -30,6 +30,8 @@ pub fn type_collection() -> Types {
         .register::<crate::job::PauseReason>()
         .register::<crate::job::QueueOp>()
         .register::<crate::job::QueueStats>()
+        .register::<crate::layout::DrawerTab>()
+        .register::<crate::layout::InterfaceLayout>()
         .register::<crate::model::AuthMethod>()
         .register::<crate::model::Bookmark>()
         .register::<crate::model::Direction>()
