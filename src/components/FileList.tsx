@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import { DefaultFolderIcon, FileIcon, getIconForFolder } from '@react-symbols/icons/utils'
 
 import { isMac } from '@/app/useTheme'
+import type { Density } from '@/ipc/gen'
 import { EXTENSIONS, FOLDERS, NAMES } from '@/lib/fileIcon'
 import {
   PANE_ATTR,
@@ -15,6 +16,7 @@ import {
 } from '@/lib/rowDrag'
 import { formatBytes, formatWhen } from '@/lib/format'
 import { addsToSelection, clickSelect } from '@/lib/selection'
+import { useUiStore } from '@/state/uiStore'
 
 import {
   IconArrowDown,
@@ -243,7 +245,8 @@ export function FileList({
   dropLabel,
 }: Props) {
   const parentRef = useRef<HTMLDivElement>(null)
-  const rowHeight = readRowHeight()
+  const density = useUiStore((s) => s.density)
+  const rowHeight = ROW_HEIGHT[density]
 
   /** This pane can take what is being dragged: it accepts drops at all, something is
    * being dragged, and it started somewhere else. Dragging within one pane is not a
@@ -261,6 +264,14 @@ export function FileList({
     estimateSize: () => rowHeight,
     overscan: 12,
   })
+
+  // The virtualiser keeps the size it measured for every row. A new density changes all
+  // of them, and untold it went on placing rows at the old spacing: each row shrank to
+  // the new height while the gaps between them stayed, which read as the setting doing
+  // nothing at all.
+  useEffect(() => {
+    virtualizer.measure()
+  }, [rowHeight, virtualizer])
 
   const chosen = useMemo(() => new Set(selected), [selected])
   /** The selection as the listing shows it: in listing order, and without whatever a
@@ -540,9 +551,9 @@ function ColButton({
   )
 }
 
-/** Row height is a token, so density changes reach the virtualizer too. */
-function readRowHeight(): number {
-  const raw = getComputedStyle(document.documentElement).getPropertyValue('--row')
-  const parsed = Number.parseInt(raw, 10)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 40
-}
+/** Row heights per density: the same numbers as `--row` in `tokens.css`.
+ *
+ * Held here as well because the virtualiser places rows from JavaScript. Reading the
+ * token during render gave the *previous* density's height, since the attribute that
+ * switches the token is set by an effect that runs after this component renders. */
+const ROW_HEIGHT: Record<Density, number> = { comfortable: 40, compact: 32 }
