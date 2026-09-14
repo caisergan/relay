@@ -632,7 +632,7 @@ describe('the pane filter', () => {
       useSessionsStore.getState().patchPane('session-1', {
         localPath: '/home/tester/projects',
         localFilter: 'conf',
-        localSelected: 'config.json',
+        localSelected: ['config.json'],
       })
     })
     expect(useSessionsStore.getState().panes['session-1']?.localFilter).toBe('conf')
@@ -646,7 +646,7 @@ describe('the pane filter', () => {
     const pane = useSessionsStore.getState().panes['session-1']
     expect(pane?.localFilter).toBe('')
     // The highlighted row belonged to the old listing too.
-    expect(pane?.localSelected).toBeNull()
+    expect(pane?.localSelected).toEqual([])
   })
 
   // Refreshing asks the same question of the same directory.
@@ -732,7 +732,7 @@ describe('a path typed into the search box', () => {
       { id: 'session-1', path: '/home/ada/.omp/agent' },
     ])
     const pane = useSessionsStore.getState().panes['session-1']
-    expect(pane?.remoteSelected).toBe('models.yml')
+    expect(pane?.remoteSelected).toEqual(['models.yml'])
     expect(pane?.remoteFilter).toBe('')
   })
 
@@ -744,7 +744,7 @@ describe('a path typed into the search box', () => {
     await goTo(host, 'remote', '~/releases/../logs/')
 
     expect(calls('session_list_dir')).toEqual([{ id: 'session-1', path: '/home/deploy/logs' }])
-    expect(useSessionsStore.getState().panes['session-1']?.remoteSelected).toBeNull()
+    expect(useSessionsStore.getState().panes['session-1']?.remoteSelected).toEqual([])
   })
 
   it('does the same on this Mac', async () => {
@@ -758,7 +758,7 @@ describe('a path typed into the search box', () => {
     expect(calls('local_list_dir')).toContainEqual({ path: '/home/tester/projects' })
     const pane = useSessionsStore.getState().panes['session-1']
     expect(pane?.localPath).toBe('/home/tester/projects')
-    expect(pane?.localSelected).toBe('app.json')
+    expect(pane?.localSelected).toEqual(['app.json'])
   })
 
   // A typo should cost a keystroke, not the place you were in.

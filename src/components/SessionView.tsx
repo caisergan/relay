@@ -57,7 +57,7 @@ export function SessionView({ sessionId }: Props) {
   const toast = useUiStore((s) => s.toast)
   // Deleting is the one remote action with no undo, so it gets a real confirmation
   // rather than a `window.confirm` the user can dismiss by muscle memory.
-  const [pendingDelete, setPendingDelete] = useState<FileRow | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<FileRow[] | null>(null)
   const [logOpen, setLogOpen] = useState(false)
   /** The remote pane's element, for hit-testing a drop from the operating system. */
   const remotePane = useRef<HTMLDivElement | null>(null)
@@ -86,8 +86,8 @@ export function SessionView({ sessionId }: Props) {
       patchPane(sessionId, {
         localLoading: true,
         localError: null,
-        ...(path === before.localPath ? {} : { localFilter: '', localSelected: null }),
-        ...(select === null ? {} : { localSelected: select }),
+        ...(path === before.localPath ? {} : { localFilter: '', localSelected: [] }),
+        ...(select === null ? {} : { localSelected: [select] }),
       })
       try {
         const entries = await commands.localListDir(path)
@@ -284,8 +284,8 @@ export function SessionView({ sessionId }: Props) {
       target.folder ?? undefined,
     )
   })
-  const lift = (from: 'local' | 'remote') => (row: FileRow, e: React.PointerEvent) =>
-    begin({ from, entries: [{ name: row.name, isDir: row.isDir }] }, e)
+  const lift = (from: 'local' | 'remote') => (rows: FileRow[], e: React.PointerEvent) =>
+    begin({ from, entries: rows.map(({ name, isDir }) => ({ name, isDir })) }, e)
 
   /// The inspector a right-click opens. Its state lives above the early return because
   /// it is a hook; the two lookups that fill it are below, where the listings are.
@@ -300,8 +300,8 @@ export function SessionView({ sessionId }: Props) {
     patchPane(sessionId, {
       remoteLoading: true,
       remoteError: null,
-      ...(path === remotePath ? {} : { remoteFilter: '', remoteSelected: null }),
-      ...(select === null ? {} : { remoteSelected: select }),
+      ...(path === remotePath ? {} : { remoteFilter: '', remoteSelected: [] }),
+      ...(select === null ? {} : { remoteSelected: [select] }),
     })
     setRemoteFailedPath(null)
     commands
@@ -384,8 +384,8 @@ export function SessionView({ sessionId }: Props) {
     }
   }
 
-  const transfer = (direction: 'up' | 'down') => (row: FileRow) =>
-    enqueue(direction, [{ name: row.name, isDir: row.isDir }])
+  /// A row's transfer button, carrying the selection it belongs to as one batch.
+  const transfer = (direction: 'up' | 'down') => (rows: FileRow[]) => enqueue(direction, rows)
 
   /// A row knows only what the listing draws — a name, a size, a date. The entry
   /// behind it knows the rest, so the inspector is filled from that rather than from
@@ -439,14 +439,32 @@ export function SessionView({ sessionId }: Props) {
       .catch((error: unknown) => toast('error', `Could not rename: ${faultText(error)}`))
   }
 
-  const confirmDelete = (row: FileRow) => setPendingDelete(row)
+  const confirmDelete = (rows: FileRow[]) => setPendingDelete(rows)
 
-  const doDelete = (row: FileRow) => {
+  /// One at a time: the session has a single command queue, so sending them together
+  /// would only line them up in it. A failure does not stop the rest — the others were
+  /// chosen too — and the pane is refreshed once, after the last.
+  const doDelete = async (rows: FileRow[]) => {
     setPendingDelete(null)
-    void commands
-      .sessionRemove(sessionId, joinPath(remotePath, row.name), row.isDir)
-      .then(refreshRemote)
-      .catch((error: unknown) => toast('error', `Could not delete: ${faultText(error)}`))
+    const failed: string[] = []
+    for (const row of rows) {
+      try {
+        await commands.sessionRemove(sessionId, joinPath(remotePath, row.name), row.isDir)
+      } catch (error) {
+        failed.push(`${row.name}: ${faultText(error)}`)
+      }
+    }
+    if (failed.length < rows.length) {
+      patchPane(sessionId, { remoteSelected: [] })
+      refreshRemote()
+    }
+    if (failed.length === 1) toast('error', `Could not delete ${failed[0] ?? ''}`)
+    if (failed.length > 1) {
+      toast(
+        'error',
+        `Could not delete ${failed.length} of ${rows.length} items — ${failed[0] ?? ''}`,
+      )
+    }
   }
 
   /// Clicking the same column again reverses it, which is the behaviour every file
@@ -608,24 +626,30 @@ export function SessionView({ sessionId }: Props) {
                 isDir={drag.entries[0]?.isDir ?? false}
               />
             </span>
-            <span className="dragghost__name">{drag.entries[0]?.name}</span>
+            <span className="dragghost__name">
+              {drag.entries.length === 1
+                ? drag.entries[0]?.name
+                : `${drag.entries.length} items`}
+            </span>
           </div>,
           document.body,
         )}
       {pendingDelete && (
         <div className="scrim" role="dialog" aria-modal="true">
           <div className="sheet sheet--danger">
-            <h2 className="sheet__title">Delete {pendingDelete.name}?</h2>
-            <p className="sheet__body">
-              {pendingDelete.isDir
-                ? 'The folder must be empty. This cannot be undone.'
-                : 'This cannot be undone — there is no trash on the server.'}
-            </p>
+            <h2 className="sheet__title">
+              Delete{' '}
+              {pendingDelete.length === 1
+                ? pendingDelete[0]?.name
+                : `${pendingDelete.length} items`}
+              ?
+            </h2>
+            <p className="sheet__body">{deleteWarning(pendingDelete)}</p>
             <div className="sheet__actions">
               <button className="btn" onClick={() => setPendingDelete(null)}>
                 Cancel
               </button>
-              <button className="btn btn--danger" onClick={() => doDelete(pendingDelete)}>
+              <button className="btn btn--danger" onClick={() => void doDelete(pendingDelete)}>
                 Delete
               </button>
             </div>
@@ -987,6 +1011,24 @@ function PaneHeader({
       </div>
     </div>
   )
+}
+
+/** What the delete sheet warns. Several items are named rather than counted: a stray
+ * ⌘-click is exactly the mistake this sheet is there to catch, and "3 items" does not
+ * say which three. */
+function deleteWarning(rows: FileRow[]): string {
+  const warning = rows.some((row) => row.isDir)
+    ? rows.length === 1
+      ? 'The folder must be empty. This cannot be undone.'
+      : 'Folders must be empty. This cannot be undone.'
+    : 'This cannot be undone — there is no trash on the server.'
+  if (rows.length === 1) return warning
+  const shown = rows
+    .slice(0, 5)
+    .map((row) => row.name)
+    .join(', ')
+  const more = rows.length > 5 ? ` and ${rows.length - 5} more` : ''
+  return `${shown}${more}. ${warning}`
 }
 
 /** Hidden files are shown by default, as the design draws them. Hiding is the opt-in,

@@ -32,10 +32,10 @@ export interface PaneState {
    * goes up; returning to a sibling you were just in has no other route. */
   localHistory: History
   remoteHistory: History
-  /** The focused row's name, or null. Single-select for now; the design's multi-select
-   * (⌘-click, shift-range) lands with the batch queue in phase 2. */
-  localSelected: string | null
-  remoteSelected: string | null
+  /** The selected rows' names, in the order they were picked. ⌘-click adds and removes
+   * one; the design's shift-range is not built yet. */
+  localSelected: string[]
+  remoteSelected: string[]
 }
 
 const emptyPane: PaneState = {
@@ -53,8 +53,8 @@ const emptyPane: PaneState = {
   remoteShowHidden: true,
   localHistory: emptyHistory,
   remoteHistory: emptyHistory,
-  localSelected: null,
-  remoteSelected: null,
+  localSelected: [],
+  remoteSelected: [],
 }
 
 /** A pane as a new session gets one, with the saved dotfile preference applied.

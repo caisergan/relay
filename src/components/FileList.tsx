@@ -1,8 +1,9 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 
 import { DefaultFolderIcon, FileIcon, getIconForFolder } from '@react-symbols/icons/utils'
 
+import { isMac } from '@/app/useTheme'
 import { EXTENSIONS, FOLDERS, NAMES } from '@/lib/fileIcon'
 import {
   PANE_ATTR,
@@ -13,6 +14,7 @@ import {
   type RowDrag,
 } from '@/lib/rowDrag'
 import { formatBytes, formatWhen } from '@/lib/format'
+import { addsToSelection, clickSelect } from '@/lib/selection'
 
 import {
   IconArrowDown,
@@ -177,15 +179,19 @@ interface Props {
   direction: 'up' | 'down'
   sort: Sort
   onSort: (key: SortKey) => void
-  selected: string | null
-  onSelect: (name: string) => void
+  /** The selected rows' names. ⌘-click (Ctrl-click elsewhere) adds and removes one. */
+  selected: string[]
+  onSelect: (names: string[]) => void
   onOpen: (row: FileRow) => void
-  onAction: (row: FileRow) => void
-  /** Remote pane only. F2 and the row's rename affordance. */
+  /** The row's transfer button. Everything selected goes, as one batch, when the row is
+   * part of the selection; the row alone otherwise. */
+  onAction: (rows: FileRow[]) => void
+  /** Remote pane only. F2 and the row's rename affordance. One row, always. */
   onRename?: (row: FileRow) => void
   /** Remote pane only. Delete and Backspace both reach it, because both keys mean
-   * "remove this" depending on which keyboard someone learned. */
-  onDelete?: (row: FileRow) => void
+   * "remove this" depending on which keyboard someone learned. Carries the selection
+   * the way `onAction` does. */
+  onDelete?: (rows: FileRow[]) => void
   showPerms?: boolean
   /** A right-click on a row, with the pointer position to anchor the panel to. Absent
    * leaves the engine's own menu in place, which is the right fallback: a pane with
@@ -195,8 +201,9 @@ interface Props {
    * cannot — the local pane with no connection to download from, say. */
   canReceive?: boolean
   /** A press on a row that may become a drag. Absent while there is nowhere for a
-   * drag from this pane to land, so nothing lifts off with no destination. */
-  onDragStart?: (row: FileRow, e: React.PointerEvent) => void
+   * drag from this pane to land, so nothing lifts off with no destination. Pressing a
+   * selected row lifts the whole selection. */
+  onDragStart?: (rows: FileRow[], e: React.PointerEvent) => void
   /** The drag in flight, if any, and where it would land right now.
    *
    * Shared rather than local because the destination has to reveal its drop zone the
@@ -255,19 +262,41 @@ export function FileList({
     overscan: 12,
   })
 
-  /** A new selection is scrolled into view. A path typed into the search box can select
-   * a file hundreds of rows down, and a selection nobody can see answers nothing. Once
-   * per selection, not on every change of rows: a refresh or a re-sort scrolling back
-   * to it would take the listing away from wherever it was being read. */
+  const chosen = useMemo(() => new Set(selected), [selected])
+  /** The selection as the listing shows it: in listing order, and without whatever a
+   * filter is hiding. An action reaches what can be seen. */
+  const selectedRows = useMemo(() => rows.filter((row) => chosen.has(row.name)), [rows, chosen])
+  /** What an action on `row` applies to: the selection when the row is part of it. */
+  const groupOf = (row: FileRow) => (chosen.has(row.name) ? selectedRows : [row])
+  /** "Upload notes.md", or "Upload 3 items" when the button carries a selection. */
+  const label = (verb: string, row: FileRow) => {
+    const group = groupOf(row)
+    return group.length > 1 ? `${verb} ${group.length} items` : `${verb} ${row.name}`
+  }
+
+  /** A selection made from outside the listing is scrolled into view. A path typed into
+   * the search box can select a file hundreds of rows down, and a selection nobody can
+   * see answers nothing. Once per selection, not on every change of rows: a refresh or a
+   * re-sort scrolling back to it would take the listing away from wherever it was being
+   * read. A click's own selection is recorded as revealed already — the row is under the
+   * pointer, and scrolling would only move it out from there. */
   const revealed = useRef<string | null>(null)
   useEffect(() => {
-    if (loading || selected === revealed.current) return
-    const index = selected === null ? -1 : rows.findIndex((row) => row.name === selected)
+    // Joined on `/`, which no name can contain.
+    const key = selected.join('/')
+    if (loading || key === revealed.current) return
+    const last = selected.at(-1)
+    const index = last === undefined ? -1 : rows.findIndex((row) => row.name === last)
     // Not listed yet — the listing it belongs to is still on its way.
-    if (selected !== null && index < 0) return
-    revealed.current = selected
+    if (last !== undefined && index < 0) return
+    revealed.current = key
     if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' })
   }, [loading, rows, selected, virtualizer])
+
+  const choose = (next: string[]) => {
+    revealed.current = next.join('/')
+    onSelect(next)
+  }
 
   /** Rendered by both the populated and the empty listing: an empty directory is a
    * perfectly good destination, and is in fact the one most in need of being told it
@@ -279,14 +308,40 @@ export function FileList({
   /** Marks the listing as a target for the hit test, for exactly as long as it is one. */
   const listingProps = receiving ? { [PANE_ATTR]: pane } : {}
 
-  /** A press on a row. Selects it, as picking something up should, and arms a drag
-   * that only becomes one if the pointer travels. Not from the row's own buttons: a
-   * press on "delete" is a press on "delete". */
+  /** The row a press has already selected, so the click that ends the same press does
+   * not apply it again: a ⌘-press adds a row, and toggling it a second time on the click
+   * would take it straight back out. */
+  const pressed = useRef<string | null>(null)
+
+  /** A press on a row. Arms a drag that only becomes one if the pointer travels, and
+   * selects the row first, so that what lifts off is what is highlighted. A row already
+   * in the selection is left alone until the click, because this press may be the start
+   * of carrying all of it. Not from the row's own buttons: a press on "delete" is a press
+   * on "delete". */
   const press = (row: FileRow) => (e: React.PointerEvent) => {
+    pressed.current = null
     if (!onDragStart || e.button !== 0) return
     if (e.target instanceof Element && e.target.closest('button')) return
-    onSelect(row.name)
-    onDragStart(row, e)
+    if (chosen.has(row.name)) {
+      onDragStart(selectedRows, e)
+      return
+    }
+    const next = clickSelect(selected, row.name, addsToSelection(e, isMac()))
+    pressed.current = row.name
+    choose(next)
+    onDragStart(
+      rows.filter((item) => next.includes(item.name)),
+      e,
+    )
+  }
+
+  /** A click its press has not already dealt with: a plain click on a selected row, which
+   * narrows the selection to it; a ⌘-click that takes a row out; and every click in a
+   * pane nothing can be dragged from. */
+  const click = (row: FileRow) => (e: React.MouseEvent) => {
+    const handled = pressed.current === row.name
+    pressed.current = null
+    if (!handled) choose(clickSelect(selected, row.name, addsToSelection(e, isMac())))
   }
 
   const header = (
@@ -359,7 +414,7 @@ export function FileList({
               <div
                 key={row.key}
                 className={`row${row.hidden ? ' row--hidden' : ''}${
-                  selected === row.name ? ' row--selected' : ''
+                  chosen.has(row.name) ? ' row--selected' : ''
                 }${here?.folder === row.name ? ' row--into' : ''}`}
                 style={{
                   position: 'absolute',
@@ -377,14 +432,16 @@ export function FileList({
                   // Selecting says which row the panel is about, the way every file
                   // manager does — the panel floats free of the listing and would
                   // otherwise be the only thing that knew.
-                  onSelect(row.name)
+                  // A row outside the selection becomes it; one inside leaves it be, so
+                  // inspecting one of several does not throw the others away.
+                  if (!chosen.has(row.name)) choose([row.name])
                   onInspect(row, { x: e.clientX, y: e.clientY })
                 }}
-                onClick={() => onSelect(row.name)}
+                onClick={click(row)}
                 onDoubleClick={() => onOpen(row)}
                 tabIndex={0}
                 role="row"
-                aria-selected={selected === row.name}
+                aria-selected={chosen.has(row.name)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') onOpen(row)
                   if (e.key === 'F2' && onRename) {
@@ -393,7 +450,7 @@ export function FileList({
                   }
                   if ((e.key === 'Delete' || e.key === 'Backspace') && onDelete) {
                     e.preventDefault()
-                    onDelete(row)
+                    onDelete(groupOf(row))
                   }
                 }}
               >
@@ -426,11 +483,11 @@ export function FileList({
                   {onDelete && (
                     <button
                       className="acts__btn acts__btn--danger"
-                      title={`Delete ${row.name}`}
-                      aria-label={`Delete ${row.name}`}
+                      title={label('Delete', row)}
+                      aria-label={label('Delete', row)}
                       onClick={(e) => {
                         e.stopPropagation()
-                        onDelete(row)
+                        onDelete(groupOf(row))
                       }}
                     >
                       <IconTrash size={14} />
@@ -438,13 +495,11 @@ export function FileList({
                   )}
                   <button
                     className="acts__btn acts__btn--go"
-                    title={direction === 'up' ? `Upload ${row.name}` : `Download ${row.name}`}
-                    aria-label={
-                      direction === 'up' ? `Upload ${row.name}` : `Download ${row.name}`
-                    }
+                    title={label(direction === 'up' ? 'Upload' : 'Download', row)}
+                    aria-label={label(direction === 'up' ? 'Upload' : 'Download', row)}
                     onClick={(e) => {
                       e.stopPropagation()
-                      onAction(row)
+                      onAction(groupOf(row))
                     }}
                   >
                     <Arrow size={14} />

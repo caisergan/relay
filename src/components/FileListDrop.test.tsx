@@ -24,33 +24,13 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { PANE_ATTR, ROW_DIR_ATTR, ROW_NAME_ATTR, ZONE_ATTR, type RowDrag } from '@/lib/rowDrag'
+import { giveViewport } from '@/test/viewport'
 
 import { FileList, type FileRow } from './FileList'
 
 const NONE: FileRow[] = []
 
-/** Give the virtualiser a viewport, so rows actually mount.
- *
- * jsdom reports every element as zero by zero, and @tanstack/react-virtual computes
- * its window from the scroll element's size — so with real dimensions it decides no
- * row is visible and mounts none of them. */
-beforeAll(() => {
-  // Assigned rather than defaulted: the DOM types say `ResizeObserver` always exists,
-  // so `??=` reads as dead code to the linter, and jsdom does not actually ship one.
-  globalThis.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  }
-  for (const [prop, value] of [
-    ['clientHeight', 800],
-    ['clientWidth', 600],
-    ['offsetHeight', 800],
-    ['offsetWidth', 600],
-  ] as const) {
-    Object.defineProperty(HTMLElement.prototype, prop, { configurable: true, value })
-  }
-})
+beforeAll(giveViewport)
 
 function entry(name: string, isDir: boolean): FileRow {
   return { key: name, name, isDir, hidden: false, size: 0, modified: null, perms: null }
@@ -81,7 +61,7 @@ function paint(props: Partial<Parameters<typeof FileList>[0]> = {}, receives = t
       direction="up"
       sort={{ key: 'name', dir: 1 }}
       onSort={vi.fn()}
-      selected={null}
+      selected={[]}
       onSelect={vi.fn()}
       onOpen={vi.fn()}
       onAction={vi.fn()}
@@ -153,7 +133,7 @@ describe('the drop zone', () => {
         direction="up"
         sort={{ key: 'name', dir: 1 }}
         onSort={vi.fn()}
-        selected={null}
+        selected={[]}
         onSelect={vi.fn()}
         onOpen={vi.fn()}
         onAction={vi.fn()}
@@ -252,9 +232,9 @@ describe('rows', () => {
     paint({ rows: LISTING, onDragStart, onSelect })
     fireEvent.pointerDown(rowFor('a.bin'), { button: 0, clientX: 10, clientY: 10 })
     expect(onDragStart).toHaveBeenCalledOnce()
-    expect(onDragStart.mock.calls[0]?.[0]).toEqual(LISTING[1])
+    expect(onDragStart.mock.calls[0]?.[0]).toEqual([LISTING[1]])
     // Picking something up selects it, as it always did.
-    expect(onSelect).toHaveBeenCalledWith('a.bin')
+    expect(onSelect).toHaveBeenCalledWith(['a.bin'])
   })
 
   it('do not start a drag from a secondary button', () => {
