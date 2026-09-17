@@ -62,6 +62,7 @@ pub fn run() {
             commands::session_close,
             commands::session_reconnect,
             commands::session_list_dir,
+            commands::session_relist,
             commands::session_stat,
             commands::session_measure,
             commands::session_mkdir,

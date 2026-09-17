@@ -153,6 +153,17 @@ pub async fn session_list_dir(
     state.engine.list_dir(id, &path).await
 }
 
+/// A refresh the user did not ask for, which gives way to one they did: it lists only
+/// while `path` is still where the pane is. Answers whether it listed.
+#[tauri::command]
+pub async fn session_relist(
+    state: State<'_, AppState>,
+    id: SessionId,
+    path: String,
+) -> Result<bool> {
+    state.engine.relist(id, &path).await
+}
+
 /// What is at a remote path, or nothing. The search box asks before it navigates, so a
 /// typed path to a file opens the folder it is in instead of failing to list.
 #[tauri::command]

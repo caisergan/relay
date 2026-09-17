@@ -311,6 +311,14 @@ impl Engine {
         self.session(id)?.list_dir(path).await
     }
 
+    /// List the pane's directory again, if it is still the pane's directory by the time
+    /// the session gets to it. Answers whether it listed; see [`SessionCmd::Relist`].
+    ///
+    /// [`SessionCmd::Relist`]: crate::session::SessionCmd::Relist
+    pub async fn relist(&self, id: SessionId, path: &str) -> Result<bool> {
+        self.session(id)?.relist(path).await
+    }
+
     pub async fn stat(&self, id: SessionId, path: &str) -> Result<Option<RemoteEntry>> {
         self.session(id)?.stat(path).await
     }

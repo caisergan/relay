@@ -1340,3 +1340,89 @@ async fn a_finished_lane_is_reused_by_the_next_transfer() {
     );
     assert!(count >= 1, "at least one lane had to be opened");
 }
+
+/// A transfer landing in the directory on show re-lists it; see `SessionCmd::Relist`.
+///
+/// The pane cannot guard that refresh itself: it clears its loading state on any
+/// listing, so a navigation queued behind an earlier listing looks finished before it
+/// is, and a refresh sent then would arrive after it and pull the pane back. The
+/// session answers in queue order instead — and a folder that refused to open is still
+/// where the pane went.
+#[tokio::test]
+async fn a_relist_refreshes_the_directory_on_show_and_never_one_the_pane_has_left() {
+    let h = harness(MockOptions::default()).await;
+    let sub = h.hub.subscribe();
+    let session = h.engine.open_session(server()).expect("session opens");
+    let listing = |path: &'static str| {
+        let (hub, sub) = (&h.hub, &sub);
+        move || {
+            snapshot(hub, sub)
+                .listings
+                .into_iter()
+                .find(|l| l.session == session && l.path == path)
+        }
+    };
+
+    h.engine
+        .list_dir(session, "/home/deploy")
+        .await
+        .expect("listing succeeds");
+    h.fs.write_file("/home/deploy/arrived.md", b"new".to_vec());
+    assert!(
+        h.engine
+            .relist(session, "/home/deploy")
+            .await
+            .expect("relist succeeds"),
+        "the directory on show is listed again"
+    );
+    let on_show = listing("/home/deploy");
+    until("the file that arrived to be listed", || {
+        on_show().filter(|l| l.entries.iter().any(|e| e.name == "arrived.md"))
+    })
+    .await;
+
+    h.engine
+        .list_dir(session, "/var/www")
+        .await
+        .expect("listing succeeds");
+    let moved = until("the pane to move", listing("/var/www")).await;
+    assert!(
+        !h.engine
+            .relist(session, "/home/deploy")
+            .await
+            .expect("relist answers"),
+        "a directory the pane has left is not listed"
+    );
+    assert!(
+        h.engine
+            .list_dir(session, "/definitely/not/here")
+            .await
+            .is_err(),
+        "the fixture has no such folder"
+    );
+    assert!(
+        !h.engine
+            .relist(session, "/var/www")
+            .await
+            .expect("relist answers"),
+        "nor is the one before a folder that refused to open"
+    );
+
+    // Nothing was announced in between: the next listing is the very next request.
+    h.engine
+        .list_dir(session, "/var/www")
+        .await
+        .expect("listing succeeds");
+    let next = listing("/var/www");
+    let after = until("the next listing", || {
+        next().filter(|l| l.request.0 > moved.request.0)
+    })
+    .await;
+    assert_eq!(
+        after.request.0,
+        moved.request.0 + 1,
+        "a skipped relist announced a listing"
+    );
+
+    h.engine.close_session(session).await;
+}

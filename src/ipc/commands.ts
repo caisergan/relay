@@ -57,6 +57,9 @@ export const commands = {
   sessionReconnect: (id: string) => invoke<Unit>('session_reconnect', { id }),
   sessionListDir: (id: string, path: string) =>
     invoke<RemoteEntry[]>('session_list_dir', { id, path }),
+  /** Lists `path` again only if the pane has not moved on from it by the time the session
+   * gets there; resolves to whether it listed. For refreshes nobody asked for. */
+  sessionRelist: (id: string, path: string) => invoke<boolean>('session_relist', { id, path }),
   /** What is at a path, following a link; null when nothing is. */
   sessionStat: (id: string, path: string) =>
     invoke<RemoteEntry | null>('session_stat', { id, path }),

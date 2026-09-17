@@ -98,6 +98,18 @@ pub enum SessionCmd {
         announce: bool,
         reply: oneshot::Sender<Result<Vec<RemoteEntry>>>,
     },
+    /// List `path` again and announce it, but only if it is still the directory the pane
+    /// last asked for. Answers whether it listed.
+    ///
+    /// For refreshes nobody pressed a button for — a transfer landing in the directory on
+    /// show. The pane's own sense of where it is cannot guard those: it clears its loading
+    /// state on *any* listing, so between two queued listings it looks settled while a
+    /// navigation is still behind them. Asked here, the question is answered in queue
+    /// order, which is the order the listings will arrive in.
+    Relist {
+        path: String,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     Stat {
         path: String,
         reply: oneshot::Sender<Result<Option<RemoteEntry>>>,
@@ -193,6 +205,7 @@ impl SessionHandle {
             lane_tx,
             idle_lanes: Vec::new(),
             running: HashMap::new(),
+            shown: None,
         };
         let join = ctx.rt.spawn(actor.run(cfg, ctx.secrets, cmd_rx, lane_rx));
 
@@ -237,6 +250,15 @@ impl SessionHandle {
         self.call(|reply| SessionCmd::List {
             path: path.to_string(),
             announce: false,
+            reply,
+        })
+        .await
+    }
+
+    /// See [`SessionCmd::Relist`].
+    pub async fn relist(&self, path: &str) -> Result<bool> {
+        self.call(|reply| SessionCmd::Relist {
+            path: path.to_string(),
             reply,
         })
         .await
@@ -479,6 +501,10 @@ struct SessionActor {
     /// What the session is running, so a stop reaches the right transfer without a
     /// second map living somewhere else that could disagree.
     running: HashMap<JobId, Running>,
+    /// The directory the pane last asked to see, as of the command being handled. Set
+    /// by the asking rather than by the answer: a folder that refused to open is still
+    /// where the pane went, and a refresh of the one before it would pull it back.
+    shown: Option<String>,
 }
 
 /// Why the serving loop stopped.
@@ -668,6 +694,7 @@ impl SessionActor {
             match with_deadline(self.backend.list(&path), "list", OP_DEADLINE, &cancel).await {
                 Ok(entries) => {
                     self.out.listing(&path, entries).await;
+                    self.shown = Some(path);
                     landed = true;
                 }
                 Err(err) => {
@@ -685,6 +712,7 @@ impl SessionActor {
                 with_deadline(self.backend.list(&home), "list", OP_DEADLINE, &cancel).await
         {
             self.out.listing(&home, entries).await;
+            self.shown = Some(home);
         }
 
         // The queue may dispatch to this session from here on, and not before. It also
@@ -834,6 +862,9 @@ impl SessionActor {
                 announce,
                 reply,
             } => {
+                if announce {
+                    self.shown = Some(path.clone());
+                }
                 let out =
                     with_deadline(self.backend.list(&path), "list", OP_DEADLINE, &cancel).await;
                 if let (true, Ok(entries)) = (announce, &out) {
@@ -841,6 +872,20 @@ impl SessionActor {
                 }
                 let flow = self.check_fatal(&out).await;
                 let _ = reply.send(out);
+                flow
+            }
+            SessionCmd::Relist { path, reply } => {
+                if self.shown.as_deref() != Some(path.as_str()) {
+                    let _ = reply.send(Ok(false));
+                    return ControlFlow::Continue(());
+                }
+                let out =
+                    with_deadline(self.backend.list(&path), "list", OP_DEADLINE, &cancel).await;
+                if let Ok(entries) = &out {
+                    self.out.listing(&path, entries.clone()).await;
+                }
+                let flow = self.check_fatal(&out).await;
+                let _ = reply.send(out.map(|_| true));
                 flow
             }
             SessionCmd::Stat { path, reply } => {
@@ -1680,6 +1725,9 @@ fn refuse(cmd: SessionCmd) {
             let _ = reply.send(no_connection());
         }
         SessionCmd::Stat { reply, .. } => {
+            let _ = reply.send(no_connection());
+        }
+        SessionCmd::Relist { reply, .. } => {
             let _ = reply.send(no_connection());
         }
         SessionCmd::Mkdir { reply, .. }
