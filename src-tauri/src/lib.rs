@@ -42,6 +42,16 @@ pub fn run() {
             let state = tauri::async_runtime::block_on(AppState::start(app.handle()))?;
             app.manage(state);
 
+            // Previews from earlier days, cleared off the startup path: nothing waits on
+            // it, and a slow disk should not hold the window back.
+            tauri::async_runtime::spawn_blocking(|| {
+                let root = relay_core::preview::root();
+                let cleared = relay_core::preview::prune(&root, relay_core::preview::KEEP_FOR);
+                if cleared > 0 {
+                    tracing::info!(cleared, "old previews cleared");
+                }
+            });
+
             // The window is created hidden so the first paint is themed rather than a
             // white flash; the frontend reveals it once tokens are applied.
             if let Some(window) = app.get_webview_window("main") {
@@ -77,6 +87,8 @@ pub fn run() {
             commands::queue_enqueue,
             commands::queue_control,
             commands::reveal_in_folder,
+            commands::preview_prepare,
+            commands::preview_open,
             commands::resolve_prompt,
             commands::settings_get,
             commands::settings_set,

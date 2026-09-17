@@ -11,6 +11,7 @@ import { transferPaths } from '@/lib/transfer'
 import { canGoBack, canGoForward, peek, push, type History } from '@/lib/history'
 import { exactText } from '@/lib/exactText'
 import { isPathQuery, resolvePath, splitPath } from '@/lib/goto'
+import { preview } from '@/state/previews'
 import { useOrderedJobs } from '@/state/queueStore'
 import { useServersStore } from '@/state/serversStore'
 import { emptyPane, useSessionsStore } from '@/state/sessionsStore'
@@ -420,6 +421,18 @@ export function SessionView({ sessionId }: Props) {
     )
   }
 
+  /// A file opens in an application on this Mac rather than in the pane, which has
+  /// nothing to show a file with. Asks which application unless one is remembered.
+  const previewRemote = (row: FileRow) => {
+    if (!serverId) return
+    preview({
+      session: sessionId,
+      serverId,
+      remotePath: joinPath(remotePath, row.name),
+      name: row.name,
+    }).catch((error: unknown) => toast('error', faultText(error)))
+  }
+
   /// Refresh after a change, because SFTP has no directory notifications: what the
   /// pane shows is whatever the last listing said.
   const refreshRemote = () => navigateRemote(remotePath)
@@ -598,7 +611,9 @@ export function SessionView({ sessionId }: Props) {
               }
               selected={pane.remoteSelected}
               onSelect={(remoteSelected) => patchPane(sessionId, { remoteSelected })}
-              onOpen={(row) => row.isDir && navigateRemote(joinPath(remotePath, row.name))}
+              onOpen={(row) =>
+                row.isDir ? navigateRemote(joinPath(remotePath, row.name)) : previewRemote(row)
+              }
               onAction={transfer('down')}
               onRename={renameRemote}
               onDelete={confirmDelete}

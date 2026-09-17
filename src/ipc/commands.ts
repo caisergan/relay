@@ -89,6 +89,10 @@ export const commands = {
   /** Show a file in Finder or Explorer. The engine opens it; the webview is not
    *  given a general permission to open paths. */
   revealInFolder: (path: string) => invoke<Unit>('reveal_in_folder', { path }),
+  /** A fresh local path to download a preview of a server file called `name` to. */
+  previewPrepare: (name: string) => invoke<string>('preview_prepare', { name }),
+  /** Open a downloaded preview in an application; refused for any other path. */
+  previewOpen: (path: string, app: string) => invoke<Unit>('preview_open', { path, app }),
 
   resolvePrompt: (promptId: string, reply: PromptReply) =>
     invoke<Unit>('resolve_prompt', { promptId, reply }),

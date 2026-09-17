@@ -294,6 +294,48 @@ pub async fn reveal_in_folder(path: PathBuf) -> Result<()> {
     })
 }
 
+// ---------------------------------------------------------------- previews
+
+/// Where a preview of a server's file called `name` is downloaded to. The download is an
+/// ordinary queued transfer, so a large file shows its progress and survives a dropped
+/// connection like any other.
+#[tauri::command]
+pub async fn preview_prepare(name: String) -> Result<PathBuf> {
+    tauri::async_runtime::spawn_blocking(move || {
+        relay_core::preview::prepare(&relay_core::preview::root(), &name)
+    })
+    .await
+    .map_err(|e| EngineError::protocol(format!("preview task failed: {e}")))?
+}
+
+/// Open a downloaded preview in `app`.
+///
+/// A command for the reason `reveal_in_folder` is one, and narrower still: the path must
+/// be a preview Relay downloaded and the application an application, so the webview
+/// cannot use it to open anything else on the disk, with anything else.
+#[tauri::command]
+pub async fn preview_open(path: PathBuf, app: PathBuf) -> Result<()> {
+    let checked = path.clone();
+    let application = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if !relay_core::preview::is_preview(&relay_core::preview::root(), &checked) {
+            return Err(EngineError::LocalIo {
+                path: checked.display().to_string(),
+                message: "not a preview Relay downloaded".into(),
+            });
+        }
+        relay_core::preview::check_application(&application)
+    })
+    .await
+    .map_err(|e| EngineError::protocol(format!("preview task failed: {e}")))??;
+    tauri_plugin_opener::open_path(&path, Some(app.to_string_lossy())).map_err(|err| {
+        EngineError::LocalIo {
+            path: path.display().to_string(),
+            message: err.to_string(),
+        }
+    })
+}
+
 // ---------------------------------------------------------------- prompts
 
 #[tauri::command]

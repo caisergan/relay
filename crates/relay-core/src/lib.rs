@@ -21,6 +21,7 @@
 //! - [`engine`] — the command surface the shell calls.
 //! - [`session`] — one actor per connection; [`sftp`] is the backend behind it.
 //! - [`walk`] — turning a folder into the files inside it.
+//! - [`preview`] — where a server's file waits for the application opening it.
 //! - [`mock`] — an in-memory backend for tests and frontend development.
 
 pub mod bindings;
@@ -36,6 +37,7 @@ pub mod layout;
 pub mod local;
 pub mod mock;
 pub mod model;
+pub mod preview;
 pub mod protocol;
 pub mod queue;
 pub mod recorded;

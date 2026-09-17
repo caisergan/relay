@@ -2247,6 +2247,28 @@ body.dragging--ok * {
    than adding to it, so this is a floor and not a tax: sheets that already leave more
    room — the password field, the host-key fingerprint — are untouched, and the ones
    that left too little are lifted to the same 20px that insets the sheet itself. */
+/* The application a preview opens in, beside the button that picks it. */
+.openwith {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+.openwith__app {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.openwith__app--none {
+  color: var(--ink-faint);
+  font-weight: 400;
+}
 .sheet__actions {
   display: flex;
   gap: 10px;
@@ -2289,6 +2311,16 @@ body.dragging--ok * {
   background: var(--signal);
   border-color: var(--signal);
   color: #fff;
+}
+/* A button waiting on something else in the sheet — "Always use…" before there is an
+   application to use. Faded rather than hidden, so the choice it will offer is visible
+   while it is being made. */
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.btn:disabled:hover {
+  border-color: var(--line);
 }
 /* For a button inside a banner, where a 30px control would set the row's height. */
 .btn--small {

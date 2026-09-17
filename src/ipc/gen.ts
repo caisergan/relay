@@ -429,6 +429,11 @@ export type Settings = {
 	 *  setting, not only the new one.
 	 */
 	onLaunch?: LaunchMode,
+	/**
+	 *  The application a double-clicked server file opens in. `None` asks which, each
+	 *  time, until a choice is remembered. Defaulted for the same reason as `on_launch`.
+	 */
+	previewApp?: string | null,
 };
 
 export type SnapshotError = 

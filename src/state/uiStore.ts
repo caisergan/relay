@@ -11,6 +11,15 @@ export interface GoRequest {
   text: string
 }
 
+/** A server file to open in an application on this computer; see `state/previews`. */
+export interface PreviewRequest {
+  session: string
+  serverId: string
+  /** Where the file is on the server. */
+  remotePath: string
+  name: string
+}
+
 export interface Toast {
   id: string
   kind: 'info' | 'ok' | 'error'
@@ -33,6 +42,8 @@ interface UiState {
   drawerTab: DrawerTab
   activityOpen: boolean
   settingsOpen: boolean
+  /** A file waiting for someone to say which application it opens in. */
+  previewAsk: PreviewRequest | null
   /** Keyed by prompt id so a remount re-renders the same sheet rather than a new one. */
   prompts: Record<string, PromptRequest>
   toasts: Toast[]
@@ -55,6 +66,7 @@ interface UiState {
   setDrawerTab: (tab: DrawerTab) => void
   toggleActivity: (open?: boolean) => void
   toggleSettings: (open?: boolean) => void
+  askPreview: (request: PreviewRequest | null) => void
   setPrompts: (prompts: PromptRequest[]) => void
   openPrompt: (prompt: PromptRequest) => void
   closePrompt: (id: string) => void
@@ -81,6 +93,7 @@ export const useUiStore = create<UiState>((set) => ({
   drawerTab: 'active',
   activityOpen: false,
   settingsOpen: false,
+  previewAsk: null,
   prompts: {},
   toasts: [],
   connected: false,
@@ -97,6 +110,7 @@ export const useUiStore = create<UiState>((set) => ({
   setDrawerTab: (drawerTab) => set({ drawerTab }),
   toggleActivity: (open) => set((s) => ({ activityOpen: open ?? !s.activityOpen })),
   toggleSettings: (open) => set((s) => ({ settingsOpen: open ?? !s.settingsOpen })),
+  askPreview: (previewAsk) => set({ previewAsk }),
 
   setPrompts: (prompts) => set({ prompts: Object.fromEntries(prompts.map((p) => [p.id, p])) }),
   openPrompt: (prompt) => set((s) => ({ prompts: { ...s.prompts, [prompt.id]: prompt } })),

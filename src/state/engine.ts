@@ -7,6 +7,7 @@ import type { EngineEvent, EngineSnapshot } from '@/ipc/gen'
 import { faultText } from '@/lib/errors'
 
 import { mayHaveChanged, noteArrival } from './arrivals'
+import { notePreviewState } from './previews'
 import { useQueueStore } from './queueStore'
 import { useSessionsStore } from './sessionsStore'
 import { useUiStore } from './uiStore'
@@ -64,6 +65,7 @@ function applyEvent(event: EngineEvent): void {
         // Whichever pane shows where it landed lists again: a download into the local
         // pane, an upload into the remote one.
         if (mayHaveChanged(now)) noteArrival(event.job)
+        notePreviewState(event.job)
         if (now.kind === 'failed') {
           // The retry is offered where the failure is announced. Finding the row in
           // the drawer to press the same button is a step with no purpose.

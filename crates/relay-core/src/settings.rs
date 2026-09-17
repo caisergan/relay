@@ -1,7 +1,7 @@
 //! User settings the engine and the interface both need to agree on.
 //!
-//! Only what phase 5 lists as essential for the SFTP release. Editor and preview
-//! preferences arrive with the features that use them.
+//! Only what phase 5 lists as essential for the SFTP release, and preferences that came
+//! with the features using them — the application previews open in.
 //!
 //! Persisted in `settings.json` beside the server list, and for the same reasons: the
 //! write is atomic because a half-written file is a lost configuration, and an
@@ -69,6 +69,10 @@ pub struct Settings {
     /// setting, not only the new one.
     #[serde(default)]
     pub on_launch: LaunchMode,
+    /// The application a double-clicked server file opens in. `None` asks which, each
+    /// time, until a choice is remembered. Defaulted for the same reason as `on_launch`.
+    #[serde(default)]
+    pub preview_app: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -81,6 +85,7 @@ impl Default for Settings {
             download_dir: None,
             show_hidden: false,
             on_launch: LaunchMode::Fresh,
+            preview_app: None,
         }
     }
 }
@@ -245,6 +250,23 @@ mod tests {
         assert_eq!(settings.concurrency, 5);
         assert!(settings.show_hidden);
         assert_eq!(settings.on_launch, LaunchMode::Fresh);
+        assert_eq!(settings.preview_app, None, "and it asks which application");
+    }
+
+    #[test]
+    fn a_remembered_preview_application_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let app = PathBuf::from("/Applications/Sublime Text.app");
+
+        SettingsStore::load(path.clone())
+            .set(Settings {
+                preview_app: Some(app.clone()),
+                ..Settings::default()
+            })
+            .unwrap();
+
+        assert_eq!(SettingsStore::load(path).get().preview_app, Some(app));
     }
 
     #[test]

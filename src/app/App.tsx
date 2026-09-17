@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react'
 import { commands } from '@/ipc/commands'
 import { faultText } from '@/lib/errors'
 import { CommandPalette } from '@/components/CommandPalette'
+import { PreviewSheet } from '@/components/PreviewSheet'
 import { PromptSheets } from '@/components/PromptSheets'
 import { QueueDrawer } from '@/components/QueueDrawer'
 import { SessionView } from '@/components/SessionView'
@@ -157,6 +158,7 @@ export function App() {
       </div>
       <SettingsSheet />
       <CommandPalette />
+      <PreviewSheet />
       <PromptSheets />
       <Toasts />
     </div>

@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 
 import { commands } from '@/ipc/commands'
 import type { ConflictAction, Density, LaunchMode, Settings, Theme } from '@/ipc/gen'
+import { appName, chooseApplication } from '@/lib/apps'
 import { faultText } from '@/lib/errors'
 import { useSessionsStore } from '@/state/sessionsStore'
 import { useUiStore } from '@/state/uiStore'
@@ -173,6 +174,37 @@ export function SettingsSheet() {
                   <button
                     className="btn btn--small"
                     onClick={() => save({ ...settings, downloadDir: null })}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </Row>
+
+            <Row
+              label="Open server files in"
+              hint="What double-clicking a file on the server opens it with, after downloading a copy to a temporary folder."
+            >
+              <div className="settings__path">
+                <span className="settings__pathtext" title={settings.previewApp ?? undefined}>
+                  {settings.previewApp ? appName(settings.previewApp) : 'Ask every time'}
+                </span>
+                <button
+                  className="btn btn--small"
+                  onClick={() => {
+                    chooseApplication()
+                      .then((chosen) => {
+                        if (chosen !== null) save({ ...settings, previewApp: chosen })
+                      })
+                      .catch((error: unknown) => toast('error', faultText(error)))
+                  }}
+                >
+                  Choose…
+                </button>
+                {settings.previewApp && (
+                  <button
+                    className="btn btn--small"
+                    onClick={() => save({ ...settings, previewApp: null })}
                   >
                     Clear
                   </button>
