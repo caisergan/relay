@@ -1,6 +1,6 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 
 import type { JobSnapshot, JobState, QueueOp } from '@/ipc/gen'
 import { emptyStats, useQueueStore } from '@/state/queueStore'
@@ -76,6 +76,14 @@ describe('the figures at the end of a row', () => {
     }))
 
   it('say how long a finished transfer took and when it started', () => {
+    // The start is written as a clock time only on the day it happened, and as a date on
+    // any later one, so the clock is held a minute after this job rather than left on
+    // whatever day the suite happens to run.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-09-14T10:01:00.000Z'))
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
     const host = render(
       [
         job({
