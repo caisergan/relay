@@ -2,6 +2,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
+import { fileManager } from '@/app/useTheme'
 import { commands } from '@/ipc/commands'
 import type { LocalEntry, LogLine, RemoteEntry, ServerConfig, TransferItem } from '@/ipc/gen'
 import { faultText, toFault } from '@/lib/errors'
@@ -28,6 +29,7 @@ import {
   IconFolderPlus,
   IconMonitor,
   IconRefresh,
+  IconReveal,
   IconSearch,
   IconServer,
   IconWarning,
@@ -397,6 +399,19 @@ export function SessionView({ sessionId }: Props) {
   /// A row's transfer button, carrying the selection it belongs to as one batch.
   const transfer = (direction: 'up' | 'down') => (rows: FileRow[]) => enqueue(direction, rows)
 
+  /// Hand the local pane to the OS file manager.
+  ///
+  /// One selected row is revealed as itself, highlighted where it lives, because that
+  /// is what a person who selected a row and pressed this meant. Anything else — no
+  /// selection, or several — reveals the folder they are looking at, since picking one
+  /// of several would be picking for them.
+  const revealOnly = pane.localSelected.length === 1 ? pane.localSelected[0] : undefined
+  const revealLocal = () => {
+    const path =
+      revealOnly === undefined ? pane.localPath : joinPath(pane.localPath, revealOnly)
+    commands.revealInFolder(path).catch((error: unknown) => toast('error', faultText(error)))
+  }
+
   /// A row knows only what the listing draws — a name, a size, a date. The entry
   /// behind it knows the rest, so the inspector is filled from that rather than from
   /// the row, and a row whose entry has since gone opens nothing at all.
@@ -513,6 +528,13 @@ export function SessionView({ sessionId }: Props) {
             onFilter={(localFilter) => patchPane(sessionId, { localFilter })}
             onGo={(text) => void goTo('local', text)}
             onNavigate={(path) => void loadLocal(path)}
+            onReveal={{
+              run: revealLocal,
+              label:
+                revealOnly === undefined
+                  ? `Show this folder in ${fileManager()}`
+                  : `Show ${revealOnly} in ${fileManager()}`,
+            }}
             roots={roots}
             showHidden={pane.localShowHidden}
             hiddenCount={localHidden}
@@ -885,6 +907,7 @@ function PaneHeader({
   onNavigate,
   onRefresh,
   onNewFolder,
+  onReveal,
   roots,
   showHidden,
   hiddenCount,
@@ -903,6 +926,9 @@ function PaneHeader({
   onNavigate: (path: string) => void
   onRefresh?: () => void
   onNewFolder?: () => void
+  /** Hand this pane's folder to the OS file manager. Local pane only: there is no
+   * Finder window that can be opened on somebody else's server. */
+  onReveal?: { run: () => void; label: string }
   /** Local pane only. A server has one root, so the remote breadcrumb has no menu. */
   roots?: Root[]
   showHidden: boolean
@@ -933,6 +959,16 @@ function PaneHeader({
             onClick={onNewFolder}
           >
             <IconFolderPlus size={17} />
+          </button>
+        )}
+        {onReveal && (
+          <button
+            className="ghostbtn ghostbtn--lg"
+            title={onReveal.label}
+            aria-label={onReveal.label}
+            onClick={onReveal.run}
+          >
+            <IconReveal size={17} />
           </button>
         )}
         {/* The count is in the label rather than on a badge: the only time this

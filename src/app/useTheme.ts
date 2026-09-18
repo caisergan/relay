@@ -39,3 +39,10 @@ export function useTheme(): void {
 export function isMac(): boolean {
   return /mac/i.test(navigator.userAgent)
 }
+
+/** What to call the thing a "show this" button opens. Naming it wrongly is worse than
+ * not naming it: a Windows tooltip offering Finder is a button that lies. */
+export function fileManager(): string {
+  if (isMac()) return 'Finder'
+  return /win/i.test(navigator.userAgent) ? 'File Explorer' : 'the file manager'
+}

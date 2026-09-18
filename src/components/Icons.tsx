@@ -217,6 +217,21 @@ export function IconFolderPlus(props: IconProps) {
   )
 }
 
+/** Hand a folder to the operating system's file manager.
+ *
+ * A folder with its top-right corner left open and an arrow leaving through the gap:
+ * the outline is cut rather than crossed, because at 17px a stroke over a stroke reads
+ * as a smudge. Not the design's; it has no reveal control. */
+export function IconReveal(props: IconProps) {
+  return (
+    <Svg strokeWidth={1.8} {...props}>
+      <path d="M3 8.5a2 2 0 0 1 2-2h3.6l2 2H15" />
+      <path d="M21 12v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8.5" />
+      <path d="M14 11l6.5-6.5M15.5 4.5h5v5" />
+    </Svg>
+  )
+}
+
 export function IconPencil(props: IconProps) {
   return (
     <Svg {...props}>
