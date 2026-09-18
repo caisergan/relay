@@ -83,6 +83,15 @@ interface UiState {
 const MIN_PANE_PERCENT = 18
 const MAX_PANE_PERCENT = 78
 
+/** How many toasts may be on screen at once.
+ *
+ * Without a cap, a burst — a queue of thousands meeting a server that refuses a
+ * channel — stacks one per failure until they cover the window, including the pane the
+ * person needs to see what went wrong. The oldest give way to the newest, and nothing
+ * is lost by it: every failure is a row in the drawer's Failed tab, with the same
+ * Retry button on it. */
+const MAX_TOASTS = 4
+
 export const useUiStore = create<UiState>((set) => ({
   theme: 'system',
   resolved: 'light',
@@ -128,7 +137,7 @@ export const useUiStore = create<UiState>((set) => ({
       toasts: [
         ...s.toasts,
         { id: crypto.randomUUID(), kind, text, ...(action ? { action } : {}) },
-      ],
+      ].slice(-MAX_TOASTS),
     })),
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   setConnected: (connected) => set({ connected }),
@@ -140,4 +149,4 @@ export const useUiStore = create<UiState>((set) => ({
     }),
 }))
 
-export { MAX_PANE_PERCENT, MIN_PANE_PERCENT }
+export { MAX_PANE_PERCENT, MAX_TOASTS, MIN_PANE_PERCENT }
