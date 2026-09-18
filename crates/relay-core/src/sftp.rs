@@ -23,11 +23,13 @@
 //!   window where the user's file simply does not exist.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
+use futures_util::future::BoxFuture;
+use futures_util::stream::{FuturesOrdered, StreamExt};
 use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, load_secret_key};
 use russh::{ChannelId, Disconnect};
@@ -35,6 +37,7 @@ use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::client::{RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{EngineError, Result};
 use crate::interact::{Interact, Prompt, PromptReply};
@@ -42,8 +45,8 @@ use crate::model::{
     AuthMethod, FileFacts, FileKind, JobId, RemoteEntry, ServerConfig, ServerInfo, SessionId,
 };
 use crate::protocol::{
-    BackendCapabilities, Protocol, SecretSource, TransferLane, TransferOutcome, TransferReq,
-    Transferred,
+    BackendCapabilities, CHECKPOINT_BYTES, Protocol, SecretSource, TransferLane, TransferOutcome,
+    TransferReq, Transferred,
 };
 use crate::trust::{TrustDecision, TrustStore};
 use crate::wire::Bytes;
@@ -59,19 +62,50 @@ pub const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
 /// 32/64/128/256 KiB, so the largest was clearly worth taking. Short reads are normal
 /// and handled, so asking for more than a server will give costs nothing.
 const READ_CHUNK: u32 = 256 * 1024;
-/// How much moves between checkpoints.
+/// How many requests a transfer keeps in flight.
 ///
-/// A checkpoint costs an fsync, so one per chunk would put a disk flush in the middle
-/// of the byte loop. Eight megabytes is the most a resume can be asked to re-send —
-/// seconds on any link fast enough for the file to be worth resuming — in exchange for
-/// roughly one flush per eight megabytes rather than one per quarter megabyte.
-const CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
+/// One-at-a-time moves `chunk / round-trip` and nothing else — 1.4 MB/s at 256 KiB
+/// over 174 ms, whatever the bandwidth. Eight outstanding requests make it eight
+/// times that. Higher costs memory per lane, since answers are buffered until they
+/// can be written in order.
+const PIPELINE_DEPTH: usize = 8;
+/// Per-channel SSH receive window. russh's default 2 MiB is exactly a full pipeline,
+/// which would leave flow control rather than the pipeline deciding the rate.
+const WINDOW_SIZE: u32 = 4 * 1024 * 1024;
+/// How long a request may go unanswered before the lane gives up.
+///
+/// A pipelined request waits behind the whole window ahead of it, so the deadline has
+/// to cover the window rather than one chunk — russh-sftp's ten second default is a
+/// timeout on a 1.7 Mbit/s link, not on a stalled server. Liveness is the session
+/// keepalive's job; this only catches a peer that has stopped answering entirely.
+fn request_timeout() -> u64 {
+    const STALLED: u64 = 30;
+    const SLOWEST: u64 = 64 * 1024;
+    let window = PIPELINE_DEPTH as u64 * READ_CHUNK as u64;
+    STALLED + window / SLOWEST
+}
 /// Every SFTP v3 server accepts a 32 KiB write. Raised only when the server states its
 /// own limit, because an over-sized write is a protocol error, not a slow one.
 const DEFAULT_WRITE_CHUNK: usize = 32 * 1024;
 /// Ceiling regardless of what a server claims, leaving room for packet overhead below
 /// OpenSSH's 256 KiB maximum.
 const MAX_WRITE_CHUNK: usize = 255 * 1024;
+/// How many SSH channels one connection will open of its own accord.
+///
+/// Lower than it used to be, not higher: `MaxSessions` defaults to 10 but hardened
+/// servers set it far lower, and this plus the browse channel is what Relay asks a
+/// stranger for. Transfers past this share a channel rather than demanding another.
+const MAX_CHANNELS: usize = 4;
+/// How many transfers may share one channel.
+///
+/// The scarce resource is the channel, not the request: `RawSftpSession` addresses
+/// every operation by handle and request id, so one channel can carry several files at
+/// once. A small file costs three round trips — open, read, close — and one file per
+/// channel spends all three waiting. Eight files interleaved spend the same three
+/// round trips moving eight files.
+const LANES_PER_CHANNEL: usize = 8;
+/// How long after a refused channel the backend tries for another one.
+const CHANNEL_PROBE: Duration = Duration::from_secs(30);
 /// Atomic replace. Without it an upload cannot overwrite safely; see the module docs.
 const POSIX_RENAME: &str = "posix-rename@openssh.com";
 
@@ -214,6 +248,15 @@ pub struct SftpBackend {
     /// Set from the server's advertised extensions at connect time.
     posix_rename: bool,
     write_chunk: usize,
+    /// Like `write_chunk`, but for reads: an over-sized read is answered short, which
+    /// costs a pipeline every request queued behind it.
+    read_chunk: u32,
+    /// Weak so a channel lives exactly as long as the transfers seated on it, and the
+    /// count of what is open needs no bookkeeping of its own.
+    channels: Vec<Weak<Channel>>,
+    /// How many channels the server has proved willing to carry at once.
+    channel_ceiling: usize,
+    narrowed: Option<Instant>,
 }
 
 impl SftpBackend {
@@ -225,6 +268,10 @@ impl SftpBackend {
             sftp: None,
             posix_rename: false,
             write_chunk: DEFAULT_WRITE_CHUNK,
+            read_chunk: READ_CHUNK,
+            channels: Vec::new(),
+            channel_ceiling: MAX_CHANNELS,
+            narrowed: None,
         }
     }
 
@@ -268,6 +315,7 @@ impl Protocol for SftpBackend {
 
         let config = Arc::new(client::Config {
             inactivity_timeout: Some(INACTIVITY_TIMEOUT),
+            window_size: WINDOW_SIZE,
             ..client::Config::default()
         });
 
@@ -334,7 +382,7 @@ impl Protocol for SftpBackend {
             atomic_rename: self.posix_rename,
             reliable_mtime: true,
             // Channels are cheap on one SSH connection; the session applies its own cap.
-            max_lanes: 4,
+            max_lanes: (MAX_CHANNELS * LANES_PER_CHANNEL).min(usize::from(u8::MAX)) as u8,
         }
     }
 
@@ -414,16 +462,38 @@ impl Protocol for SftpBackend {
             .map_err(sftp_error)
     }
 
+    /// A seat for one transfer.
+    ///
+    /// A channel of its own while the server will give one, because a transfer alone
+    /// on a channel has the whole request window. Once it will not, the transfer sits
+    /// on the emptiest channel already open rather than failing — which is the point:
+    /// `MaxSessions` stops being a limit on how many files can move.
     async fn open_lane(&mut self) -> Result<Box<dyn TransferLane>> {
-        let channel = self.open_sftp_channel().await?;
-        let raw = RawSftpSession::new(channel.into_stream());
-        raw.init().await.map_err(sftp_error)?;
-        Ok(Box::new(SftpLane {
-            raw,
-            write_chunk: self.write_chunk,
-            posix_rename: self.posix_rename,
-            destination_existed: false,
-        }))
+        self.channels.retain(|channel| channel.strong_count() > 0);
+
+        if self.may_add_channel() {
+            match self.open_channel().await {
+                Ok(channel) => {
+                    self.channels.push(Arc::downgrade(&channel));
+                    return Ok(Box::new(SftpLane::new(channel)));
+                }
+                Err(EngineError::LanesExhausted) => {
+                    self.channel_ceiling = self.channels.len().max(1);
+                    self.narrowed = Some(Instant::now());
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        self.channels
+            .iter()
+            .filter_map(|channel| channel.upgrade())
+            // One of these is the reference just upgraded; the rest are seats.
+            .map(|channel| (Arc::strong_count(&channel) - 1, channel))
+            .filter(|(seats, _)| *seats < LANES_PER_CHANNEL)
+            .min_by_key(|(seats, _)| *seats)
+            .map(|(_, channel)| Box::new(SftpLane::new(channel)) as Box<dyn TransferLane>)
+            .ok_or(EngineError::LanesExhausted)
     }
 
     async fn disconnect(&mut self) {
@@ -439,6 +509,28 @@ impl Protocol for SftpBackend {
 }
 
 impl SftpBackend {
+    fn may_add_channel(&self) -> bool {
+        self.channels.len() < self.channel_ceiling
+            || (self.channel_ceiling < MAX_CHANNELS
+                && self
+                    .narrowed
+                    .is_some_and(|at| at.elapsed() >= CHANNEL_PROBE))
+    }
+
+    async fn open_channel(&self) -> Result<Arc<Channel>> {
+        let channel = self.open_sftp_channel().await?;
+        let raw = RawSftpSession::new(channel.into_stream());
+        raw.init().await.map_err(sftp_error)?;
+        raw.set_timeout(request_timeout());
+        Ok(Arc::new(Channel {
+            raw,
+            slots: Arc::new(Semaphore::new(PIPELINE_DEPTH)),
+            write_chunk: self.write_chunk,
+            read_chunk: self.read_chunk,
+            posix_rename: self.posix_rename,
+        }))
+    }
+
     /// Ask the server what it can do, once, at connect time.
     ///
     /// Both answers change behaviour rather than decorate it: `posix-rename` decides
@@ -454,10 +546,13 @@ impl SftpBackend {
         };
         self.posix_rename = version.extensions.contains_key(POSIX_RENAME);
 
-        if let Ok(limits) = raw.limits().await
-            && limits.max_write_len > 0
-        {
-            self.write_chunk = (limits.max_write_len as usize).min(MAX_WRITE_CHUNK);
+        if let Ok(limits) = raw.limits().await {
+            if limits.max_write_len > 0 {
+                self.write_chunk = (limits.max_write_len as usize).min(MAX_WRITE_CHUNK);
+            }
+            if limits.max_read_len > 0 {
+                self.read_chunk = (limits.max_read_len.min(u64::from(READ_CHUNK))) as u32;
+            }
         }
         let _ = raw.close_session();
     }
@@ -701,14 +796,27 @@ where
 
 // ---------------------------------------------------------------- the lane
 
-/// One transfer's own SFTP channel.
+/// An SFTP channel, and what the server said it will accept on one.
+///
+/// Shared by the transfers seated on it. It closes when the last of them lets go,
+/// which is what keeps the count of open channels honest without bookkeeping.
+struct Channel {
+    raw: RawSftpSession,
+    /// Data requests this channel will keep outstanding at once, shared out among the
+    /// transfers on it. It is the window [`request_timeout`] is sized against, and it
+    /// bounds what one channel holds in memory however many files are using it.
+    slots: Arc<Semaphore>,
+    write_chunk: usize,
+    read_chunk: u32,
+    posix_rename: bool,
+}
+
+/// One transfer's seat on a channel.
 ///
 /// Offset-addressed reads and writes on a `RawSftpSession`, which is what makes phase
 /// 2's resume mechanically possible. Nothing here decides *whether* a resume is safe.
 struct SftpLane {
-    raw: RawSftpSession,
-    write_chunk: usize,
-    posix_rename: bool,
+    channel: Arc<Channel>,
     /// Whether an upload's destination was already there, settled before the first
     /// byte moved. `finalise` reads it rather than stat'ing again, because a second
     /// look could give a different answer than the one the transfer was planned on.
@@ -716,6 +824,17 @@ struct SftpLane {
 }
 
 impl SftpLane {
+    fn new(channel: Arc<Channel>) -> Self {
+        Self {
+            channel,
+            destination_existed: false,
+        }
+    }
+
+    fn raw(&self) -> &RawSftpSession {
+        &self.channel.raw
+    }
+
     /// The partial file a download owns. See [`crate::protocol::partial_name`] for why
     /// the job id is in it.
     fn partial_path(local: &Path, job: JobId) -> PathBuf {
@@ -734,13 +853,13 @@ impl SftpLane {
         if !exists {
             // Nothing to replace: a plain rename is already atomic here.
             return self
-                .raw
+                .raw()
                 .rename(from, to)
                 .await
                 .map(|_| ())
                 .map_err(sftp_error);
         }
-        if !self.posix_rename {
+        if !self.channel.posix_rename {
             return Err(EngineError::Unsupported {
                 operation: "replacing an existing file atomically (this server does not \
                             offer posix-rename)"
@@ -750,7 +869,7 @@ impl SftpLane {
         let mut data = Vec::new();
         ssh_string(from, &mut data);
         ssh_string(to, &mut data);
-        self.raw
+        self.raw()
             .extended(POSIX_RENAME, data)
             .await
             .map(|_| ())
@@ -761,56 +880,44 @@ impl SftpLane {
 #[async_trait]
 impl TransferLane for SftpLane {
     async fn download(&mut self, req: &TransferReq) -> Result<Transferred> {
-        let opened = self
-            .raw
+        let raw = self.raw();
+        let opened = raw
             .open(&req.remote_path, OpenFlags::READ, FileAttributes::default())
             .await
             .map_err(sftp_error)?;
         let handle = opened.handle;
 
-        let total = self
-            .raw
-            .fstat(handle.clone())
-            .await
-            .ok()
-            .and_then(|a| a.attrs.size);
-
         let partial = Self::partial_path(&req.local_path, req.job);
         let mut file = match open_partial(&partial, req.offset).await {
             Ok(file) => file,
             Err(err) => {
-                let _ = self.raw.close(handle).await;
+                let _ = raw.close(handle).await;
                 return Err(err);
             }
         };
+
+        let mut reads = Reads::new(&self.channel, handle.clone(), req.offset);
+        let (mut chunk, total) = reads.open().await;
 
         let mut at = req.offset;
         let mut written = 0u64;
         let mut rolling = req.prefix.clone().unwrap_or_default();
         let mut checkpointed = req.offset;
+
         loop {
-            // Checked before *and* awaited during the read, so cancellation lands
-            // within one round trip rather than one chunk of bytes.
             if req.cancel.is_cancelled() {
-                return stop_download(&self.raw, handle, file, &partial, req.keeping_partial())
-                    .await;
+                drop(reads);
+                return stop_download(raw, handle, file, &partial, req.keeping_partial()).await;
             }
-            let read = tokio::select! {
-                _ = req.cancel.cancelled() => {
-                    return stop_download(&self.raw, handle, file, &partial, req.keeping_partial()).await;
-                }
-                result = self.raw.read(handle.clone(), at, READ_CHUNK) => result,
-            };
-            let data = match read {
-                Ok(data) if data.data.is_empty() => break,
-                Ok(data) => data.data,
-                // EOF arrives as a status, not as a zero-length read.
-                Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
+            let Some(next) = chunk else { break };
+            let data = match next {
+                Ok(data) => data,
                 Err(err) => {
-                    let _ = self.raw.close(handle).await;
+                    drop(reads);
+                    let _ = raw.close(handle).await;
                     drop(file);
                     let _ = tokio::fs::remove_file(&partial).await;
-                    return Err(sftp_error(err));
+                    return Err(err);
                 }
             };
 
@@ -834,17 +941,28 @@ impl TransferLane for SftpLane {
                 checkpointed = at;
                 req.checkpoint.report(at, rolling.snapshot());
             }
-        }
 
-        // The source as it is now, read from the handle the transfer used rather than
-        // by path: a rename underneath us would otherwise be invisible.
-        let source_now = self
-            .raw
-            .fstat(handle.clone())
-            .await
-            .ok()
-            .map(|a| facts_from(&req.remote_path, &a.attrs));
-        let _ = self.raw.close(handle).await;
+            chunk = tokio::select! {
+                _ = req.cancel.cancelled() => {
+                    drop(reads);
+                    return stop_download(raw, handle, file, &partial, req.keeping_partial()).await;
+                }
+                next = reads.next() => next,
+            };
+        }
+        drop(reads);
+
+        // Only a resumed transfer is spliced from two readings of the source, and only
+        // a splice needs to know whether it moved in between.
+        let source_now = if req.is_resume() {
+            raw.fstat(handle.clone())
+                .await
+                .ok()
+                .map(|a| facts_from(&req.remote_path, &a.attrs))
+        } else {
+            None
+        };
+        let _ = raw.close(handle).await;
 
         // Durability before visibility: the rename must not publish a name whose
         // contents are still only in the page cache.
@@ -868,12 +986,12 @@ impl TransferLane for SftpLane {
     async fn upload(&mut self, req: &TransferReq) -> Result<Transferred> {
         // Whether the destination exists decides whether finalising is even possible,
         // so it is settled before a single byte moves.
-        let exists = match self.raw.stat(&req.remote_path).await {
+        let exists = match self.raw().stat(&req.remote_path).await {
             Ok(_) => true,
             Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => false,
             Err(err) => return Err(sftp_error(err)),
         };
-        if exists && !self.posix_rename {
+        if exists && !self.channel.posix_rename {
             return Err(EngineError::Unsupported {
                 operation: "replacing an existing file atomically (this server does not \
                             offer posix-rename)"
@@ -881,6 +999,7 @@ impl TransferLane for SftpLane {
             });
         }
 
+        let raw = self.raw();
         let mut file = tokio::fs::File::open(&req.local_path)
             .await
             .map_err(|e| EngineError::from_io(&req.local_path, &e))?;
@@ -903,66 +1022,88 @@ impl TransferLane for SftpLane {
         } else {
             OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE
         };
-        let opened = self
-            .raw
+        let opened = raw
             .open(&temp, flags, FileAttributes::default())
             .await
             .map_err(sftp_error)?;
         let handle = opened.handle;
 
-        let mut buf = vec![0u8; self.write_chunk];
+        let mut writes = Writes::new(&self.channel, handle.clone(), req.offset);
         let mut at = req.offset;
         let mut written = 0u64;
         let mut rolling = req.prefix.clone().unwrap_or_default();
         let mut checkpointed = req.offset;
-        loop {
-            if req.cancel.is_cancelled() {
-                return stop_upload(&self.raw, handle, &temp, req.keeping_partial()).await;
-            }
-            let read = file
-                .read(&mut buf)
-                .await
-                .map_err(|e| EngineError::from_io(&req.local_path, &e))?;
-            if read == 0 {
-                break;
-            }
-            let chunk = buf[..read].to_vec();
-            let outcome = tokio::select! {
-                _ = req.cancel.cancelled() => {
-                    return stop_upload(&self.raw, handle, &temp, req.keeping_partial()).await;
-                }
-                result = self.raw.write(handle.clone(), at, chunk) => result,
-            };
-            if let Err(err) = outcome {
-                let _ = self.raw.close(handle).await;
-                let _ = self.raw.remove(&temp).await;
-                return Err(sftp_error(err));
-            }
-            rolling.update(&buf[..read]);
-            at += read as u64;
-            written += read as u64;
-            req.progress.report(at);
+        let mut ended = false;
 
-            if at - checkpointed >= CHECKPOINT_BYTES {
-                // A write acknowledgement is not durability, so this asks the server to
-                // flush. Where it cannot, the checkpoint still stands: recovery reads
-                // the remote prefix back and checks it against this digest before
-                // trusting a single byte of it.
-                let _ = self.raw.fsync(handle.clone()).await;
+        loop {
+            // The hash runs with what has been sent, so a checkpoint waits for the
+            // pipeline to drain or it would file a digest of more bytes than its offset.
+            let draining = writes.sent - checkpointed >= CHECKPOINT_BYTES;
+            while !ended && !draining && !writes.full() {
+                let Some(permit) = writes.reserve().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; self.channel.write_chunk];
+                let read = match file.read(&mut buf).await {
+                    Ok(read) => read,
+                    Err(err) => {
+                        drop(writes);
+                        let _ = raw.close(handle).await;
+                        let _ = raw.remove(&temp).await;
+                        return Err(EngineError::from_io(&req.local_path, &err));
+                    }
+                };
+                if read == 0 {
+                    ended = true;
+                    break;
+                }
+                buf.truncate(read);
+                rolling.update(&buf);
+                writes.send(permit, buf);
+            }
+            if req.cancel.is_cancelled() {
+                drop(writes);
+                return stop_upload(raw, handle, &temp, req.keeping_partial()).await;
+            }
+            if writes.idle() {
+                if ended {
+                    break;
+                }
+                let _ = raw.fsync(handle.clone()).await;
                 checkpointed = at;
                 req.checkpoint.report(at, rolling.snapshot());
+                continue;
+            }
+            let acked = tokio::select! {
+                _ = req.cancel.cancelled() => {
+                    drop(writes);
+                    return stop_upload(raw, handle, &temp, req.keeping_partial()).await;
+                }
+                acked = writes.ack() => acked,
+            };
+            match acked {
+                Some(Ok(len)) => {
+                    at += len;
+                    written += len;
+                    req.progress.report(at);
+                }
+                Some(Err(err)) => {
+                    drop(writes);
+                    let _ = raw.close(handle).await;
+                    let _ = raw.remove(&temp).await;
+                    return Err(err);
+                }
+                None => break,
             }
         }
+        drop(writes);
 
         // Not every server implements fsync; a failure here is not a reason to throw
         // away a complete upload.
-        let _ = self.raw.fsync(handle.clone()).await;
-        self.raw.close(handle).await.map_err(sftp_error)?;
+        let _ = raw.fsync(handle.clone()).await;
+        raw.close(handle).await.map_err(sftp_error)?;
 
         let source_now = local_facts_of(&req.local_path).await;
-        // Whether the destination existed was settled before a byte moved, and the
-        // finalisation needs it. Recorded here so `finalise` does not have to stat
-        // again and get a different answer.
         self.destination_existed = exists;
 
         Ok(Transferred {
@@ -1003,7 +1144,7 @@ impl TransferLane for SftpLane {
             .await
         {
             // Leave nothing behind that a person would have to find and delete.
-            let _ = self.raw.remove(&done.temporary_path).await;
+            let _ = self.raw().remove(&done.temporary_path).await;
             return Err(err);
         }
         Ok(outcome)
@@ -1015,31 +1156,37 @@ impl TransferLane for SftpLane {
             let _ = tokio::fs::remove_file(local).await;
             return;
         }
-        let _ = self.raw.remove(temporary_path).await;
+        let _ = self.raw().remove(temporary_path).await;
     }
 
     async fn prefix_digest(&mut self, path: &str, len: u64) -> Result<String> {
         let opened = self
-            .raw
+            .raw()
             .open(path, OpenFlags::READ, FileAttributes::default())
             .await
             .map_err(sftp_error)?;
         let handle = opened.handle;
 
+        // Pipelined for the same reason a download is: this reads back every byte the
+        // resume is about to skip, so serially it costs what re-sending them would.
+        let raw = self.raw();
+        let mut reads = Reads::new(&self.channel, handle.clone(), 0).until(Some(len));
         let mut rolling = crate::digest::Rolling::new();
-        while rolling.len() < len {
-            let want = (len - rolling.len()).min(READ_CHUNK as u64) as u32;
-            match self.raw.read(handle.clone(), rolling.len(), want).await {
-                Ok(data) if data.data.is_empty() => break,
-                Ok(data) => rolling.update(&data.data),
-                Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
+        let mut failed = None;
+        while let Some(chunk) = reads.next().await {
+            match chunk {
+                Ok(data) => rolling.update(&data),
                 Err(err) => {
-                    let _ = self.raw.close(handle).await;
-                    return Err(sftp_error(err));
+                    failed = Some(err);
+                    break;
                 }
             }
         }
-        let _ = self.raw.close(handle).await;
+        drop(reads);
+        let _ = raw.close(handle).await;
+        if let Some(err) = failed {
+            return Err(err);
+        }
 
         // Short of the length the checkpoint claims, so the checkpoint is not about
         // this file. Refusing beats hashing whatever happens to be there.
@@ -1055,7 +1202,7 @@ impl TransferLane for SftpLane {
     }
 
     async fn size_of(&mut self, path: &str) -> Result<Option<u64>> {
-        match self.raw.stat(path).await {
+        match self.raw().stat(path).await {
             Ok(attrs) => Ok(Some(attrs.attrs.size.unwrap_or(0))),
             Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
                 Ok(None)
@@ -1065,11 +1212,187 @@ impl TransferLane for SftpLane {
     }
 
     async fn close(self: Box<Self>) {
-        let _ = self.raw.close_session();
+        // Just the seat. The channel closes with the last transfer on it.
     }
 }
 
-/// Open the local partial a download writes into.
+/// One of a channel's request slots.
+///
+/// A pipeline waits for a slot only when it holds no requests of its own: waiting while
+/// holding them would be waiting on answers that nothing is polling for. With none
+/// held there is nothing to wait on itself, so the wait is always on another transfer
+/// that is making progress.
+async fn reserve(slots: &Arc<Semaphore>, must_wait: bool) -> Option<OwnedSemaphorePermit> {
+    let slots = Arc::clone(slots);
+    if must_wait {
+        slots.acquire_owned().await.ok()
+    } else {
+        slots.try_acquire_owned().ok()
+    }
+}
+
+/// An answer to one pipelined read: what it asked for, and what came back.
+type Answered = (u32, std::result::Result<Vec<u8>, SftpError>);
+/// An acknowledged write: how many bytes it carried.
+type Acked = (u64, std::result::Result<(), SftpError>);
+
+/// A remote file read in order, with several requests in flight.
+///
+/// The pipeline is what makes a transfer cost bandwidth rather than round trips, and
+/// in-order delivery is what lets the caller hash and checkpoint as it goes.
+struct Reads<'a> {
+    raw: &'a RawSftpSession,
+    slots: Arc<Semaphore>,
+    handle: String,
+    chunk: u32,
+    /// Where the next request starts, which runs ahead of what has been delivered.
+    asking: u64,
+    delivered: u64,
+    /// Stop asking here. `None` reads until the server says the file has ended.
+    end: Option<u64>,
+    inflight: FuturesOrdered<BoxFuture<'a, Answered>>,
+    ended: bool,
+}
+
+impl<'a> Reads<'a> {
+    fn new(channel: &'a Channel, handle: String, from: u64) -> Self {
+        Self {
+            raw: &channel.raw,
+            slots: Arc::clone(&channel.slots),
+            handle,
+            chunk: channel.read_chunk,
+            asking: from,
+            delivered: from,
+            end: None,
+            inflight: FuturesOrdered::new(),
+            ended: false,
+        }
+    }
+
+    fn until(mut self, end: Option<u64>) -> Self {
+        self.end = end;
+        self
+    }
+
+    async fn fill(&mut self) {
+        while !self.ended && self.inflight.len() < PIPELINE_DEPTH {
+            let want = match self.end {
+                Some(end) if self.asking >= end => break,
+                Some(end) => (end - self.asking).min(u64::from(self.chunk)) as u32,
+                None => self.chunk,
+            };
+            let Some(permit) = reserve(&self.slots, self.inflight.is_empty()).await else {
+                break;
+            };
+            let (raw, handle, at) = (self.raw, self.handle.clone(), self.asking);
+            self.inflight.push_back(Box::pin(async move {
+                let _permit = permit;
+                (want, raw.read(handle, at, want).await.map(|data| data.data))
+            }));
+            self.asking += u64::from(want);
+        }
+    }
+
+    /// The next chunk, in order. `None` once the file has ended.
+    async fn next(&mut self) -> Option<Result<Vec<u8>>> {
+        self.fill().await;
+        let (want, result) = self.inflight.next().await?;
+        match result {
+            Ok(data) if data.is_empty() => {
+                self.ended = true;
+                None
+            }
+            Ok(data) => {
+                self.delivered += data.len() as u64;
+                // A short answer leaves everything queued behind it aimed at the wrong
+                // offsets, so the queue is dropped and re-primed from where the file is.
+                if (data.len() as u32) < want {
+                    self.inflight = FuturesOrdered::new();
+                    self.asking = self.delivered;
+                }
+                Some(Ok(data))
+            }
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => {
+                self.ended = true;
+                None
+            }
+            Err(err) => {
+                self.ended = true;
+                Some(Err(sftp_error(err)))
+            }
+        }
+    }
+
+    /// The first chunk, and the file's length, asked for together.
+    ///
+    /// One flight rather than two, and the length is what the transfer is measured
+    /// against afterwards: a listing's idea of the size can be minutes old by the time
+    /// the job reaches the front of the queue, and stopping at a stale figure would
+    /// publish a file with its tail missing.
+    async fn open(&mut self) -> (Option<Result<Vec<u8>>>, Option<u64>) {
+        let (raw, handle) = (self.raw, self.handle.clone());
+        let (first, facts) = tokio::join!(self.next(), raw.fstat(handle));
+        let total = facts.ok().and_then(|a| a.attrs.size);
+        self.end = total;
+        (first, total)
+    }
+}
+
+/// A remote file written in order, with several requests in flight.
+///
+/// Acknowledgements arrive in the order the writes were sent, so the offset the server
+/// has confirmed is always a prefix — which is what a checkpoint can be filed under.
+struct Writes<'a> {
+    raw: &'a RawSftpSession,
+    slots: Arc<Semaphore>,
+    handle: String,
+    sent: u64,
+    inflight: FuturesOrdered<BoxFuture<'a, Acked>>,
+}
+
+impl<'a> Writes<'a> {
+    fn new(channel: &'a Channel, handle: String, from: u64) -> Self {
+        Self {
+            raw: &channel.raw,
+            slots: Arc::clone(&channel.slots),
+            handle,
+            sent: from,
+            inflight: FuturesOrdered::new(),
+        }
+    }
+
+    /// A slot for the next write, taken before the bytes are read from disk so none are
+    /// read that cannot be sent.
+    async fn reserve(&mut self) -> Option<OwnedSemaphorePermit> {
+        reserve(&self.slots, self.inflight.is_empty()).await
+    }
+
+    fn full(&self) -> bool {
+        self.inflight.len() >= PIPELINE_DEPTH
+    }
+
+    fn idle(&self) -> bool {
+        self.inflight.is_empty()
+    }
+
+    fn send(&mut self, permit: OwnedSemaphorePermit, data: Vec<u8>) {
+        let len = data.len() as u64;
+        let (raw, handle, at) = (self.raw, self.handle.clone(), self.sent);
+        self.inflight.push_back(Box::pin(async move {
+            let _permit = permit;
+            (len, raw.write(handle, at, data).await.map(|_| ()))
+        }));
+        self.sent += len;
+    }
+
+    /// How many bytes the next acknowledgement covers, in order.
+    async fn ack(&mut self) -> Option<Result<u64>> {
+        let (len, result) = self.inflight.next().await?;
+        Some(result.map(|()| len).map_err(sftp_error))
+    }
+}
+
+/// Open the local partial a download writes into./// Open the local partial a download writes into.
 ///
 /// `create_new` at offset zero is the ownership claim: if something is already there,
 /// this job does not own it and must not write through it.
@@ -1344,6 +1667,18 @@ fn sftp_error(err: SftpError) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The window every transfer on a channel shares. Sizing the request timeout
+    /// against anything smaller is what made a pipelined read time out on a slow link.
+    #[test]
+    fn the_request_timeout_covers_the_whole_window() {
+        let window = PIPELINE_DEPTH as u64 * READ_CHUNK as u64;
+        let slowest = window / (request_timeout() - 30);
+        assert!(
+            slowest <= 64 * 1024,
+            "a link slower than {slowest} B/s would time out on a full window"
+        );
+    }
 
     /// The classification the reconnect depends on. A dropped connection has to look
     /// like a network fault, or `check_fatal` will not notice, the session will not

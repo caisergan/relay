@@ -399,6 +399,84 @@ async fn read_file_refuses_to_pull_something_too_large_into_memory() {
 
 // ---------------------------------------------------------------- transfers
 
+/// Several transfers at once on one connection, which is the point: a server counts
+/// channels, so a client that spent one per file could only ever move as many files as
+/// `MaxSessions` allowed. These all run together and each has to land byte for byte.
+#[tokio::test]
+async fn one_connection_carries_many_transfers_at_once() {
+    let mut c = connect(AuthMethod::Password).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let mut lanes = Vec::new();
+    for _ in 0..12 {
+        lanes.push(c.backend.open_lane().await.expect("lane"));
+    }
+
+    let moved =
+        futures_util::future::join_all(lanes.iter_mut().enumerate().map(|(index, lane)| {
+            let local = dir.path().join(format!("copy-{index}.bin"));
+            async move {
+                let (request, _progress) = req(
+                    &remote("assets/one-mib.bin"),
+                    &local,
+                    CancellationToken::new(),
+                );
+                let outcome = transfer(lane, &request, Direction::Down).await?;
+                Ok::<_, EngineError>((local, outcome))
+            }
+        }))
+        .await;
+
+    for lane in lanes {
+        lane.close().await;
+    }
+
+    let source = sha256(&std::fs::read(host_file("assets/one-mib.bin")).expect("source"));
+    for result in moved {
+        let (local, outcome) = result.expect("every transfer completes");
+        assert_eq!(outcome.final_size, 1024 * 1024);
+        assert_eq!(
+            sha256(&std::fs::read(&local).expect("read back")),
+            source,
+            "{} came back wrong; interleaved reads landed in the wrong file",
+            local.display()
+        );
+    }
+}
+
+/// The transfer measures the file itself, in the flight that starts it.
+///
+/// Nothing tells the lane how long the file is: a listing's figure can be minutes old
+/// by the time a job reaches the front of a queue of thousands, and a transfer that
+/// stopped at a stale one would publish a file with its tail missing.
+#[tokio::test]
+async fn a_download_takes_its_length_from_the_source_not_from_a_caller() {
+    let mut c = connect(AuthMethod::Password).await;
+    let mut lane = c.backend.open_lane().await.expect("lane");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let local = dir.path().join("one-mib.bin");
+    let (request, _progress) = req(
+        &remote("assets/one-mib.bin"),
+        &local,
+        CancellationToken::new(),
+    );
+
+    let moved = lane.download(&request).await.expect("download");
+    lane.close().await;
+
+    assert_eq!(moved.final_size, 1024 * 1024, "measured, not assumed");
+    assert_eq!(
+        moved.bytes,
+        1024 * 1024,
+        "and read to that length rather than stopping short of it"
+    );
+    assert_eq!(
+        sha256(&std::fs::read(&moved.temporary_path).expect("read back")),
+        sha256(&std::fs::read(host_file("assets/one-mib.bin")).expect("source")),
+    );
+}
+
 #[tokio::test]
 async fn a_download_lands_byte_for_byte_with_monotonic_progress() {
     let mut c = connect(AuthMethod::Password).await;

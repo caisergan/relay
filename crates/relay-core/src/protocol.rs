@@ -92,6 +92,16 @@ impl std::fmt::Debug for CheckpointSink {
     }
 }
 
+/// How much moves between durable checkpoints.
+///
+/// A checkpoint costs an fsync, so one per chunk would put a disk flush in the middle
+/// of the byte loop. Eight megabytes is the most a resume can be asked to re-send, in
+/// exchange for roughly one flush per eight megabytes rather than one per quarter.
+///
+/// It lives here rather than in a backend because the queue reads it too: it is also
+/// roughly where a transfer becomes worth resuming.
+pub const CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct TransferReq {
     pub job: JobId,
