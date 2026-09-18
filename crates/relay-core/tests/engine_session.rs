@@ -18,7 +18,7 @@ use relay_core::job::{JobState, QueueOp};
 use relay_core::mock::{MockFactory, MockFs, MockOptions, NoSecrets};
 use relay_core::model::{AuthMethod, Direction, Proto, ServerConfig, SessionId, SessionState};
 use relay_core::servers::ServerStore;
-use relay_core::settings::SettingsStore;
+use relay_core::settings::{Settings, SettingsStore};
 use relay_core::store::QueueStore;
 use relay_core::{EngineSnapshot, Subscription};
 use uuid::Uuid;
@@ -1310,6 +1310,15 @@ async fn a_finished_lane_is_reused_by_the_next_transfer() {
         ..MockOptions::default()
     })
     .await;
+    // Pinned rather than left to the default, because the pool is only exercised when
+    // there are more transfers than slots to run them in.
+    h.engine
+        .set_settings(Settings {
+            concurrency: 2,
+            ..Settings::default()
+        })
+        .await
+        .expect("settings");
     let cfg = server();
     let server_id = cfg.id;
     let session = h.engine.open_session(cfg).expect("session opens");
@@ -1335,8 +1344,8 @@ async fn a_finished_lane_is_reused_by_the_next_transfer() {
 
     let count = opened.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
-        count < 4,
-        "four transfers opened {count} lanes; the pool is not being reused"
+        count <= 2,
+        "four transfers in two slots opened {count} lanes; the pool is not being reused"
     );
     assert!(count >= 1, "at least one lane had to be opened");
 }

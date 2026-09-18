@@ -147,9 +147,10 @@ pub const CLOSE_GRACE: Duration = Duration::from_secs(5);
 /// says it could take.
 ///
 /// The scheduler's per-session cap is the smaller of this, the backend's own
-/// `max_lanes`, and the concurrency slider. It exists so a backend that advertises a
-/// generous limit cannot, on its own, turn one server into the whole queue.
-pub const MAX_SESSION_LANES: u8 = 4;
+/// `max_lanes`, the per-server setting, and the concurrency slider. It exists so a
+/// backend that advertises a generous limit cannot, on its own, turn one server into
+/// the whole queue.
+pub const MAX_SESSION_LANES: u8 = crate::settings::MAX_LANES;
 /// Commands buffered before a caller has to wait for the actor.
 const CMD_BUFFER: usize = 64;
 /// How many times a lost connection is retried before it waits for a person.

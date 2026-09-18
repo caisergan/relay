@@ -422,8 +422,13 @@ unexpected: boolean };
 export type Settings = {
 	theme: Theme,
 	density: Density,
-	/**  Simultaneous transfers, 1–8. */
+	/**  Simultaneous transfers across every server. */
 	concurrency: number,
+	/**
+	 *  Of those, how many may run against one server at a time. Defaulted for the same
+	 *  reason as `on_launch`: a settings file written before this existed lacks it.
+	 */
+	lanesPerServer?: number,
 	/**  `None` opens the conflict sheet every time. */
 	defaultConflict: ConflictAction | null,
 	downloadDir: string | null,

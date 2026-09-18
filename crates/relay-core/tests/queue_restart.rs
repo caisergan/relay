@@ -132,6 +132,7 @@ async fn start(store: QueueStore) -> Running {
         prompts: Arc::new(PromptBroker::new(prompts)),
         rt: tokio::runtime::Handle::current(),
         concurrency: 3,
+        lanes_per_server: relay_core::settings::MAX_LANES,
         default_conflict: None,
     })
     .await

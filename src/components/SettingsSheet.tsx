@@ -10,6 +10,15 @@ import { useUiStore } from '@/state/uiStore'
 
 import { IconClose } from './Icons'
 
+/** Mirrors of the clamps in `crates/relay-core/src/settings.rs`. Rust is what enforces
+ * them; these only stop the slider offering a value it would clamp away. */
+const MIN_CONCURRENCY = 1
+const MAX_CONCURRENCY = 32
+const MIN_LANES = 1
+const MAX_LANES = 32
+/** `lanesPerServer` is absent from a settings file written before it existed. */
+const DEFAULT_LANES = 16
+
 /** The 1.0 settings, and only those.
  *
  * Rust holds them and Rust clamps them, so this sheet sends a whole `Settings` and
@@ -112,13 +121,13 @@ export function SettingsSheet() {
 
             <Row
               label="Simultaneous transfers"
-              hint="Applies to transfers already running, not just the next ones."
+              hint="Across every server at once. Applies to transfers already running, not just the next ones."
             >
               <div className="settings__slider">
                 <input
                   type="range"
-                  min={1}
-                  max={8}
+                  min={MIN_CONCURRENCY}
+                  max={MAX_CONCURRENCY}
                   step={1}
                   value={settings.concurrency}
                   aria-label="Simultaneous transfers"
@@ -127,6 +136,28 @@ export function SettingsSheet() {
                   }
                 />
                 <span className="settings__value">{settings.concurrency}</span>
+              </div>
+            </Row>
+
+            <Row
+              label="Per server"
+              hint="How many of those may run against one server. Several share one connection, so this is about how much to keep in flight rather than about what the server will allow."
+            >
+              <div className="settings__slider">
+                <input
+                  type="range"
+                  min={MIN_LANES}
+                  max={MAX_LANES}
+                  step={1}
+                  value={settings.lanesPerServer ?? DEFAULT_LANES}
+                  aria-label="Transfers per server"
+                  onChange={(e) =>
+                    save({ ...settings, lanesPerServer: Number(e.currentTarget.value) })
+                  }
+                />
+                <span className="settings__value">
+                  {settings.lanesPerServer ?? DEFAULT_LANES}
+                </span>
               </div>
             </Row>
 

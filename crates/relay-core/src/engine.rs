@@ -196,6 +196,7 @@ impl Engine {
             prompts: Arc::clone(hub.prompts()),
             rt: rt.clone(),
             concurrency: current.concurrency,
+            lanes_per_server: current.lanes_per_server,
             default_conflict: current.default_conflict,
         })
         .await?;
@@ -230,7 +231,11 @@ impl Engine {
         // The slider is only a setting if it reaches work already running, and the
         // conflict default is only a setting if the next transfer reads it.
         self.queue
-            .set_settings(stored.concurrency, stored.default_conflict)
+            .set_settings(
+                stored.concurrency,
+                stored.lanes_per_server,
+                stored.default_conflict,
+            )
             .await;
         Ok(stored)
     }

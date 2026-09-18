@@ -1680,6 +1680,18 @@ mod tests {
         );
     }
 
+    /// Channels are the scarce thing, not requests: this is what Relay asks a stranger
+    /// for, and a hardened `MaxSessions` has to leave room for the browse channel too.
+    #[test]
+    fn a_session_asks_for_few_channels_and_seats_many_transfers_on_them() {
+        // The browse channel spends one beyond these.
+        const _: () = assert!(MAX_CHANNELS < 6, "stays inside a tightened MaxSessions");
+        const _: () = assert!(
+            MAX_CHANNELS * LANES_PER_CHANNEL >= crate::settings::MAX_LANES as usize,
+            "the slider must not ask for seats that cannot exist"
+        );
+    }
+
     /// The classification the reconnect depends on. A dropped connection has to look
     /// like a network fault, or `check_fatal` will not notice, the session will not
     /// reconnect, and the job will fail immediately instead of being retried.

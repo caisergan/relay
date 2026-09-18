@@ -190,6 +190,7 @@ async fn five_hundred_jobs_finish_without_breaking_a_cap_or_stranding_one() {
         prompts: Arc::new(PromptBroker::new(prompts)),
         rt: tokio::runtime::Handle::current(),
         concurrency: CONCURRENCY,
+        lanes_per_server: relay_core::settings::MAX_LANES,
         default_conflict: None,
     })
     .await
@@ -308,7 +309,7 @@ async fn five_hundred_jobs_finish_without_breaking_a_cap_or_stranding_one() {
             }
             3 => {
                 scheduler
-                    .set_settings(1 + rng.below(HIGHEST as usize) as u8, None)
+                    .set_settings(1 + rng.below(HIGHEST as usize) as u8, u8::MAX, None)
                     .await
             }
             // A session drops and comes back. Its jobs must pause and resume, not fail.

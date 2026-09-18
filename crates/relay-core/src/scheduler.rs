@@ -96,6 +96,7 @@ enum Msg {
     },
     Settings {
         concurrency: u8,
+        lanes_per_server: u8,
         default_conflict: Option<ConflictAction>,
     },
     Report {
@@ -329,6 +330,8 @@ pub struct SchedulerContext {
     pub prompts: Arc<PromptBroker>,
     pub rt: tokio::runtime::Handle,
     pub concurrency: u8,
+    /// How many of those may run against one server.
+    pub lanes_per_server: u8,
     /// What the settings say to do about an existing destination. `None` asks.
     pub default_conflict: Option<ConflictAction>,
 }
@@ -357,6 +360,7 @@ impl Scheduler {
             dispatcher: ctx.dispatcher,
             prompts: ctx.prompts,
             concurrency: ctx.concurrency.max(1),
+            lanes_per_server: ctx.lanes_per_server.max(1),
             default_conflict: ctx.default_conflict,
             runs: HashMap::new(),
             next_run: 0,
@@ -425,11 +429,17 @@ impl Scheduler {
     }
 
     /// Apply the settings the queue cares about.
-    pub async fn set_settings(&self, concurrency: u8, default_conflict: Option<ConflictAction>) {
+    pub async fn set_settings(
+        &self,
+        concurrency: u8,
+        lanes_per_server: u8,
+        default_conflict: Option<ConflictAction>,
+    ) {
         let _ = self
             .tx
             .send(Msg::Settings {
                 concurrency,
+                lanes_per_server,
                 default_conflict,
             })
             .await;
@@ -487,6 +497,7 @@ struct Inner {
     dispatcher: Arc<dyn Dispatcher>,
     prompts: Arc<PromptBroker>,
     concurrency: u8,
+    lanes_per_server: u8,
     default_conflict: Option<ConflictAction>,
     /// Which run of each job is the live one. See [`Reporter`].
     runs: HashMap<JobId, u64>,
@@ -625,10 +636,12 @@ impl Inner {
             }
             Msg::Settings {
                 concurrency,
+                lanes_per_server,
                 default_conflict,
             } => {
                 self.default_conflict = default_conflict;
                 self.concurrency = concurrency.max(1);
+                self.lanes_per_server = lanes_per_server.max(1);
                 // Lowering the slider must take effect on work already running, or the
                 // control would only apply to a queue that has not started yet.
                 self.throttle().await;
@@ -1168,10 +1181,10 @@ impl Inner {
                 continue;
             };
             let session = job.session;
-            let cap = self
-                .sessions
-                .get(&session)
-                .map_or(0, |slot| usize::from(slot.max_lanes));
+            // The smaller of what the backend will carry and what the setting allows.
+            let cap = self.sessions.get(&session).map_or(0, |slot| {
+                usize::from(slot.max_lanes.min(self.lanes_per_server))
+            });
             let running = per_session.entry(session).or_default();
             if *running >= cap {
                 continue;
@@ -1513,6 +1526,7 @@ mod tests {
             prompts: Arc::new(PromptBroker::new(prompt_events)),
             rt: tokio::runtime::Handle::current(),
             concurrency,
+            lanes_per_server: crate::settings::MAX_LANES,
             default_conflict: None,
         })
         .await
@@ -1858,7 +1872,7 @@ mod tests {
         settle(&h).await;
         assert_eq!(h.bench.running().len(), 4);
 
-        h.scheduler.set_settings(2, None).await;
+        h.scheduler.set_settings(2, u8::MAX, None).await;
         settle(&h).await;
 
         let running = states(&h)
@@ -1884,10 +1898,10 @@ mod tests {
         h.scheduler.enqueue(batch, specs).await.unwrap();
         settle(&h).await;
 
-        h.scheduler.set_settings(1, None).await;
+        h.scheduler.set_settings(1, u8::MAX, None).await;
         settle(&h).await;
         let _ = h.bench.take();
-        h.scheduler.set_settings(4, None).await;
+        h.scheduler.set_settings(4, u8::MAX, None).await;
         settle(&h).await;
 
         let running = states(&h)
@@ -2334,6 +2348,7 @@ mod tests {
             prompts: Arc::new(PromptBroker::new(prompt_events)),
             rt: tokio::runtime::Handle::current(),
             concurrency: 1,
+            lanes_per_server: crate::settings::MAX_LANES,
             default_conflict: None,
         })
         .await

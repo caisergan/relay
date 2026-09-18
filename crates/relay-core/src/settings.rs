@@ -18,8 +18,18 @@ use crate::error::{EngineError, Result};
 use crate::interact::ConflictAction;
 
 /// The concurrency slider's range, from the design's settings sheet.
+///
+/// The ceiling is high because a queue of small files is bound by round trips rather
+/// than bandwidth: there, concurrency is the whole of the throughput.
 pub const MIN_CONCURRENCY: u8 = 1;
-pub const MAX_CONCURRENCY: u8 = 8;
+pub const MAX_CONCURRENCY: u8 = 32;
+/// The per-server transfer slider's range.
+///
+/// These are transfers, not connections: several share one SSH channel, so the ceiling
+/// is about how much the queue should have in flight rather than about what the server
+/// will allow.
+pub const MIN_LANES: u8 = 1;
+pub const MAX_LANES: u8 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -57,8 +67,12 @@ pub enum LaunchMode {
 pub struct Settings {
     pub theme: Theme,
     pub density: Density,
-    /// Simultaneous transfers, 1–8.
+    /// Simultaneous transfers across every server.
     pub concurrency: u8,
+    /// Of those, how many may run against one server at a time. Defaulted for the same
+    /// reason as `on_launch`: a settings file written before this existed lacks it.
+    #[serde(default = "default_lanes")]
+    pub lanes_per_server: u8,
     /// `None` opens the conflict sheet every time.
     pub default_conflict: DefaultConflict,
     pub download_dir: Option<PathBuf>,
@@ -80,7 +94,8 @@ impl Default for Settings {
         Self {
             theme: Theme::System,
             density: Density::Comfortable,
-            concurrency: 3,
+            concurrency: 16,
+            lanes_per_server: default_lanes(),
             default_conflict: None,
             download_dir: None,
             show_hidden: false,
@@ -90,10 +105,15 @@ impl Default for Settings {
     }
 }
 
+fn default_lanes() -> u8 {
+    16
+}
+
 impl Settings {
     /// Clamp anything a stale config file or a buggy client might send.
     pub fn normalised(mut self) -> Self {
         self.concurrency = self.concurrency.clamp(MIN_CONCURRENCY, MAX_CONCURRENCY);
+        self.lanes_per_server = self.lanes_per_server.clamp(MIN_LANES, MAX_LANES);
         self
     }
 }
