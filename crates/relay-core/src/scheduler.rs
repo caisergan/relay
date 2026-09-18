@@ -883,13 +883,10 @@ impl Inner {
                 record,
             } => {
                 if let Some(size) = size {
-                    self.apply(job, JobEvent::Size { size }).await;
+                    self.apply_quietly(job, JobEvent::Size { size }).await;
                 }
-                // Committed before the transfer is told to go. `apply` writes the job
-                // and its record in one transaction and waits for it, because this is
-                // the write everything downstream depends on.
-                if let Some(job) = self.jobs.get_mut(&job) {
-                    job.resume = Some(record);
+                if let Some(entry) = self.jobs.get_mut(&job) {
+                    entry.resume = Some(record);
                 }
                 self.rates.insert(job, Rate::new());
                 if let Some(slot) = self
@@ -899,12 +896,23 @@ impl Inner {
                 {
                     slot.starved = 0;
                 }
-                self.apply(job, JobEvent::Start { resume_from }).await;
-                if let Some(job) = self.jobs.get(&job).cloned()
-                    && let Err(err) = self.store.save(job.clone()).await
+                if !self
+                    .apply_quietly(job, JobEvent::Start { resume_from })
+                    .await
                 {
-                    tracing::error!(id = %job.id, %err, "could not record a transfer's ownership");
+                    return;
                 }
+                // The size, the state and the ownership record in one commit, waited
+                // for because this is the write everything downstream depends on.
+                // Three separate ones is three fsyncs on the thread every other job's
+                // start queues behind, all writing the same row.
+                let Some(started) = self.jobs.get(&job).cloned() else {
+                    return;
+                };
+                if let Err(err) = self.store.save(started.clone()).await {
+                    tracing::error!(id = %job, %err, "could not record a transfer's ownership");
+                }
+                self.publish(&started).await;
             }
             Report::Checkpoint {
                 job,
