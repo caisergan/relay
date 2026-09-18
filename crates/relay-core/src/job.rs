@@ -183,6 +183,8 @@ pub enum QueueOp {
     },
     PauseAll,
     ResumeAll,
+    /// Call off everything still in the queue. Terminal jobs keep their outcome.
+    CancelAll,
     /// Move `job` immediately after `after`, or to the front when `after` is `None`.
     #[serde(rename_all = "camelCase")]
     Reorder {

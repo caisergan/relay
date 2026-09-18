@@ -756,6 +756,30 @@ impl Inner {
                 Ok(())
             }
             QueueOp::Reorder { job, after } => self.reorder(job, after).await,
+            QueueOp::CancelAll => {
+                let mut cancelled = Vec::new();
+                for id in self.ids() {
+                    // Stopped before it is called off, and without keeping the
+                    // partial: a cancellation leaves nothing behind.
+                    self.abort(id, false).await;
+                    if let Some(job) = self.jobs.get_mut(&id)
+                        && advance(job, JobEvent::Cancel)
+                    {
+                        cancelled.push(job.clone());
+                    }
+                }
+                // One transaction for the lot. `apply` waits for each terminal write
+                // on its own, which for a queue of thousands is thousands of fsyncs
+                // with everything else stopped behind them.
+                if let Err(err) = self.store.save_all(cancelled.clone()).await {
+                    tracing::error!(%err, "could not persist a bulk cancellation");
+                }
+                for job in &cancelled {
+                    self.publish(job).await;
+                }
+                self.stats().await;
+                Ok(())
+            }
             QueueOp::ClearCompleted => {
                 self.store.clear_completed().await?;
                 self.jobs.retain(|_, job| {
@@ -2195,6 +2219,56 @@ mod tests {
         assert!(
             h.bench.take().is_empty(),
             "three lanes are already spent; the cap came back up, it did not come off"
+        );
+    }
+
+    /// "Cancel all" reaches the queue behind the running transfers, not only the ones
+    /// holding a slot — those are the thousands a person is actually trying to stop.
+    #[tokio::test]
+    async fn cancelling_everything_empties_the_queue_and_keeps_what_finished() {
+        let h = harness(1, 8).await;
+        let batch = Uuid::new_v4();
+        let ids = h
+            .scheduler
+            .enqueue(
+                batch,
+                vec![
+                    spec(h.session, h.server, "a"),
+                    spec(h.session, h.server, "b"),
+                    spec(h.session, h.server, "c"),
+                ],
+            )
+            .await
+            .unwrap();
+        settle(&h).await;
+        finish(&h, ids[0], Ok(Bytes(10))).await;
+        settle(&h).await;
+
+        h.scheduler.control(QueueOp::CancelAll).await.unwrap();
+        settle(&h).await;
+
+        let states = states(&h).await;
+        assert!(
+            matches!(states[0].1, JobState::Done { .. }),
+            "a transfer that already landed is not un-done by a cancellation: {:?}",
+            states[0].1
+        );
+        for (name, state) in &states[1..] {
+            assert!(
+                matches!(state, JobState::Cancelled { .. }),
+                "{name} was left running: {state:?}"
+            );
+        }
+        assert_eq!(
+            h.bench
+                .aborted
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, keep)| *keep)
+                .count(),
+            0,
+            "a cancellation leaves no partial behind"
         );
     }
 

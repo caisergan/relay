@@ -235,6 +235,25 @@ impl QueueStore {
         .await
     }
 
+    /// Save many jobs in one transaction.
+    ///
+    /// For a bulk change — cancelling a queue of thousands — where saving each on its
+    /// own would be one commit, and one fsync, per job, with the scheduler stopped
+    /// behind every one of them.
+    pub async fn save_all(&self, jobs: Vec<Job>) -> Result<()> {
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        self.call(move |conn| {
+            let tx = conn.transaction().map_err(db)?;
+            for job in &jobs {
+                write_job(&tx, job)?;
+            }
+            tx.commit().map_err(db)
+        })
+        .await
+    }
+
     /// Record displayed progress only.
     ///
     /// Deliberately cheap and deliberately not durable-making: this moves the number

@@ -48,6 +48,10 @@ export function QueueDrawer() {
   const toggle = useUiStore((s) => s.toggleDrawer)
   const toast = useUiStore((s) => s.toast)
 
+  /** Whether "Cancel all" has been armed. It throws away everything queued, which on
+   * a folder transfer is thousands of files, so it asks once before it does. */
+  const [confirming, setConfirming] = useState(false)
+
   /** Which row is being dragged, and which it is currently hovering over. */
   const [dragging, setDragging] = useState<string | null>(null)
   const [over, setOver] = useState<string | null>(null)
@@ -125,6 +129,22 @@ export function QueueDrawer() {
             {tab === 'active' && !anyRunning && jobs.length > 0 && (
               <button className="drawer__act" onClick={() => run({ kind: 'resumeAll' })}>
                 Resume all
+              </button>
+            )}
+            {tab === 'active' && counts.active > 0 && (
+              <button
+                className={`drawer__act${confirming ? ' drawer__act--danger' : ''}`}
+                onClick={() => {
+                  if (!confirming) {
+                    setConfirming(true)
+                    return
+                  }
+                  setConfirming(false)
+                  run({ kind: 'cancelAll' })
+                }}
+                onBlur={() => setConfirming(false)}
+              >
+                {confirming ? `Cancel ${counts.active}?` : 'Cancel all'}
               </button>
             )}
             {tab === 'completed' && counts.completed > 0 && (

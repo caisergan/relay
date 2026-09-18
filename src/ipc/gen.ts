@@ -318,6 +318,8 @@ export type Proto = "sftp" | "ftps" | "ftp";
  *  `Unsupported` for the rest rather than pretending.
  */
 export type QueueOp = { kind: "cancel"; job: string } | { kind: "retry"; job: string } | { kind: "pause"; job: string } | { kind: "resume"; job: string } | { kind: "pauseAll" } | { kind: "resumeAll" } | 
+/**  Call off everything still in the queue. Terminal jobs keep their outcome. */
+{ kind: "cancelAll" } | 
 /**  Move `job` immediately after `after`, or to the front when `after` is `None`. */
 { kind: "reorder"; job: string; after: string | null } | { kind: "clearCompleted" };
 

@@ -256,6 +256,21 @@ describe('the queue drawer', () => {
     expect(host.querySelectorAll('.job__status--ok')).toHaveLength(1)
   })
 
+  it('asks once before cancelling everything, then sends it', () => {
+    const host = render([job(), job({ id: 'job-2', state: { kind: 'queued' } })])
+    const button = () =>
+      [...host.querySelectorAll<HTMLButtonElement>('.drawer__act')].find((b) =>
+        b.textContent.startsWith('Cancel'),
+      )
+
+    act(() => button()?.click())
+    expect(sent(), 'the first press only arms it').toEqual([])
+    expect(button()?.textContent).toBe('Cancel 2?')
+
+    act(() => button()?.click())
+    expect(sent()).toEqual([{ kind: 'cancelAll' }])
+  })
+
   /// Dropping a row onto another means "go before it", which is the row above's
   /// `after`. Dropping onto the first row means the front of the queue, which is `null`
   /// rather than the id of a row that does not exist.

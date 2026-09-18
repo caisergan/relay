@@ -1927,6 +1927,13 @@ body.dragging--ok * {
   color: var(--ink);
   border-color: var(--ink-faint);
 }
+/* An armed "Cancel all", waiting for the second press. It looks like what it is about
+   to do, so the confirming state is not just a different word in the same button. */
+.drawer__act--danger,
+.drawer__act--danger:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
 
 /* ---------------------------------------------------------------- conflict */
 
