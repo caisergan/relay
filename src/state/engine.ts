@@ -8,7 +8,7 @@ import { faultText } from '@/lib/errors'
 
 import { mayHaveChanged, noteArrival } from './arrivals'
 import { notePreviewState } from './previews'
-import { useQueueStore } from './queueStore'
+import { lastStateOf, useQueueStore } from './queueStore'
 import { useSessionsStore } from './sessionsStore'
 import { useUiStore } from './uiStore'
 
@@ -57,7 +57,7 @@ function applyEvent(event: EngineEvent): void {
     case 'jobUpdate': {
       // Likewise: the previous state is what distinguishes a transition from a repeat.
       // Progress arrives ten times a second, and a toast per tick would be a wall.
-      const before = queue.jobs[event.job.id]?.state.kind
+      const before = lastStateOf(event.job.id)
       queue.upsert(event.job)
       const now = event.job.state
       const name = event.job.remotePath.split('/').pop() ?? event.job.remotePath

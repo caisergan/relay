@@ -1,14 +1,19 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 
 import type { JobSnapshot, JobState, QueueOp } from '@/ipc/gen'
 import { emptyStats, useQueueStore } from '@/state/queueStore'
 import { useUiStore, type DrawerTab } from '@/state/uiStore'
+import { giveViewport } from '@/test/viewport'
 
 import { QueueDrawer } from './QueueDrawer'
 
 const control = vi.hoisted(() => vi.fn((_op: QueueOp) => Promise.resolve()))
+
+// The list is virtualised, and jsdom lays nothing out: without dimensions the
+// virtualiser decides no row is on screen and mounts none of them.
+beforeAll(giveViewport)
 
 vi.mock('@/ipc/commands', () => ({
   commands: { queueControl: control },
@@ -39,10 +44,7 @@ function job(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
 }
 
 function render(jobs: JobSnapshot[], tab: DrawerTab = 'active'): HTMLDivElement {
-  useQueueStore.setState({
-    jobs: Object.fromEntries(jobs.map((j) => [j.id, j])),
-    stats: emptyStats,
-  })
+  useQueueStore.getState().replaceAll(jobs, emptyStats)
   useUiStore.setState({ drawerOpen: true, drawerTab: tab })
   const host = document.createElement('div')
   document.body.appendChild(host)

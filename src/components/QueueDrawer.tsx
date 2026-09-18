@@ -1,4 +1,5 @@
-import { useRef, useState } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { useMemo, useRef, useState } from 'react'
 
 import { commands } from '@/ipc/commands'
 import type { JobSnapshot, PauseReason, QueueOp } from '@/ipc/gen'
@@ -24,6 +25,9 @@ const TABS: { id: DrawerTab; label: string }[] = [
   { id: 'failed', label: 'Failed' },
   { id: 'completed', label: 'Completed' },
 ]
+
+/** A row, before it has been measured. Every row in the drawer is the same height. */
+const ROW_HEIGHT = 58
 
 function bucket(job: JobSnapshot): DrawerTab {
   switch (job.state.kind) {
@@ -60,20 +64,37 @@ export function QueueDrawer() {
   // reorder raced a completion.
   const pending = useRef(false)
 
+  const listRef = useRef<HTMLDivElement>(null)
+
   const run = (op: QueueOp) => {
     commands.queueControl(op).catch((error: unknown) => toast('error', faultText(error)))
   }
 
-  const counts: Record<DrawerTab, number> = { active: 0, failed: 0, completed: 0 }
-  for (const job of jobs) counts[bucket(job)] += 1
-  const shown = jobs.filter((job) => bucket(job) === tab)
-
-  // Aggregate progress across everything still moving, weighted by bytes rather than
-  // by job count — one 4 GB image next to nine small files is not 90% done.
-  const moving = jobs.filter((job) => job.state.kind === 'transferring')
-  const total = moving.reduce((sum, job) => sum + (job.size ?? 0), 0)
-  const carried = moving.reduce((sum, job) => sum + job.transferred, 0)
-  const aggregate = total > 0 ? Math.min((carried / total) * 100, 100) : 0
+  // Five passes over the queue, so they are made once per change rather than once per
+  // subscriber: on a folder of thousands these are the render.
+  const { counts, shown, aggregate, anyRunning } = useMemo(() => {
+    const counts: Record<DrawerTab, number> = { active: 0, failed: 0, completed: 0 }
+    const shown: JobSnapshot[] = []
+    let total = 0
+    let carried = 0
+    for (const job of jobs) {
+      const where = bucket(job)
+      counts[where] += 1
+      if (where === tab) shown.push(job)
+      // Aggregate progress across everything still moving, weighted by bytes rather
+      // than by job count — one 4 GB image next to nine small files is not 90% done.
+      if (job.state.kind === 'transferring') {
+        total += job.size ?? 0
+        carried += job.transferred
+      }
+    }
+    return {
+      counts,
+      shown,
+      aggregate: total > 0 ? Math.min((carried / total) * 100, 100) : 0,
+      anyRunning: counts.active > 0,
+    }
+  }, [jobs, tab])
 
   const summary = [
     `${stats.active} active`,
@@ -81,7 +102,14 @@ export function QueueDrawer() {
     ...(stats.failed > 0 ? [`${stats.failed} failed`] : []),
   ].join(' · ')
 
-  const anyRunning = jobs.some((job) => bucket(job) === 'active')
+  // Only the rows the viewport can reach are drawn. A folder transfer puts thousands
+  // of jobs in here, and each one was a DOM subtree rebuilt on every progress tick.
+  const virtualizer = useVirtualizer({
+    count: shown.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 10,
+  })
 
   return (
     <div className={`drawer${open ? ' drawer--open' : ''}`}>
@@ -153,129 +181,144 @@ export function QueueDrawer() {
               </button>
             )}
           </div>
-          <div className="drawer__list">
+          <div className="drawer__list" ref={listRef}>
             {shown.length === 0 && (
               <div className="drawer__empty">
                 Nothing {tab === 'active' ? 'in flight' : tab}.
               </div>
             )}
-            {shown.map((job) => {
-              const percent =
-                job.size && job.size > 0 ? Math.min((job.transferred / job.size) * 100, 100) : 0
-              const done = job.state.kind === 'done'
-              const failed = job.state.kind === 'failed'
-              // A child of a folder job is drawn under it, so the drawer reads as the
-              // gesture that made it rather than as a flat list of unrelated files.
-              const nested = job.parent !== null
-              return (
-                <div
-                  className={`job${nested ? ' job--child' : ''}${
-                    over === job.id && dragging !== job.id ? ' job--over' : ''
-                  }${dragging === job.id ? ' job--dragging' : ''}`}
-                  key={job.id}
-                  // Only queued work can be reordered: dragging a finished job would
-                  // be moving something that has already happened.
-                  draggable={tab === 'active' && !nested}
-                  onDragStart={() => setDragging(job.id)}
-                  onDragEnd={() => {
-                    setDragging(null)
-                    setOver(null)
-                  }}
-                  onDragOver={(e) => {
-                    if (dragging === null || dragging === job.id) return
-                    e.preventDefault()
-                    setOver(job.id)
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault()
-                    const moved = dragging
-                    setDragging(null)
-                    setOver(null)
-                    if (moved === null || moved === job.id || pending.current) return
-                    pending.current = true
-                    // Dropped *onto* a row means "go before it", which is the row
-                    // above's `after`. Rust recomputes the position and the update
-                    // comes back through the ordinary event stream.
-                    const index = shown.findIndex((row) => row.id === job.id)
-                    const previous = shown[index - 1]
-                    commands
-                      .queueControl({
-                        kind: 'reorder',
-                        job: moved,
-                        after: previous ? previous.id : null,
-                      })
-                      .catch((error: unknown) => toast('error', faultText(error)))
-                      .finally(() => {
-                        pending.current = false
-                      })
-                  }}
-                >
-                  <span
-                    className={`job__dir${job.direction === 'down' ? ' job__dir--down' : ''}`}
+            <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+              {virtualizer.getVirtualItems().map((item) => {
+                const job = shown[item.index]
+                if (!job) return null
+                const percent =
+                  job.size && job.size > 0
+                    ? Math.min((job.transferred / job.size) * 100, 100)
+                    : 0
+                const done = job.state.kind === 'done'
+                const failed = job.state.kind === 'failed'
+                // A child of a folder job is drawn under it, so the drawer reads as the
+                // gesture that made it rather than as a flat list of unrelated files.
+                const nested = job.parent !== null
+                return (
+                  <div
+                    className={`job${nested ? ' job--child' : ''}${
+                      over === job.id && dragging !== job.id ? ' job--over' : ''
+                    }${dragging === job.id ? ' job--dragging' : ''}`}
+                    key={job.id}
+                    ref={virtualizer.measureElement}
+                    data-index={item.index}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      transform: `translateY(${item.start}px)`,
+                    }}
+                    // Only queued work can be reordered: dragging a finished job would
+                    // be moving something that has already happened.
+                    draggable={tab === 'active' && !nested}
+                    onDragStart={() => setDragging(job.id)}
+                    onDragEnd={() => {
+                      setDragging(null)
+                      setOver(null)
+                    }}
+                    onDragOver={(e) => {
+                      if (dragging === null || dragging === job.id) return
+                      e.preventDefault()
+                      setOver(job.id)
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault()
+                      const moved = dragging
+                      setDragging(null)
+                      setOver(null)
+                      if (moved === null || moved === job.id || pending.current) return
+                      pending.current = true
+                      // Dropped *onto* a row means "go before it", which is the row
+                      // above's `after`. Rust recomputes the position and the update
+                      // comes back through the ordinary event stream.
+                      const index = shown.findIndex((row) => row.id === job.id)
+                      const previous = shown[index - 1]
+                      commands
+                        .queueControl({
+                          kind: 'reorder',
+                          job: moved,
+                          after: previous ? previous.id : null,
+                        })
+                        .catch((error: unknown) => toast('error', faultText(error)))
+                        .finally(() => {
+                          pending.current = false
+                        })
+                    }}
                   >
-                    {job.direction === 'down' ? (
-                      <IconArrowDown size={13} />
-                    ) : (
-                      <IconArrowUp size={13} />
-                    )}
-                  </span>
-                  <div className="job__body">
-                    <div className="job__line">
-                      <span className="job__name" title={job.remotePath}>
-                        {job.remotePath.split('/').pop()}
-                      </span>
-                      <span className={`job__status job__status--${statusTone(job)}`}>
-                        {describe(job)}
-                      </span>
+                    <span
+                      className={`job__dir${job.direction === 'down' ? ' job__dir--down' : ''}`}
+                    >
+                      {job.direction === 'down' ? (
+                        <IconArrowDown size={13} />
+                      ) : (
+                        <IconArrowUp size={13} />
+                      )}
+                    </span>
+                    <div className="job__body">
+                      <div className="job__line">
+                        <span className="job__name" title={job.remotePath}>
+                          {job.remotePath.split('/').pop()}
+                        </span>
+                        <span className={`job__status job__status--${statusTone(job)}`}>
+                          {describe(job)}
+                        </span>
+                      </div>
+                      <div className="job__bar">
+                        <div
+                          className={`job__fill${done ? ' job__fill--done' : ''}${
+                            failed ? ' job__fill--failed' : ''
+                          }`}
+                          style={{ width: `${done ? 100 : percent}%` }}
+                        />
+                      </div>
                     </div>
-                    <div className="job__bar">
-                      <div
-                        className={`job__fill${done ? ' job__fill--done' : ''}${
-                          failed ? ' job__fill--failed' : ''
-                        }`}
-                        style={{ width: `${done ? 100 : percent}%` }}
-                      />
+                    <Facts job={job} jobs={jobs} />
+                    <div className="job__acts">
+                      {job.state.kind === 'transferring' && (
+                        <IconButton
+                          label="Pause this transfer"
+                          onClick={() => run({ kind: 'pause', job: job.id })}
+                        >
+                          <IconPause size={13} />
+                        </IconButton>
+                      )}
+                      {job.state.kind === 'paused' && (
+                        <IconButton
+                          label="Resume this transfer"
+                          onClick={() => run({ kind: 'resume', job: job.id })}
+                        >
+                          <IconPlay size={13} />
+                        </IconButton>
+                      )}
+                      {failed && (
+                        <IconButton
+                          label="Try this transfer again"
+                          onClick={() => run({ kind: 'retry', job: job.id })}
+                        >
+                          <IconRetry size={13} />
+                        </IconButton>
+                      )}
+                      {bucket(job) !== 'completed' && (
+                        <IconButton
+                          label="Cancel this transfer"
+                          danger
+                          onClick={() => run({ kind: 'cancel', job: job.id })}
+                        >
+                          <IconClose size={13} />
+                        </IconButton>
+                      )}
                     </div>
                   </div>
-                  <Facts job={job} jobs={jobs} />
-                  <div className="job__acts">
-                    {job.state.kind === 'transferring' && (
-                      <IconButton
-                        label="Pause this transfer"
-                        onClick={() => run({ kind: 'pause', job: job.id })}
-                      >
-                        <IconPause size={13} />
-                      </IconButton>
-                    )}
-                    {job.state.kind === 'paused' && (
-                      <IconButton
-                        label="Resume this transfer"
-                        onClick={() => run({ kind: 'resume', job: job.id })}
-                      >
-                        <IconPlay size={13} />
-                      </IconButton>
-                    )}
-                    {failed && (
-                      <IconButton
-                        label="Try this transfer again"
-                        onClick={() => run({ kind: 'retry', job: job.id })}
-                      >
-                        <IconRetry size={13} />
-                      </IconButton>
-                    )}
-                    {bucket(job) !== 'completed' && (
-                      <IconButton
-                        label="Cancel this transfer"
-                        danger
-                        onClick={() => run({ kind: 'cancel', job: job.id })}
-                      >
-                        <IconClose size={13} />
-                      </IconButton>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
+                )
+              })}
+            </div>
           </div>
         </div>
       )}
