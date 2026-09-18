@@ -76,6 +76,12 @@ pub enum EngineError {
     #[serde(rename_all = "camelCase")]
     Unsupported { operation: String },
 
+    /// The server refused another channel: it is already carrying as many as it
+    /// allows. Not a fault in the transfer — the queue lowers this session's lane
+    /// count and the job waits for one to free up.
+    #[error("the server will not open another connection on this session")]
+    LanesExhausted,
+
     #[error("protocol error: {message}")]
     #[serde(rename_all = "camelCase")]
     Protocol { message: String },

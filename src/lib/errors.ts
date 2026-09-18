@@ -55,6 +55,8 @@ function describe(error: EngineError): string {
       return error.message
     case 'unsupported':
       return `This server does not support ${error.operation}.`
+    case 'lanesExhausted':
+      return 'This server would not open another connection. Waiting for one to free up.'
   }
 }
 

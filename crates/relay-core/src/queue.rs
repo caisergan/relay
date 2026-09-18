@@ -239,7 +239,21 @@ impl Job {
     /// it *is* queued, it simply is not eligible yet, and inventing a state for the
     /// gap would mean the drawer had to explain the difference.
     pub fn is_eligible(&self, now: DateTime<Utc>) -> bool {
-        matches!(self.state, JobState::Queued) && self.retry_at.is_none_or(|at| at <= now)
+        matches!(self.state, JobState::Queued) && self.ready(now)
+    }
+
+    /// Parked for want of a lane, and due to ask for one again.
+    pub fn waiting_for_room(&self, now: DateTime<Utc>) -> bool {
+        matches!(
+            self.state,
+            JobState::Paused {
+                reason: PauseReason::Throttled
+            }
+        ) && self.ready(now)
+    }
+
+    fn ready(&self, now: DateTime<Utc>) -> bool {
+        self.retry_at.is_none_or(|at| at <= now)
     }
 
     /// Whether this job is holding one of the concurrency slider's slots.
@@ -334,6 +348,11 @@ pub enum JobEvent {
     Complete,
     Pause {
         reason: PauseReason,
+    },
+    /// Parked for want of capacity rather than for want of a decision. `retry_at`
+    /// holds it back when nothing running will free the capacity it is waiting for.
+    Throttle {
+        retry_at: Option<DateTime<Utc>>,
     },
     /// Back into the queue from `Paused`.
     Unpause,
@@ -449,6 +468,22 @@ pub fn advance(job: &mut Job, event: JobEvent) -> bool {
         ) => {
             job.speed_bps = None;
             job.state = S::Paused { reason };
+            true
+        }
+        (
+            S::Scanning
+            | S::Queued
+            | S::Preparing
+            | S::AwaitingPrompt { .. }
+            | S::Transferring
+            | S::Verifying,
+            JobEvent::Throttle { retry_at },
+        ) => {
+            job.speed_bps = None;
+            job.retry_at = retry_at;
+            job.state = S::Paused {
+                reason: PauseReason::Throttled,
+            };
             true
         }
         (S::Paused { .. }, JobEvent::Unpause) => {

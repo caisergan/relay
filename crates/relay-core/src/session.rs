@@ -52,6 +52,95 @@ pub const OP_DEADLINE: Duration = Duration::from_secs(60);
 /// The keepalive is one small round trip, so it gets a much tighter bound — this is
 /// the probe that decides the connection is gone.
 pub const KEEPALIVE_DEADLINE: Duration = Duration::from_secs(15);
+/// How long after a refusal the pool tries for one more lane.
+///
+/// A refusal is not always a limit. Our own lanes close asynchronously, so a burst of
+/// errors or a cancelled queue can leave channels shutting down on the server while
+/// replacements are being asked for, and the server counts both. Backing off for good
+/// on the first refusal would turn that squeeze into a permanently slower session.
+const LANE_PROBE: Duration = Duration::from_secs(30);
+
+/// The transfer channels a session holds, and what the server has said about how many
+/// of them it will carry.
+///
+/// `ceiling` is a belief, not a setting: it starts at what the build and the backend
+/// allow, falls to what the server actually granted when one is refused, and creeps
+/// back up one lane at a time while it is below `allowed`.
+#[derive(Default)]
+struct LanePool {
+    idle: Vec<(Box<dyn TransferLane>, Instant)>,
+    open: usize,
+    allowed: usize,
+    ceiling: usize,
+    narrowed: Option<Instant>,
+}
+
+impl LanePool {
+    /// Start over on a fresh connection: the old channels went with the old one, and
+    /// so did whatever it had learned about them.
+    fn reset(&mut self, allowed: usize) {
+        self.open = 0;
+        self.allowed = allowed;
+        self.ceiling = allowed;
+        self.narrowed = None;
+    }
+
+    fn take(&mut self) -> Option<Box<dyn TransferLane>> {
+        self.idle.pop().map(|(lane, _)| lane)
+    }
+
+    fn may_open(&self) -> bool {
+        self.open < self.ceiling
+            || (self.ceiling < self.allowed
+                && self.narrowed.is_some_and(|at| at.elapsed() >= LANE_PROBE))
+    }
+
+    /// A lane was opened. Returns the new ceiling when a probe has just raised it.
+    fn opened(&mut self) -> Option<usize> {
+        self.open += 1;
+        (self.open > self.ceiling).then(|| {
+            self.ceiling = self.open;
+            self.narrowed = Some(Instant::now());
+            self.ceiling
+        })
+    }
+
+    /// A lane was refused. Returns the new ceiling when it has just fallen.
+    fn refused(&mut self) -> Option<usize> {
+        let ceiling = self.open.max(1);
+        let fell = ceiling < self.ceiling;
+        self.ceiling = ceiling;
+        self.narrowed = Some(Instant::now());
+        fell.then_some(ceiling)
+    }
+
+    fn put(&mut self, lane: Box<dyn TransferLane>) {
+        self.idle.push((lane, Instant::now()));
+    }
+
+    fn dropped(&mut self) {
+        self.open = self.open.saturating_sub(1);
+    }
+
+    fn expired(&mut self) -> Vec<Box<dyn TransferLane>> {
+        let now = Instant::now();
+        let (keep, stale): (Vec<_>, Vec<_>) = std::mem::take(&mut self.idle)
+            .into_iter()
+            .partition(|(_, since)| now.duration_since(*since) < LANE_IDLE);
+        self.idle = keep;
+        self.open = self.open.saturating_sub(stale.len());
+        stale.into_iter().map(|(lane, _)| lane).collect()
+    }
+
+    fn drain(&mut self) -> Vec<Box<dyn TransferLane>> {
+        self.open = 0;
+        std::mem::take(&mut self.idle)
+            .into_iter()
+            .map(|(lane, _)| lane)
+            .collect()
+    }
+}
+
 /// How long `close` waits for the actor to finish before giving up on it.
 pub const CLOSE_GRACE: Duration = Duration::from_secs(5);
 /// The most transfer lanes this build will run on one session, whatever the backend
@@ -203,7 +292,7 @@ impl SessionHandle {
             rt: ctx.rt.clone(),
             queue: ctx.queue.clone(),
             lane_tx,
-            idle_lanes: Vec::new(),
+            lanes: LanePool::default(),
             running: HashMap::new(),
             shown: None,
         };
@@ -497,7 +586,7 @@ struct SessionActor {
     /// Lanes that finished a transfer and are waiting for the next one, with when each
     /// became idle. Bounded by the session's own cap, since a lane only ever comes back
     /// from a transfer that had one.
-    idle_lanes: Vec<(Box<dyn TransferLane>, Instant)>,
+    lanes: LanePool,
     /// What the session is running, so a stop reaches the right transfer without a
     /// second map living somewhere else that could disagree.
     running: HashMap<JobId, Running>,
@@ -589,7 +678,7 @@ impl SessionActor {
             // Pooled lanes are channels on the connection that just went. Dropping
             // them here means a reconnect opens fresh ones rather than handing a
             // transfer a channel to a server that is no longer there.
-            self.idle_lanes.clear();
+            self.lanes.drain();
             // The queue pauses this session's work rather than failing it: the jobs
             // are fine, the connection is not.
             self.queue.session_down(self.id).await;
@@ -637,7 +726,7 @@ impl SessionActor {
         }
 
         self.out.log(LogKind::Status, "Disconnecting.").await;
-        for (lane, _) in std::mem::take(&mut self.idle_lanes) {
+        for lane in self.lanes.drain() {
             lane.close().await;
         }
         self.backend.disconnect().await;
@@ -672,6 +761,7 @@ impl SessionActor {
         // restored tab was in. Home is the fallback below.
         let wanted = cfg.initial_remote_path.clone().filter(|path| *path != home);
         let max_lanes = MAX_SESSION_LANES.min(self.backend.capabilities().max_lanes.max(1));
+        self.lanes.reset(usize::from(max_lanes));
         self.out.log(LogKind::Response, "Authenticated.").await;
         self.out
             .emit(EngineEvent::SessionState {
@@ -743,7 +833,11 @@ impl SessionActor {
             tokio::select! {
                 biased;
                 _ = self.cancel.cancelled() => return Outcome::Closed,
-                _ = sweep.tick() => self.close_idle_lanes().await,
+                _ = sweep.tick() => {
+                    for lane in self.lanes.expired() {
+                        lane.close().await;
+                    }
+                }
                 Some(Internal::LaneFinished(job)) = internal_rx.recv() => {
                     self.running.remove(&job);
                 }
@@ -753,9 +847,26 @@ impl SessionActor {
                     ActorRequest::Lane { reply } => {
                         // A channel that is already open beats opening another one: on
                         // a queue of small files the handshake is most of the work.
-                        let lane = match self.idle_lanes.pop() {
-                            Some((lane, _)) => Ok(lane),
-                            None => self.backend.open_lane().await,
+                        let lane = match self.lanes.take() {
+                            Some(lane) => Ok(lane),
+                            // Asking past a ceiling the server has already stated
+                            // wastes a round trip to be told the same thing again.
+                            None if !self.lanes.may_open() => Err(EngineError::LanesExhausted),
+                            None => match self.backend.open_lane().await {
+                                Ok(lane) => {
+                                    if let Some(ceiling) = self.lanes.opened() {
+                                        self.report_lanes(ceiling, true).await;
+                                    }
+                                    Ok(lane)
+                                }
+                                Err(err @ EngineError::LanesExhausted) => {
+                                    if let Some(ceiling) = self.lanes.refused() {
+                                        self.report_lanes(ceiling, false).await;
+                                    }
+                                    Err(err)
+                                }
+                                Err(err) => Err(err),
+                            },
                         };
                         // A lane that cannot be opened is usually the connection
                         // rather than the lane. Noticing here rather than waiting for
@@ -773,8 +884,9 @@ impl SessionActor {
                         }
                     }
                     ActorRequest::ReturnLane { lane } => {
-                        self.idle_lanes.push((lane, Instant::now()));
+                        self.lanes.put(lane);
                     }
+                    ActorRequest::DropLane => self.lanes.dropped(),
                     ActorRequest::Exists { path, reply } => {
                         let taken = with_deadline(
                             self.backend.stat(&path), "stat", OP_DEADLINE, &self.cancel.clone(),
@@ -973,20 +1085,23 @@ impl SessionActor {
         }
     }
 
-    /// Close pooled lanes that have gone unused.
+    /// Tell the queue what this session will now carry.
     ///
-    /// A channel costs the server a file handle and a little memory whether or not
-    /// anyone is transferring, so a session that moved a hundred files an hour ago
-    /// should not still be holding four open connections for it.
-    async fn close_idle_lanes(&mut self) {
-        let now = Instant::now();
-        let (keep, stale): (Vec<_>, Vec<_>) = std::mem::take(&mut self.idle_lanes)
-            .into_iter()
-            .partition(|(_, since)| now.duration_since(*since) < LANE_IDLE);
-        self.idle_lanes = keep;
-        for (lane, _) in stale {
-            lane.close().await;
+    /// A refused channel is not a failed transfer, and treating it as one fails every
+    /// job that asks while the ones already running carry on. The number the server
+    /// granted becomes the queue's cap instead, in either direction: a ceiling that
+    /// only ever fell would make one squeeze permanent.
+    async fn report_lanes(&mut self, ceiling: usize, wider: bool) {
+        let ceiling = ceiling.min(usize::from(u8::MAX)) as u8;
+        if !wider {
+            self.out
+                .log(
+                    LogKind::Response,
+                    format!("The server would not open another channel; using {ceiling}."),
+                )
+                .await;
         }
+        self.queue.session_lanes(self.id, ceiling).await;
     }
 
     /// Stop every transfer this session is running.
@@ -1177,6 +1292,9 @@ enum ActorRequest {
     /// state is uncertain, and reusing it would carry that uncertainty into a transfer
     /// that has done nothing wrong.
     ReturnLane { lane: Box<dyn TransferLane> },
+    /// A lane a transfer threw away rather than handing back, so the actor's count of
+    /// what is open follows it and the next transfer may open a replacement.
+    DropLane,
     /// Whether a remote path is taken, for finding a free name for keep-both.
     Exists {
         path: String,
@@ -1221,7 +1339,7 @@ async fn run_transfer(task: TransferTask) {
     let mut lane = match &run.resume {
         Some(_) if can.random_access => match open_lane(&actor).await {
             Ok(lane) => Some(lane),
-            Err(err) => return finish(Err(err)).await,
+            Err(err) => return give_up(&report, job, &done, err).await,
         },
         _ => None,
     };
@@ -1298,7 +1416,7 @@ async fn run_transfer(task: TransferTask) {
         Some(lane) => lane,
         None => match open_lane(&actor).await {
             Ok(lane) => lane,
-            Err(err) => return finish(Err(err)).await,
+            Err(err) => return give_up(&report, job, &done, err).await,
         },
     };
 
@@ -1361,7 +1479,7 @@ async fn run_transfer(task: TransferTask) {
         Err(err) => {
             // After a cancellation or a protocol error the lane's state is uncertain,
             // so it is closed rather than offered to the next transfer.
-            lane.close().await;
+            close_lane(&actor, lane).await;
             report.send(finished(job, Err(err))).await;
             let _ = done.send(Internal::LaneFinished(job)).await;
             return;
@@ -1385,9 +1503,23 @@ async fn run_transfer(task: TransferTask) {
 
     match &outcome {
         Ok(_) => release_lane(&actor, lane).await,
-        Err(_) => lane.close().await,
+        Err(_) => close_lane(&actor, lane).await,
     }
     report.send(finished(job, outcome)).await;
+    let _ = done.send(Internal::LaneFinished(job)).await;
+}
+
+/// End a transfer that never got a lane.
+///
+/// A server that would not open another channel has said something about its own
+/// capacity, not about this job. Failing the job there fails every one that asks while
+/// the transfers already running carry on — thousands of red rows for a queue that is
+/// working. It goes back to the queue instead, and starts when a lane frees.
+async fn give_up(report: &Reporter, job: JobId, done: &mpsc::Sender<Internal>, err: EngineError) {
+    match err {
+        EngineError::LanesExhausted => report.send(Report::Throttled { job }).await,
+        err => report.send(finished(job, Err(err))).await,
+    }
     let _ = done.send(Internal::LaneFinished(job)).await;
 }
 
@@ -1398,6 +1530,16 @@ async fn release_lane(actor: &mpsc::Sender<ActorRequest>, lane: Box<dyn Transfer
     {
         lane.close().await;
     }
+}
+
+/// Throw a lane away, telling the actor so its count of open channels stays true.
+///
+/// A count that drifted high would have the session refusing to open lanes it is
+/// entitled to; one that drifted low would have it asking for lanes the server has
+/// already said no to.
+async fn close_lane(actor: &mpsc::Sender<ActorRequest>, lane: Box<dyn TransferLane>) {
+    lane.close().await;
+    let _ = actor.send(ActorRequest::DropLane).await;
 }
 
 struct Publishing<'a> {
@@ -1743,5 +1885,73 @@ fn refuse(cmd: SessionCmd) {
         // The queue is told the session is down and pauses the job itself, so a
         // dispatch that lands in the gap needs no answer of its own.
         SessionCmd::Transfer(_) | SessionCmd::Disconnect | SessionCmd::Reconnect => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool(allowed: usize) -> LanePool {
+        let mut pool = LanePool::default();
+        pool.reset(allowed);
+        pool
+    }
+
+    #[test]
+    fn a_refusal_becomes_the_ceiling() {
+        let mut pool = pool(8);
+        for _ in 0..3 {
+            pool.opened();
+        }
+        assert_eq!(
+            pool.refused(),
+            Some(3),
+            "what the server granted is its answer"
+        );
+        assert!(!pool.may_open(), "and it is not asked again straight away");
+    }
+
+    /// The case that made a squeeze permanent: a burst of closing lanes looks like a
+    /// limit, and a ceiling that only ever fell would keep the session slow for good.
+    #[test]
+    fn the_ceiling_creeps_back_after_the_cooldown() {
+        let mut pool = pool(8);
+        pool.opened();
+        pool.refused();
+        pool.dropped();
+        pool.opened();
+
+        assert!(!pool.may_open(), "one lane, one ceiling, no probe yet");
+        pool.narrowed = Some(Instant::now() - LANE_PROBE);
+        assert!(pool.may_open(), "after the cooldown it tries for one more");
+        assert_eq!(
+            pool.opened(),
+            Some(2),
+            "and keeps it when the server agrees"
+        );
+        assert!(
+            !pool.may_open(),
+            "one at a time, not straight back to eight"
+        );
+    }
+
+    /// A session that may not open a single lane can never transfer anything, so the
+    /// floor is one even when the very first attempt is refused.
+    #[test]
+    fn the_ceiling_never_reaches_zero() {
+        let mut pool = pool(4);
+        pool.refused();
+        assert!(pool.may_open());
+    }
+
+    #[test]
+    fn a_fresh_connection_forgets_what_the_old_one_learned() {
+        let mut pool = pool(8);
+        pool.opened();
+        pool.refused();
+        pool.reset(8);
+        assert_eq!(pool.ceiling, 8);
+        assert_eq!(pool.open, 0);
     }
 }

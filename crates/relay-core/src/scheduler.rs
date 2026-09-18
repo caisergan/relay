@@ -89,6 +89,11 @@ enum Msg {
     SessionClosed {
         session: SessionId,
     },
+    /// The session found out what the server will actually carry.
+    SessionLanes {
+        session: SessionId,
+        max_lanes: u8,
+    },
     Settings {
         concurrency: u8,
         default_conflict: Option<ConflictAction>,
@@ -170,6 +175,11 @@ pub enum Report {
     Scanned {
         job: JobId,
         children: u32,
+    },
+    /// The session could not give this job a lane. It goes back to the queue rather
+    /// than failing: nothing about the transfer was wrong.
+    Throttled {
+        job: JobId,
     },
     Progress {
         job: JobId,
@@ -400,6 +410,12 @@ impl Scheduler {
             .await;
     }
 
+    /// Lower what this session may be asked to run at once, after the server refused
+    /// a channel. Only ever downward: the scheduler never raises a slot on its own.
+    pub async fn session_lanes(&self, session: SessionId, max_lanes: u8) {
+        let _ = self.tx.send(Msg::SessionLanes { session, max_lanes }).await;
+    }
+
     pub async fn session_down(&self, session: SessionId) {
         let _ = self.tx.send(Msg::SessionDown { session }).await;
     }
@@ -455,6 +471,9 @@ struct Slot {
     /// a whole control connection per lane, which is why this is not a constant.
     max_lanes: u8,
     connected: bool,
+    /// Consecutive refusals with nothing of this session's running. Reset by the next
+    /// transfer that starts.
+    starved: u32,
 }
 
 struct Inner {
@@ -524,6 +543,7 @@ impl Inner {
                 self.sessions.insert(
                     session,
                     Slot {
+                        starved: 0,
                         max_lanes: max_lanes.max(1),
                         connected: true,
                     },
@@ -584,6 +604,13 @@ impl Inner {
                         self.store.save_detached(job.clone());
                         self.publish(&job).await;
                     }
+                }
+            }
+            Msg::SessionLanes { session, max_lanes } => {
+                // In either direction: the session is what knows, and a cap that only
+                // ever fell would make one squeeze permanent.
+                if let Some(slot) = self.sessions.get_mut(&session) {
+                    slot.max_lanes = max_lanes.max(1);
                 }
             }
             Msg::SessionDown { session } => {
@@ -848,6 +875,13 @@ impl Inner {
                     job.resume = Some(record);
                 }
                 self.rates.insert(job, Rate::new());
+                if let Some(slot) = self
+                    .jobs
+                    .get(&job)
+                    .and_then(|job| self.sessions.get_mut(&job.session))
+                {
+                    slot.starved = 0;
+                }
                 self.apply(job, JobEvent::Start { resume_from }).await;
                 if let Some(job) = self.jobs.get(&job).cloned()
                     && let Err(err) = self.store.save(job.clone()).await
@@ -911,6 +945,26 @@ impl Inner {
                         tracing::warn!(%job, %err, "the finalisation intent was not recorded");
                     }
                 }
+            }
+            Report::Throttled { job } => {
+                let Some(session) = self.jobs.get(&job).map(|job| job.session) else {
+                    return;
+                };
+                // Something else running on this session will hand its lane back, so
+                // the job is eligible the moment it does. Nothing running means nothing
+                // will, and asking again at round-trip speed is a spin nobody sees.
+                let busy = self
+                    .jobs
+                    .values()
+                    .any(|other| other.id != job && other.session == session && other.holds_slot());
+                let retry_at = (!busy).then(|| {
+                    let starved = self.sessions.get_mut(&session).map_or(1, |slot| {
+                        slot.starved += 1;
+                        slot.starved
+                    });
+                    Utc::now() + crate::queue::backoff(starved)
+                });
+                self.apply(job, JobEvent::Throttle { retry_at }).await;
             }
             Report::Progress { job, transferred } => {
                 let speed = self
@@ -1094,7 +1148,9 @@ impl Inner {
         let mut ready: Vec<(Order, JobId)> = self
             .jobs
             .values()
-            .filter(|job| job.kind == JobKind::File && job.is_eligible(now))
+            .filter(|job| {
+                job.kind == JobKind::File && (job.is_eligible(now) || job.waiting_for_room(now))
+            })
             .filter(|job| {
                 self.sessions
                     .get(&job.session)
@@ -1120,6 +1176,15 @@ impl Inner {
             if *running >= cap {
                 continue;
             }
+
+            // A job parked for want of a lane is queued again now that there is one.
+            // Read back afterwards, because `apply` needs `&mut self`.
+            if job.waiting_for_room(now) {
+                self.apply(id, JobEvent::Unpause).await;
+            }
+            let Some(job) = self.jobs.get(&id).filter(|job| job.is_eligible(now)) else {
+                continue;
+            };
 
             self.next_run += 1;
             let generation = self.next_run;
@@ -1193,13 +1258,7 @@ impl Inner {
         while running.len() > global {
             let Some((_, id)) = running.pop() else { break };
             self.abort(id, true).await;
-            self.apply(
-                id,
-                JobEvent::Pause {
-                    reason: PauseReason::Throttled,
-                },
-            )
-            .await;
+            self.apply(id, JobEvent::Throttle { retry_at: None }).await;
         }
         // Anything the *previous* limit throttled is eligible again when it rises.
         let throttled: Vec<JobId> = self
@@ -1933,6 +1992,183 @@ mod tests {
             "a cancellation leaves no partial behind"
         );
         assert!(matches!(states(&h).await[0].1, JobState::Cancelled { .. }));
+    }
+
+    /// The bug this was written for: a server that will not open another channel used
+    /// to fail every job that asked for one, so a folder of thousands filled the drawer
+    /// with red rows while the transfers already running finished perfectly.
+    #[tokio::test]
+    async fn a_refused_lane_parks_the_job_and_lowers_the_session() {
+        let h = harness(4, 4).await;
+        let batch = Uuid::new_v4();
+        let ids = h
+            .scheduler
+            .enqueue(
+                batch,
+                vec![
+                    spec(h.session, h.server, "a"),
+                    spec(h.session, h.server, "b"),
+                ],
+            )
+            .await
+            .unwrap();
+        settle(&h).await;
+        let runs = h.bench.take();
+        assert_eq!(runs.len(), 2, "both started with four lanes to spend");
+
+        // The session gets as far as asking for a second lane and is refused.
+        h.scheduler.session_lanes(h.session, 1).await;
+        runs[1].report.send(Report::Throttled { job: ids[1] }).await;
+        settle(&h).await;
+
+        let states = states(&h).await;
+        assert!(
+            matches!(
+                states[1].1,
+                JobState::Paused {
+                    reason: PauseReason::Throttled
+                }
+            ),
+            "a refused lane is not a failed transfer: {:?}",
+            states[1].1
+        );
+        assert!(
+            h.bench.take().is_empty(),
+            "and it is not dispatched again while the one lane is busy"
+        );
+
+        // The lane frees, and the parked job is the next thing to use it.
+        finish(&h, ids[0], Ok(Bytes(10))).await;
+        settle(&h).await;
+        let resumed = h.bench.take();
+        assert_eq!(
+            resumed.len(),
+            1,
+            "the job that was parked runs once there is room for it"
+        );
+        assert_eq!(resumed[0].job, ids[1]);
+    }
+
+    /// A session with nothing running has nothing that will hand a lane back, so a
+    /// refusal there used to be answered by dispatching the same job again at
+    /// round-trip speed — a spin with no error and no end to it.
+    #[tokio::test]
+    async fn a_starved_session_backs_off_instead_of_spinning() {
+        let h = harness(4, 4).await;
+        let batch = Uuid::new_v4();
+        let ids = h
+            .scheduler
+            .enqueue(batch, vec![spec(h.session, h.server, "a")])
+            .await
+            .unwrap();
+        settle(&h).await;
+        let runs = h.bench.take();
+
+        runs[0].report.send(Report::Throttled { job: ids[0] }).await;
+        settle(&h).await;
+
+        assert!(
+            h.bench.take().is_empty(),
+            "the only job on the session must not be dispatched straight back"
+        );
+        let waiting = states(&h).await;
+        assert!(
+            matches!(
+                waiting[0].1,
+                JobState::Paused {
+                    reason: PauseReason::Throttled
+                }
+            ),
+            "{:?}",
+            waiting[0].1
+        );
+        assert!(
+            h.scheduler
+                .snapshot()
+                .await
+                .into_iter()
+                .any(|job| job.retry_at.is_some()),
+            "and it waits a backoff before asking again"
+        );
+    }
+
+    /// The other half: a refusal while siblings are running is not starvation. They
+    /// will hand their lanes back, so the job is eligible the moment one does and
+    /// holding it behind a timer would idle a lane that is about to be free.
+    #[tokio::test]
+    async fn a_refusal_beside_running_work_waits_on_the_work_not_on_a_clock() {
+        let h = harness(4, 4).await;
+        let batch = Uuid::new_v4();
+        let ids = h
+            .scheduler
+            .enqueue(
+                batch,
+                vec![
+                    spec(h.session, h.server, "a"),
+                    spec(h.session, h.server, "b"),
+                ],
+            )
+            .await
+            .unwrap();
+        settle(&h).await;
+        let runs = h.bench.take();
+
+        runs[1].report.send(Report::Throttled { job: ids[1] }).await;
+        settle(&h).await;
+
+        assert!(
+            h.scheduler
+                .snapshot()
+                .await
+                .into_iter()
+                .all(|job| job.retry_at.is_none()),
+            "nothing to wait for but the lane the sibling is holding"
+        );
+        finish(&h, ids[0], Ok(Bytes(10))).await;
+        settle(&h).await;
+        assert_eq!(
+            h.bench.take().first().map(|run| run.job),
+            Some(ids[1]),
+            "and it takes the lane as soon as there is one"
+        );
+    }
+
+    /// A refusal is not always a limit — our own lanes close asynchronously, so a
+    /// burst can look like one. The session reports what it has learned in either
+    /// direction and the queue follows it up as well as down.
+    #[tokio::test]
+    async fn a_session_that_wins_a_lane_back_raises_the_queues_cap() {
+        let h = harness(8, 8).await;
+        let batch = Uuid::new_v4();
+        h.scheduler
+            .enqueue(
+                batch,
+                vec![
+                    spec(h.session, h.server, "a"),
+                    spec(h.session, h.server, "b"),
+                    spec(h.session, h.server, "c"),
+                ],
+            )
+            .await
+            .unwrap();
+        settle(&h).await;
+        assert_eq!(h.bench.take().len(), 3);
+
+        h.scheduler.session_lanes(h.session, 1).await;
+        settle(&h).await;
+        h.scheduler.session_lanes(h.session, 3).await;
+        settle(&h).await;
+
+        let batch = Uuid::new_v4();
+        h.scheduler
+            .enqueue(batch, vec![spec(h.session, h.server, "d")])
+            .await
+            .unwrap();
+        settle(&h).await;
+        assert!(
+            h.bench.take().is_empty(),
+            "three lanes are already spent; the cap came back up, it did not come off"
+        );
     }
 
     #[tokio::test]

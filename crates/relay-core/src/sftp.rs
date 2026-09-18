@@ -1310,6 +1310,11 @@ fn ssh_error(err: russh::Error) -> EngineError {
         | russh::Error::SendError
         | russh::Error::KeepaliveTimeout
         | russh::Error::InactivityTimeout => EngineError::network(err.to_string()),
+        // The only channels Relay opens are sftp sessions, so a refusal means one
+        // thing: the server is already carrying as many as it will. OpenSSH answers
+        // `MaxSessions` with `ConnectFailed`, which is otherwise indistinguishable
+        // from a protocol fault and used to fail the transfer that asked.
+        russh::Error::ChannelOpenFailure(_) => EngineError::LanesExhausted,
         other => EngineError::protocol(other.to_string()),
     }
 }

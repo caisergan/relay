@@ -88,7 +88,13 @@ export type EngineError =
  *  atomic finalisation of an upload. Phase 1 fails loudly here rather than
  *  claiming a guarantee it cannot keep.
  */
-{ kind: "unsupported"; operation: string } | { kind: "protocol"; message: string };
+{ kind: "unsupported"; operation: string } | 
+/**
+ *  The server refused another channel: it is already carrying as many as it
+ *  allows. Not a fault in the transfer — the queue lowers this session's lane
+ *  count and the job waits for one to free up.
+ */
+{ kind: "lanesExhausted" } | { kind: "protocol"; message: string };
 
 export type EngineEvent = 
 /**  A tab exists. Sent before any state for that session. */
