@@ -300,6 +300,10 @@ pub struct RunRequest {
     pub resume: Option<ResumeRecord>,
     /// How many other jobs in this batch a person's "apply to remaining" would cover.
     pub remaining: u32,
+    /// The source's size as the queue recorded it — usually from the listing a walk
+    /// was reading. Saves a round trip re-asking a question already answered; not
+    /// trusted, since the backend checks what arrived against the source at the end.
+    pub known_size: Option<Bytes>,
     pub report: Reporter,
 }
 
@@ -1213,6 +1217,7 @@ impl Inner {
                 // Only when all three are absent does anyone get asked.
                 conflict: job.chosen.or(job.conflict_policy).or(self.default_conflict),
                 remaining: self.remaining_in_batch(job.batch, id),
+                known_size: job.size,
                 report: Reporter {
                     tx: self.me.tx.clone(),
                     run: Some((id, generation)),

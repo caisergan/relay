@@ -1211,7 +1211,12 @@ impl SessionActor {
         // time together are the cheap half of deciding whether a partial may be
         // continued. Best effort: a server that withholds either is a state the drawer
         // and the resume check both already handle.
+        //
+        // Asked for only when the answer can be used ([`worth_stat`]). It runs on the
+        // actor, so every transfer's stat is a round trip every other transfer and
+        // every listing queues behind — on a folder of small files, the queue's pace.
         let source = match run.direction {
+            Direction::Down if !worth_stat(&run) => None,
             Direction::Down => with_deadline(
                 self.backend.stat(&run.remote_path),
                 "stat",
@@ -1224,7 +1229,7 @@ impl SessionActor {
             .map(|entry| remote_facts(&run.remote_path, &entry)),
             Direction::Up => local_facts(&run.local_path).await,
         };
-        let size = source.as_ref().map(|facts| facts.size);
+        let size = source.as_ref().map(|facts| facts.size).or(run.known_size);
 
         // A child of the session token, so closing the tab stops every transfer on it
         // without the engine having to enumerate them.
@@ -1722,6 +1727,23 @@ async fn resolve_conflict(ctx: &Conflict<'_>) -> std::result::Result<Decision, R
 
 /// What we know about the file the transfer reads from. No digest is computed here —
 /// nothing in this function authorises a resume, and a `None` says so out loud.
+/// Whether a download should stat its source before it starts.
+///
+/// Two things read those facts: the progress bar, which a listing has usually already
+/// supplied, and the resume check — but only out of a record, and only for a job
+/// carrying one. So a job with a record is always stat'd, because skipping it there
+/// refuses the resume rather than saving anything: the check cannot compare a record
+/// to a source it was never shown.
+///
+/// Otherwise a measured file is stat'd only above [`crate::protocol::CHECKPOINT_BYTES`],
+/// where the round trip is a rounding error and a resume is worth offering anyway.
+fn worth_stat(run: &RunRequest) -> bool {
+    run.resume.is_some()
+        || run
+            .known_size
+            .is_none_or(|size| size.get() >= crate::protocol::CHECKPOINT_BYTES)
+}
+
 fn source_facts(run: &RunRequest, size: Option<Bytes>) -> FileFacts {
     let path = match run.direction {
         Direction::Down => run.remote_path.clone(),

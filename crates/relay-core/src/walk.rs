@@ -27,10 +27,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{EngineError, Result};
 use crate::job::JobKind;
-use crate::model::{Direction, JobId, ServerId, SessionId};
+use crate::model::{Direction, FileKind, JobId, ServerId, SessionId};
 use crate::queue::{BatchId, JobSpec};
 use crate::scheduler::{Report, Scheduler};
 use crate::session::SessionHandle;
+use crate::wire::Bytes;
 
 /// How deep a recursive transfer will go.
 ///
@@ -148,7 +149,7 @@ async fn enumerate(walk: &Walk) -> Result<u32> {
             });
         }
 
-        for name in files {
+        for (name, size) in files {
             if queued >= MAX_CHILDREN {
                 walk.flush(&mut batch).await?;
                 return Err(EngineError::Unsupported {
@@ -157,7 +158,7 @@ async fn enumerate(walk: &Walk) -> Result<u32> {
                     ),
                 });
             }
-            batch.push(walk.spec(&dir.relative.join(&name)));
+            batch.push(walk.spec(&dir.relative.join(&name), size));
             queued += 1;
             if batch.len() >= CHUNK {
                 // Queued as they are found, so the first files are moving while the
@@ -174,18 +175,17 @@ async fn enumerate(walk: &Walk) -> Result<u32> {
 impl Walk {
     /// The directories and files directly inside `relative`, from whichever side is
     /// the source.
-    async fn read(&self, relative: &Path) -> Result<(Vec<String>, Vec<String>)> {
+    async fn read(&self, relative: &Path) -> Result<(Vec<String>, Vec<Child>)> {
         match self.direction {
             Direction::Down => {
                 // Quiet: a recursive transfer walks directories the user is not
                 // looking at, and announcing each one replaced the listing in their
                 // pane as the walk descended.
                 let entries = self.session.list_quiet(&self.remote_path(relative)).await?;
-                Ok(split(
-                    entries
-                        .into_iter()
-                        .map(|entry| (entry.name.clone(), entry.is_dir())),
-                ))
+                Ok(split(entries.into_iter().map(|entry| {
+                    let is_dir = entry.is_dir();
+                    (entry.name, is_dir, sized(entry.kind, entry.size))
+                })))
             }
             Direction::Up => {
                 let path = self.local_root.join(relative);
@@ -193,9 +193,9 @@ impl Walk {
                     .await
                     .map_err(|err| EngineError::protocol(format!("local walk failed: {err}")))??;
                 Ok(split(entries.into_iter().map(|entry| {
-                    let is_dir = entry.kind == crate::model::FileKind::Dir
-                        || entry.target_kind == Some(crate::model::FileKind::Dir);
-                    (entry.name, is_dir)
+                    let is_dir =
+                        entry.kind == FileKind::Dir || entry.target_kind == Some(FileKind::Dir);
+                    (entry.name, is_dir, sized(entry.kind, entry.size))
                 })))
             }
         }
@@ -225,7 +225,7 @@ impl Walk {
         }
     }
 
-    fn spec(&self, relative: &Path) -> JobSpec {
+    fn spec(&self, relative: &Path, size: Option<Bytes>) -> JobSpec {
         let remote_path = self.remote_path(relative);
         JobSpec {
             session: self.session_id,
@@ -235,7 +235,9 @@ impl Walk {
             item: format!("{:?}:{}", self.direction, remote_path),
             remote_path,
             local_path: self.local_root.join(relative),
-            size: None,
+            // Straight from the listing that found it, so the transfer need not ask
+            // the server how big a file it was just told the size of.
+            size,
             parent: Some(self.parent),
         }
     }
@@ -274,16 +276,32 @@ fn remote_path(root: &str, relative: &Path) -> String {
     path
 }
 
-fn split(entries: impl Iterator<Item = (String, bool)>) -> (Vec<String>, Vec<String>) {
+/// A file the walk found, and what the listing said it weighs.
+type Child = (String, Option<Bytes>);
+
+/// A listing's size, but only where it describes the bytes a transfer will move. A
+/// symlink's listed size is the length of the path it points at, and expecting that
+/// many bytes would stop the read a few dozen bytes in and call it complete.
+fn sized(kind: FileKind, size: Bytes) -> Option<Bytes> {
+    (kind == FileKind::File).then_some(size)
+}
+
+fn split(
+    entries: impl Iterator<Item = (String, bool, Option<Bytes>)>,
+) -> (Vec<String>, Vec<Child>) {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
-    for (name, is_dir) in entries {
+    for (name, is_dir, size) in entries {
         // `.` and `..` are not children, and following either is how a walk finds
         // itself again with the depth counter as its only way out.
         if name == "." || name == ".." {
             continue;
         }
-        if is_dir { &mut dirs } else { &mut files }.push(name);
+        if is_dir {
+            dirs.push(name);
+        } else {
+            files.push((name, size));
+        }
     }
     (dirs, files)
 }
@@ -317,10 +335,10 @@ mod tests {
     fn the_current_and_parent_directories_are_not_children() {
         let (dirs, files) = split(
             [
-                (".".to_string(), true),
-                ("..".to_string(), true),
-                ("real".to_string(), true),
-                ("file.txt".to_string(), false),
+                (".".to_string(), true, None),
+                ("..".to_string(), true, None),
+                ("real".to_string(), true, None),
+                ("file.txt".to_string(), false, Some(Bytes(91))),
             ]
             .into_iter(),
         );
@@ -329,6 +347,20 @@ mod tests {
             ["real"],
             "following `..` is how a walk finds itself again"
         );
-        assert_eq!(files, ["file.txt"]);
+        assert_eq!(files, [("file.txt".to_string(), Some(Bytes(91)))]);
+    }
+
+    /// The listing's size is the whole point of carrying it: a child queued from a
+    /// walk knows how big it is before anything asks the server a second time.
+    #[test]
+    fn a_files_listed_size_reaches_its_job() {
+        assert_eq!(sized(FileKind::File, Bytes(91)), Some(Bytes(91)));
+    }
+
+    /// A symlink's listed size is the length of the path it points at. Passing that on
+    /// as "expect this many bytes" would truncate the file it points at.
+    #[test]
+    fn a_symlinks_listed_size_is_not_its_files_size() {
+        assert_eq!(sized(FileKind::Symlink, Bytes(19)), None);
     }
 }
